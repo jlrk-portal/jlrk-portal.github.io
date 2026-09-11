@@ -181,6 +181,39 @@
     .login-card{ width:calc(100vw - 40px); max-width:340px; }
   }
   tfoot td{ border-top:2px solid var(--border); font-weight:700; background:var(--surface2); padding:11px 14px; font-size:13.5px; }
+
+  /* ---------- 재고 관리 ---------- */
+  .inv-toolbar{ display:flex; gap:8px; flex-wrap:wrap; }
+  .inv-search{ max-width:280px; margin-bottom:14px; padding:8px 12px; background:var(--surface2); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:13px; }
+  .inv-search:focus{ outline:none; border-color:var(--accent); }
+  .inv-table td, .inv-table th{ padding:9px 12px; }
+  .inv-table td.num, .inv-table th.num{ text-align:right; font-variant-numeric:tabular-nums; }
+  .inv-table td.ctr, .inv-table th.ctr{ text-align:center; }
+  .inv-grp > td{ background:var(--surface2); font-weight:600; cursor:pointer; }
+  .inv-grp .caret{ display:inline-block; width:10px; color:var(--text-dim); font-size:10px; transition:transform .15s; }
+  .inv-grp.collapsed .caret{ transform:rotate(-90deg); }
+  .inv-grp .cnt{ color:var(--text-dim); font-weight:400; font-size:11.5px; margin-left:6px; }
+  .inv-var > td:first-child{ padding-left:30px; color:var(--text-mid); }
+  .inv-var .vn{ color:var(--text); }
+  .inv-var.clickable:hover > td, .inv-row.clickable:hover > td{ background:var(--surface2); }
+  .inv-row .tag, .inv-var .tag{ font-size:10px; color:var(--text-dim); border:1px solid var(--border); border-radius:5px; padding:1px 5px; margin-left:6px; }
+  tr.inv-hidden{ display:none; }
+  .inv-bin{ width:120px; font-size:12px; padding:4px 7px; background:var(--surface2); border:1px solid transparent; border-bottom:1px dashed var(--border); border-radius:5px; color:var(--text); }
+  .inv-bin:focus{ outline:none; border-color:var(--accent); }
+  .inv-st{ display:inline-flex; align-items:center; gap:5px; font-size:11.5px; font-weight:600; padding:2px 8px; border-radius:20px; }
+  .inv-st i{ width:6px; height:6px; border-radius:50%; }
+  .inv-st.ok{ background:rgba(28,138,97,.13); color:var(--accent); } .inv-st.ok i{ background:var(--accent); }
+  .inv-st.warn{ background:rgba(176,116,15,.14); color:var(--accent-ar); } .inv-st.warn i{ background:var(--accent-ar); }
+  .inv-st.crit{ background:rgba(207,47,59,.12); color:var(--danger); } .inv-st.crit i{ background:var(--danger); }
+  .inv-txn{ display:grid; grid-template-columns:52px 44px 1fr; gap:3px 10px; align-items:center; padding:9px 2px; border-bottom:1px solid var(--border-soft); font-size:12.5px; }
+  .inv-txn:last-child{ border-bottom:0; }
+  .inv-txn .tt{ font-size:10px; font-weight:700; text-align:center; padding:2px 0; border-radius:5px; }
+  .inv-txn .tt.IN{ background:rgba(28,138,97,.13); color:var(--accent); }
+  .inv-txn .tt.OUT{ background:rgba(176,116,15,.14); color:var(--accent-ar); }
+  .inv-txn .tt.RETURN{ background:rgba(43,111,158,.14); color:#2f6f9e; }
+  .inv-txn .tt.MOVE{ background:var(--surface3); color:var(--text-mid); }
+  .inv-txn .tt.ADJ{ background:rgba(207,47,59,.12); color:var(--danger); }
+  .inv-txn .rt{ grid-column:3; color:var(--text-dim); }
 </style>
 </head>
 <body>
@@ -243,6 +276,7 @@
     <div class="nav-item" data-nav="rounds">회차 관리</div>
     <div class="nav-item" data-nav="retailers">리테일러 관리</div>
     <div class="nav-item" data-nav="accounts">계정 관리</div>
+    <div class="nav-item" data-nav="inventory">재고 관리</div>
     <div class="nav-item" data-nav="audit">활동 이력</div>
   </nav>
 
@@ -424,11 +458,108 @@
       <div id="retailerHistory" style="display:none; margin-top:20px;"></div>
     </section>
 
+    <!-- ===== 재고 관리 (마케팅 제작물/기프트) ===== -->
+    <section id="view-inventory" style="display:none;">
+      <div class="page-head">
+        <div>
+          <div class="page-title">재고 관리</div>
+          <div class="page-desc">
+            마케팅 제작물·기프트를 <b>품목군 + 브랜드</b> 단위로 관리합니다. 리테일러별 재고는 추적하지 않으며,
+            배부하면 창고에서 차감되고 회수한 수량만 다시 창고 재고로 반영됩니다. 창고는 PDC · 지하창고 2곳입니다.
+          </div>
+        </div>
+        <div class="inv-toolbar">
+          <button class="btn btn-ghost btn-sm" id="invNewItemBtn">+ 품목</button>
+          <button class="btn btn-sm" data-inv-txn="IN">+ 입고</button>
+          <button class="btn btn-sm" data-inv-txn="OUT">+ 배부</button>
+          <button class="btn btn-sm" data-inv-txn="RETURN">+ 회수</button>
+          <button class="btn btn-sm" data-inv-txn="MOVE">+ 이동</button>
+        </div>
+      </div>
+      <div id="invHost"></div>
+    </section>
+
   </main>
 </div>
 
 <!-- ============ 슬라이드 패널: 정산 유형 ============ -->
 <div id="overlay"></div>
+
+<!-- ============ 슬라이드 패널: 재고 - 품목 ============ -->
+<div id="invItemPanel" class="panel">
+  <div class="panel-head">
+    <div class="panel-title" id="invItemPanelTitle">새 품목</div>
+    <button class="panel-close" data-close-panel="invItemPanel">&times;</button>
+  </div>
+  <div class="panel-body">
+    <input type="hidden" id="ii_id">
+    <div class="row2">
+      <div class="field"><label>품목명 (품목군)</label><input id="ii_name" placeholder="예: 우산"></div>
+      <div class="field"><label>브랜드 (선택)</label><input id="ii_brand" placeholder="예: Defender · 없으면 비움"></div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>카테고리</label>
+        <select id="ii_category"><option>굿즈</option><option>인쇄물</option><option>상품권·쿠폰</option><option>기타</option></select>
+      </div>
+      <div class="field"><label>단위</label><input id="ii_unit" value="EA"></div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>재주문점</label><input id="ii_reorder" type="number" min="0" value="0"></div>
+      <div class="field"><label>보관위치 (자유 입력)</label><input id="ii_bin" placeholder="예: PDC A-03"></div>
+    </div>
+    <div class="check-row">
+      <input type="checkbox" id="ii_recoverable" checked>
+      <label for="ii_recoverable">회수 대상 (해제 시 소모품 — 미회수 집계 제외)</label>
+    </div>
+    <div class="hint" id="ii_err" style="color:var(--danger);"></div>
+  </div>
+  <div class="panel-foot">
+    <button class="btn" id="invItemSaveBtn">저장</button>
+    <button class="btn btn-ghost" id="invItemDeactivateBtn" style="display:none;">비활성화</button>
+    <button class="btn btn-ghost" data-close-panel="invItemPanel">취소</button>
+  </div>
+</div>
+
+<!-- ============ 슬라이드 패널: 재고 - 거래 ============ -->
+<div id="invTxnPanel" class="panel">
+  <div class="panel-head">
+    <div class="panel-title" id="invTxnPanelTitle">거래 등록</div>
+    <button class="panel-close" data-close-panel="invTxnPanel">&times;</button>
+  </div>
+  <div class="panel-body">
+    <div class="field"><label>유형</label>
+      <select id="it_type">
+        <option value="IN">입고</option>
+        <option value="OUT">배부</option>
+        <option value="RETURN">회수</option>
+        <option value="MOVE">창고 이동</option>
+        <option value="ADJ">실사 조정</option>
+      </select>
+    </div>
+    <div class="field"><label>품목</label><select id="it_item"></select></div>
+    <div class="row2">
+      <div class="field"><label>수량</label><input id="it_qty" type="number" placeholder="예: 200"></div>
+      <div class="field"><label>일자</label><input id="it_date" type="date"></div>
+    </div>
+    <div class="row2">
+      <div class="field"><label id="it_wh_label">창고</label>
+        <select id="it_wh"><option value="PDC">PDC</option><option value="BASEMENT">지하창고</option></select>
+      </div>
+      <div class="field" id="it_to_wrap" style="display:none;"><label>도착 창고</label>
+        <select id="it_to"><option value="PDC">PDC</option><option value="BASEMENT">지하창고</option></select>
+      </div>
+    </div>
+    <div class="field" id="it_cp_wrap"><label id="it_cp_label">배부 대상</label><input id="it_cp" placeholder="예: 아주네트웍스 · 이벤트 · 고객 지급"></div>
+    <div class="field"><label>사유</label><input id="it_reason" placeholder="예: 워크숍 배부 · 제작 입고 · 실사 차이"></div>
+    <div class="field"><label>메모 (선택)</label><textarea id="it_memo" rows="2"></textarea></div>
+    <div class="hint" id="it_err" style="color:var(--danger);"></div>
+  </div>
+  <div class="panel-foot">
+    <button class="btn" id="invTxnSaveBtn">등록</button>
+    <button class="btn btn-ghost" data-close-panel="invTxnPanel">취소</button>
+  </div>
+</div>
+
 <div id="typePanel" class="panel">
   <div class="panel-head">
     <div class="panel-title" id="typePanelTitle">새 정산 유형</div>
@@ -1322,6 +1453,7 @@ function switchView(name){
   if(name === 'dashboard') loadDashboard();
   if(name === 'audit') loadAudit();
   if(name === 'accounts') loadAccounts();
+  if(name === 'inventory') loadInventory();
   if(name === 'retailer') loadRetailerClaims();
 }
 document.querySelectorAll('#adminNav .nav-item[data-nav]').forEach(item => {
@@ -6732,6 +6864,343 @@ async function notifyOnRetailerSubmit(roundId){
       myRetailer?.code || '', submitted||0, total||0);
   } catch(e){ console.warn('[알림] 제출 알림 실패', e); }
 }
+
+/* ================================================================
+   재고 관리 — 마케팅 제작물/기프트 (관리자 전용)
+   테이블: mkt_items, mkt_txns (migrations/025_inventory.sql)
+   ================================================================ */
+let invItems = [], invTxns = [], invCollapsed = {};
+const INV_WH = { PDC:'PDC', BASEMENT:'지하창고' };
+const invFmt = n => Number(n||0).toLocaleString('ko-KR');
+
+async function loadInventory(){
+  const host = document.getElementById('invHost');
+  host.innerHTML = '<div class="hint">불러오는 중...</div>';
+  const [ir, tr] = await Promise.all([
+    sb.from('mkt_items').select('*').eq('is_active', true),
+    sb.from('mkt_txns').select('*').order('txn_date', { ascending:false }).order('created_at', { ascending:false }),
+  ]);
+  if(ir.error || tr.error){
+    const msg = (ir.error || tr.error).message;
+    host.innerHTML = '<div class="empty-state">재고 데이터를 불러오지 못했습니다.<br>'
+      + '<span class="hint">' + msg + '</span><br>'
+      + '<span class="hint">migrations/025_inventory.sql 적용이 필요할 수 있습니다.</span></div>';
+    return;
+  }
+  invItems = (ir.data || []).sort((a, b) =>
+    (a.name || '').localeCompare(b.name || '', 'ko') || (a.brand || '').localeCompare(b.brand || '', 'ko'));
+  invTxns = tr.data || [];
+  renderInventory();
+}
+
+function invStock(itemId){
+  const s = { PDC:0, BASEMENT:0 };
+  invTxns.filter(t => t.item_id === itemId).forEach(t => {
+    const q = Number(t.qty) || 0;
+    if(t.txn_type === 'IN' || t.txn_type === 'RETURN' || t.txn_type === 'ADJ') s[t.warehouse] += q;
+    else if(t.txn_type === 'OUT') s[t.warehouse] -= q;
+    else if(t.txn_type === 'MOVE'){ s[t.warehouse] -= q; if(t.to_warehouse) s[t.to_warehouse] += q; }
+  });
+  return s;
+}
+function invDist(itemId){
+  let out = 0, ret = 0;
+  invTxns.filter(t => t.item_id === itemId).forEach(t => {
+    if(t.txn_type === 'OUT') out += Number(t.qty) || 0;
+    if(t.txn_type === 'RETURN') ret += Number(t.qty) || 0;
+  });
+  return { out, ret };
+}
+function invStatus(total, rp){
+  if(total <= 0) return ['crit', '소진'];
+  if(rp > 0 && total < rp) return ['warn', '부족 (' + invFmt(rp) + ')'];
+  return ['ok', '정상'];
+}
+
+function renderInventory(){
+  const host = document.getElementById('invHost');
+  if(invItems.length === 0){
+    host.innerHTML = '<div class="empty-state">등록된 품목이 없습니다. [+ 품목]으로 첫 품목을 만들고, [+ 입고]로 재고를 잡으세요.</div>';
+    return;
+  }
+  let totPDC = 0, totBase = 0, totUnrec = 0, unrecItems = 0, reorderCnt = 0, shortCnt = 0, outCnt = 0;
+  invItems.forEach(it => {
+    const s = invStock(it.id); totPDC += s.PDC; totBase += s.BASEMENT;
+    const total = s.PDC + s.BASEMENT;
+    if(it.recoverable){ const d = invDist(it.id); const u = d.out - d.ret; if(u > 0){ totUnrec += u; unrecItems++; } }
+    const lv = invStatus(total, it.reorder_point)[0];
+    if(lv === 'crit'){ reorderCnt++; outCnt++; }
+    else if(lv === 'warn'){ reorderCnt++; shortCnt++; }
+  });
+  const ym = new Date().toISOString().slice(0, 7);
+  let monthOut = 0, monthRet = 0;
+  invTxns.forEach(t => {
+    if((t.txn_date || '').slice(0, 7) === ym){
+      if(t.txn_type === 'OUT') monthOut += Number(t.qty) || 0;
+      if(t.txn_type === 'RETURN') monthRet += Number(t.qty) || 0;
+    }
+  });
+  const groupCnt = new Set(invItems.map(i => i.name)).size;
+  const u = t => '<span style="font-size:13px;color:var(--text-dim);"> ' + t + '</span>';
+  const stat = (num, label, color) =>
+    '<div class="stat-card"><div class="stat-num"' + (color ? ' style="color:' + color + ';"' : '') + '>' + num + '</div><div class="stat-label">' + label + '</div></div>';
+
+  let html = '<div class="stat-row">'
+    + stat(groupCnt + u('군'), '등록 품목 · 변형 ' + invItems.length)
+    + stat(invFmt(totPDC + totBase) + u('EA'), '총 창고재고 · PDC ' + invFmt(totPDC) + ' / 지하 ' + invFmt(totBase))
+    + stat(invFmt(totUnrec) + u('EA'), '미회수 (배부 잔량) · ' + unrecItems + '품목', totUnrec ? 'var(--accent-ar)' : null)
+    + stat(invFmt(monthOut) + ' / ' + invFmt(monthRet), '당월 배부 / 회수')
+    + stat(reorderCnt, '재주문 필요 · 부족 ' + shortCnt + ' · 소진 ' + outCnt, reorderCnt ? 'var(--accent-ar)' : null)
+    + '</div>';
+
+  html += '<input class="inv-search" id="invSearch" placeholder="품목·브랜드 검색">';
+  html += '<table class="inv-table"><thead><tr>'
+    + '<th>품목 · 브랜드</th><th>카테고리</th>'
+    + '<th class="num">PDC</th><th class="num">지하창고</th><th class="num">합계</th>'
+    + '<th>보관위치</th>'
+    + '<th class="num">배부</th><th class="num">회수</th><th class="num">미회수</th>'
+    + '<th class="ctr">상태</th>'
+    + '</tr></thead><tbody id="invBody"></tbody></table>';
+  html += '<div class="row2" style="margin-top:18px; grid-template-columns:1.1fr 1fr; align-items:start;">'
+    + '<div class="info-card"><div class="section-label" style="margin-top:0;">재주문 검토 대상</div><div id="invAlerts"></div></div>'
+    + '<div class="info-card"><div class="section-label" style="margin-top:0;">최근 입출고 내역</div><div id="invRecent"></div></div>'
+    + '</div>';
+
+  host.innerHTML = html;
+  renderInvBody('');
+  renderInvAlerts();
+  renderInvRecent();
+  document.getElementById('invSearch').addEventListener('input', e => renderInvBody(e.target.value.trim()));
+}
+
+function invRowCells(it){
+  const s = invStock(it.id); const total = s.PDC + s.BASEMENT;
+  const d = invDist(it.id);
+  const st = invStatus(total, it.reorder_point);
+  const dim = v => v ? invFmt(v) : '<span style="color:var(--text-dim)">0</span>';
+  const bin = (it.bin_location || '').replace(/"/g, '&quot;');
+  return '<td class="muted">' + (it.category || '') + '</td>'
+    + '<td class="num">' + dim(s.PDC) + '</td>'
+    + '<td class="num">' + dim(s.BASEMENT) + '</td>'
+    + '<td class="num" style="font-weight:600;">' + invFmt(total) + '</td>'
+    + '<td><input class="inv-bin" data-id="' + it.id + '" value="' + bin + '" placeholder="위치 입력"></td>'
+    + '<td class="num">' + invFmt(d.out) + '</td>'
+    + '<td class="num">' + (it.recoverable ? invFmt(d.ret) : '<span style="color:var(--text-dim)">—</span>') + '</td>'
+    + '<td class="num">' + (it.recoverable ? invFmt(d.out - d.ret) : '<span style="color:var(--text-dim)">—</span>') + '</td>'
+    + '<td class="ctr"><span class="inv-st ' + st[0] + '"><i></i>' + st[1] + '</span></td>';
+}
+
+function renderInvBody(q){
+  const tb = document.getElementById('invBody');
+  const groups = {};
+  invItems.forEach(it => { (groups[it.name] = groups[it.name] || []).push(it); });
+  const ql = (q || '').toLowerCase();
+  let rows = '';
+  Object.keys(groups).sort((a, b) => a.localeCompare(b, 'ko')).forEach(name => {
+    let list = groups[name];
+    if(ql) list = list.filter(it => (it.name + ' ' + (it.brand || '')).toLowerCase().includes(ql));
+    if(list.length === 0) return;
+    if(list.length === 1 && !list[0].brand){
+      const it = list[0];
+      rows += '<tr class="inv-row clickable" data-edit="' + it.id + '"><td>' + name
+        + (it.recoverable ? '' : '<span class="tag">소모품</span>') + '</td>' + invRowCells(it) + '</tr>';
+      return;
+    }
+    const key = 'g_' + name;
+    const isCol = !!invCollapsed[key];
+    let pP = 0, pB = 0, so = 0, sr = 0, worst = 'ok';
+    list.forEach(it => {
+      const s = invStock(it.id); pP += s.PDC; pB += s.BASEMENT;
+      const d = invDist(it.id); so += d.out; if(it.recoverable) sr += d.ret;
+      const lv = invStatus(s.PDC + s.BASEMENT, it.reorder_point)[0];
+      if(lv === 'crit') worst = 'crit'; else if(lv === 'warn' && worst !== 'crit') worst = 'warn';
+    });
+    const gLbl = worst === 'crit' ? '일부 소진' : worst === 'warn' ? '일부 부족' : '정상';
+    rows += '<tr class="inv-grp' + (isCol ? ' collapsed' : '') + '" data-g="' + key + '">'
+      + '<td><span class="caret">&#9662;</span>' + name + '<span class="cnt">· ' + list.length + ' 브랜드</span></td>'
+      + '<td class="muted">' + (list[0].category || '') + '</td>'
+      + '<td class="num" style="color:var(--text-mid)">' + invFmt(pP) + '</td>'
+      + '<td class="num" style="color:var(--text-mid)">' + invFmt(pB) + '</td>'
+      + '<td class="num" style="font-weight:600;">' + invFmt(pP + pB) + '</td>'
+      + '<td></td>'
+      + '<td class="num" style="color:var(--text-mid)">' + invFmt(so) + '</td>'
+      + '<td class="num" style="color:var(--text-mid)">' + invFmt(sr) + '</td>'
+      + '<td class="num" style="color:var(--text-mid)">' + invFmt(so - sr) + '</td>'
+      + '<td class="ctr"><span class="inv-st ' + worst + '"><i></i>' + gLbl + '</span></td>'
+      + '</tr>';
+    list.forEach(it => {
+      rows += '<tr class="inv-var clickable' + (isCol ? ' inv-hidden' : '') + '" data-p="' + key + '" data-edit="' + it.id + '">'
+        + '<td><span class="vn">' + (it.brand || '(기본)') + '</span>'
+        + (it.recoverable ? '' : '<span class="tag">소모품</span>') + '</td>' + invRowCells(it) + '</tr>';
+    });
+  });
+  tb.innerHTML = rows || '<tr><td colspan="10" class="muted" style="text-align:center;padding:20px;">검색 결과 없음</td></tr>';
+
+  tb.querySelectorAll('.inv-bin').forEach(inp => {
+    inp.addEventListener('click', e => e.stopPropagation());
+    inp.addEventListener('change', async () => {
+      const { error } = await sb.from('mkt_items').update({ bin_location: inp.value.trim() || null }).eq('id', inp.dataset.id);
+      if(error){ alert('보관위치 저장 실패: ' + error.message); return; }
+      const it = invItems.find(x => x.id === inp.dataset.id); if(it) it.bin_location = inp.value.trim() || null;
+    });
+  });
+  tb.querySelectorAll('.inv-grp').forEach(gr => {
+    gr.addEventListener('click', () => {
+      const key = gr.dataset.g; invCollapsed[key] = !invCollapsed[key];
+      gr.classList.toggle('collapsed', invCollapsed[key]);
+      tb.querySelectorAll('.inv-var[data-p="' + key + '"]').forEach(r => r.classList.toggle('inv-hidden', invCollapsed[key]));
+    });
+  });
+  tb.querySelectorAll('[data-edit]').forEach(row => {
+    row.addEventListener('click', e => { if(e.target.closest('.inv-bin')) return; openInvItem(row.dataset.edit); });
+  });
+}
+
+function renderInvAlerts(){
+  const el = document.getElementById('invAlerts');
+  const arr = [];
+  invItems.forEach(it => {
+    const s = invStock(it.id); const total = s.PDC + s.BASEMENT;
+    const st = invStatus(total, it.reorder_point);
+    if(st[0] !== 'ok') arr.push({ it, total, lv: st[0] });
+  });
+  arr.sort((a, b) => (a.lv === 'crit' ? 0 : 1) - (b.lv === 'crit' ? 0 : 1));
+  if(arr.length === 0){ el.innerHTML = '<div class="hint">재주문점 이하 품목이 없습니다.</div>'; return; }
+  el.innerHTML = arr.map(a => {
+    const nm = a.it.name + (a.it.brand ? ' · ' + a.it.brand : '');
+    const pct = a.it.reorder_point ? Math.min(100, Math.round(a.total / a.it.reorder_point * 100)) : 0;
+    const col = a.lv === 'crit' ? 'var(--danger)' : 'var(--accent-ar)';
+    return '<div style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--border-soft);">'
+      + '<span class="inv-st ' + a.lv + '" style="min-width:52px;justify-content:center;"><i></i>' + (a.lv === 'crit' ? '소진' : '부족') + '</span>'
+      + '<span style="flex:1;font-weight:500;">' + nm + '</span>'
+      + '<span style="width:66px;height:6px;border-radius:3px;background:var(--surface3);overflow:hidden;"><span style="display:block;height:100%;width:' + pct + '%;background:' + col + ';"></span></span>'
+      + '<span class="muted" style="font-size:12px;"><b style="color:var(--text)">' + invFmt(a.total) + '</b> / ' + invFmt(a.it.reorder_point) + '</span>'
+      + '</div>';
+  }).join('');
+}
+
+function renderInvRecent(){
+  const el = document.getElementById('invRecent');
+  const TL = { IN:'입고', OUT:'배부', RETURN:'회수', MOVE:'이동', ADJ:'조정' };
+  const rows = invTxns.slice(0, 14).map(t => {
+    const it = invItems.find(x => x.id === t.item_id);
+    const nm = it ? (it.name + (it.brand ? ' · ' + it.brand : '')) : '(삭제된 품목)';
+    let route = INV_WH[t.warehouse] || t.warehouse || '';
+    if(t.txn_type === 'MOVE') route += ' → ' + (INV_WH[t.to_warehouse] || t.to_warehouse || '');
+    else if(t.txn_type === 'OUT' && t.counterpart) route += ' → ' + t.counterpart;
+    else if(t.txn_type === 'RETURN' && t.counterpart) route = t.counterpart + ' → ' + route;
+    const extra = [t.reason, t.memo].filter(Boolean).join(' · ');
+    const sign = t.txn_type === 'OUT' ? '−' : (t.txn_type === 'ADJ' ? '' : '+');
+    return '<div class="inv-txn">'
+      + '<span class="muted">' + (t.txn_date || '').slice(5) + '</span>'
+      + '<span class="tt ' + t.txn_type + '">' + (TL[t.txn_type] || t.txn_type) + '</span>'
+      + '<span>' + nm + ' <span class="muted">' + sign + invFmt(Math.abs(t.qty)) + '</span></span>'
+      + '<span class="rt">' + route + (extra ? ' · ' + extra : '') + '</span>'
+      + '</div>';
+  }).join('');
+  el.innerHTML = rows || '<div class="hint">아직 입출고 내역이 없습니다.</div>';
+}
+
+function openInvItem(id){
+  const it = id ? invItems.find(x => x.id === id) : null;
+  document.getElementById('invItemPanelTitle').textContent = it ? '품목 수정' : '새 품목';
+  document.getElementById('ii_id').value = it ? it.id : '';
+  document.getElementById('ii_name').value = it ? it.name : '';
+  document.getElementById('ii_brand').value = it ? (it.brand || '') : '';
+  document.getElementById('ii_category').value = it ? (it.category || '기타') : '굿즈';
+  document.getElementById('ii_unit').value = it ? (it.unit || 'EA') : 'EA';
+  document.getElementById('ii_reorder').value = it ? (it.reorder_point || 0) : 0;
+  document.getElementById('ii_bin').value = it ? (it.bin_location || '') : '';
+  document.getElementById('ii_recoverable').checked = it ? !!it.recoverable : true;
+  document.getElementById('ii_err').textContent = '';
+  const deact = document.getElementById('invItemDeactivateBtn');
+  deact.style.display = it ? '' : 'none';
+  deact.onclick = it ? (() => deactivateInvItem(it.id)) : null;
+  openPanel('invItemPanel');
+}
+async function saveInvItem(){
+  const err = document.getElementById('ii_err');
+  const id = document.getElementById('ii_id').value;
+  const name = document.getElementById('ii_name').value.trim();
+  if(!name){ err.textContent = '품목명을 입력하세요.'; return; }
+  const row = {
+    name: name,
+    brand: document.getElementById('ii_brand').value.trim() || null,
+    category: document.getElementById('ii_category').value,
+    unit: document.getElementById('ii_unit').value.trim() || 'EA',
+    reorder_point: parseInt(document.getElementById('ii_reorder').value, 10) || 0,
+    bin_location: document.getElementById('ii_bin').value.trim() || null,
+    recoverable: document.getElementById('ii_recoverable').checked,
+  };
+  const res = id ? await sb.from('mkt_items').update(row).eq('id', id) : await sb.from('mkt_items').insert(row);
+  if(res.error){ err.textContent = '저장 실패: ' + res.error.message; return; }
+  try{ logAudit(id ? 'INV_ITEM_UPDATE' : 'INV_ITEM_CREATE', 'MKT_ITEM', id || null, row); }catch(e){}
+  closePanel('invItemPanel');
+  loadInventory();
+}
+async function deactivateInvItem(id){
+  if(!confirm('이 품목을 비활성화할까요? 재고·이력은 유지되며 목록에서만 숨겨집니다.')) return;
+  const { error } = await sb.from('mkt_items').update({ is_active:false }).eq('id', id);
+  if(error){ alert('실패: ' + error.message); return; }
+  closePanel('invItemPanel'); loadInventory();
+}
+
+function openInvTxn(type){
+  document.getElementById('it_type').value = type || 'IN';
+  document.getElementById('it_item').innerHTML = invItems
+    .map(it => '<option value="' + it.id + '">' + it.name + (it.brand ? ' · ' + it.brand : '') + '</option>').join('');
+  document.getElementById('it_qty').value = '';
+  document.getElementById('it_date').value = new Date().toISOString().slice(0, 10);
+  document.getElementById('it_wh').value = 'PDC';
+  document.getElementById('it_to').value = 'BASEMENT';
+  document.getElementById('it_cp').value = '';
+  document.getElementById('it_reason').value = '';
+  document.getElementById('it_memo').value = '';
+  document.getElementById('it_err').textContent = '';
+  syncInvTxnPanel();
+  openPanel('invTxnPanel');
+}
+function syncInvTxnPanel(){
+  const t = document.getElementById('it_type').value;
+  const titles = { IN:'입고 등록', OUT:'배부 등록', RETURN:'회수 등록', MOVE:'창고 이동', ADJ:'실사 조정' };
+  document.getElementById('invTxnPanelTitle').textContent = titles[t] || '거래 등록';
+  document.getElementById('it_to_wrap').style.display = t === 'MOVE' ? '' : 'none';
+  document.getElementById('it_wh_label').textContent = t === 'MOVE' ? '출발 창고' : (t === 'RETURN' ? '입고 창고' : '창고');
+  document.getElementById('it_cp_wrap').style.display = (t === 'OUT' || t === 'RETURN') ? '' : 'none';
+  document.getElementById('it_cp_label').textContent = t === 'OUT' ? '배부 대상' : '회수 출처';
+  document.getElementById('it_qty').placeholder = t === 'ADJ' ? '증감 (음수 가능, 예: -4)' : '예: 200';
+}
+async function saveInvTxn(){
+  const err = document.getElementById('it_err');
+  const t = document.getElementById('it_type').value;
+  const item_id = document.getElementById('it_item').value;
+  const qty = parseFloat(document.getElementById('it_qty').value);
+  if(!item_id){ err.textContent = '품목을 선택하세요.'; return; }
+  if(isNaN(qty) || qty === 0){ err.textContent = '수량을 입력하세요.'; return; }
+  if(t !== 'ADJ' && qty < 0){ err.textContent = '수량은 0보다 커야 합니다. (음수 증감은 [실사 조정])'; return; }
+  const wh = document.getElementById('it_wh').value;
+  const to = document.getElementById('it_to').value;
+  if(t === 'MOVE' && wh === to){ err.textContent = '출발 창고와 도착 창고가 같습니다.'; return; }
+  const row = {
+    item_id: item_id, txn_type: t, qty: qty, warehouse: wh,
+    to_warehouse: t === 'MOVE' ? to : null,
+    txn_date: document.getElementById('it_date').value || new Date().toISOString().slice(0, 10),
+    counterpart: document.getElementById('it_cp').value.trim() || null,
+    reason: document.getElementById('it_reason').value.trim() || null,
+    memo: document.getElementById('it_memo').value.trim() || null,
+  };
+  const { data, error } = await sb.from('mkt_txns').insert(row).select('id').single();
+  if(error){ err.textContent = '등록 실패: ' + error.message; return; }
+  try{ logAudit('INV_TXN', 'MKT_TXN', (data && data.id) || null, row); }catch(e){}
+  closePanel('invTxnPanel');
+  loadInventory();
+}
+
+document.getElementById('invNewItemBtn').addEventListener('click', () => openInvItem(null));
+document.getElementById('invItemSaveBtn').addEventListener('click', saveInvItem);
+document.getElementById('invTxnSaveBtn').addEventListener('click', saveInvTxn);
+document.getElementById('it_type').addEventListener('change', syncInvTxnPanel);
+document.querySelectorAll('[data-inv-txn]').forEach(b => b.addEventListener('click', () => openInvTxn(b.dataset.invTxn)));
 
 checkSession();
 </script>

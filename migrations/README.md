@@ -29,6 +29,7 @@
 | `022_rls_anon_lockdown.sql` | **보안 보완** — `settlement_types`·`rounds` 익명 SELECT 차단, `rounds` 는 참여 리테일러사만(`has_claim_in_round`). 2026-09-04 점검 대응 |
 | `023_settlement_types_accounting_lockdown.sql` | **보안 보완** — `settlement_types` 직접 SELECT 관리자 전용, 리테일러는 안전 컬럼만 담긴 `settlement_types_public` 뷰로. GL코드·배분비율·단가 등 회계 컬럼 차단. index.html 리테일러 3경로 동시 변경 |
 | `024_retailer_notify_emails.sql` | 리테일러 8개사 알림 수신 이메일(`retailers.email`) 등록. 담당자 2명(AJ·KCC)은 쉼표 구분. index.html `splitEmails()` 로 다중 수신 |
+| `025_inventory.sql` | 마케팅 제작물/기프트 재고 관리 — `mkt_items`(품목군+브랜드) / `mkt_txns`(입고·배부·회수·이동·조정) / `mkt_stock` 뷰. 창고 PDC·지하 2곳, 보관위치 자유입력. RLS 관리자 전용(`is_admin()`). index.html `재고 관리` 메뉴 |
 
 ## ⚠️ 알아둘 것
 
