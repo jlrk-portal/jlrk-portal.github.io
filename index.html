@@ -543,12 +543,13 @@
     </div>
     <div class="row2">
       <div class="field"><label id="it_wh_label">창고</label>
-        <select id="it_wh"><option value="PDC">PDC</option><option value="BASEMENT">지하창고</option></select>
+        <select id="it_wh"><option value="PDC">PDC</option><option value="BASEMENT">지하창고</option><option value="HQ">본사</option></select>
       </div>
       <div class="field" id="it_to_wrap" style="display:none;"><label>도착 창고</label>
-        <select id="it_to"><option value="PDC">PDC</option><option value="BASEMENT">지하창고</option></select>
+        <select id="it_to"><option value="PDC">PDC</option><option value="BASEMENT">지하창고</option><option value="HQ">본사</option></select>
       </div>
     </div>
+    <div class="hint" id="it_avail" style="margin:-6px 0 12px;"></div>
     <div class="field" id="it_cp_wrap"><label id="it_cp_label">배부 대상</label><input id="it_cp" placeholder="예: 아주네트웍스 · 이벤트 · 고객 지급"></div>
     <div class="field"><label>사유</label><input id="it_reason" placeholder="예: 워크숍 배부 · 제작 입고 · 실사 차이"></div>
     <div class="field"><label>메모 (선택)</label><textarea id="it_memo" rows="2"></textarea></div>
@@ -6870,7 +6871,7 @@ async function notifyOnRetailerSubmit(roundId){
    테이블: mkt_items, mkt_txns (migrations/025_inventory.sql)
    ================================================================ */
 let invItems = [], invTxns = [], invCollapsed = {};
-const INV_WH = { PDC:'PDC', BASEMENT:'지하창고' };
+const INV_WH = { PDC:'PDC', BASEMENT:'지하창고', HQ:'본사' };
 const invFmt = n => Number(n||0).toLocaleString('ko-KR');
 
 async function loadInventory(){
@@ -6894,7 +6895,7 @@ async function loadInventory(){
 }
 
 function invStock(itemId){
-  const s = { PDC:0, BASEMENT:0 };
+  const s = { PDC:0, BASEMENT:0, HQ:0 };
   invTxns.filter(t => t.item_id === itemId).forEach(t => {
     const q = Number(t.qty) || 0;
     if(t.txn_type === 'IN' || t.txn_type === 'RETURN' || t.txn_type === 'ADJ') s[t.warehouse] += q;
@@ -6923,10 +6924,10 @@ function renderInventory(){
     host.innerHTML = '<div class="empty-state">등록된 품목이 없습니다. [+ 품목]으로 첫 품목을 만들고, [+ 입고]로 재고를 잡으세요.</div>';
     return;
   }
-  let totPDC = 0, totBase = 0, totUnrec = 0, unrecItems = 0, reorderCnt = 0, shortCnt = 0, outCnt = 0;
+  let totPDC = 0, totBase = 0, totHQ = 0, totUnrec = 0, unrecItems = 0, reorderCnt = 0, shortCnt = 0, outCnt = 0;
   invItems.forEach(it => {
-    const s = invStock(it.id); totPDC += s.PDC; totBase += s.BASEMENT;
-    const total = s.PDC + s.BASEMENT;
+    const s = invStock(it.id); totPDC += s.PDC; totBase += s.BASEMENT; totHQ += s.HQ;
+    const total = s.PDC + s.BASEMENT + s.HQ;
     if(it.recoverable){ const d = invDist(it.id); const u = d.out - d.ret; if(u > 0){ totUnrec += u; unrecItems++; } }
     const lv = invStatus(total, it.reorder_point)[0];
     if(lv === 'crit'){ reorderCnt++; outCnt++; }
@@ -6947,20 +6948,20 @@ function renderInventory(){
 
   let html = '<div class="stat-row">'
     + stat(groupCnt + u('군'), '등록 품목 · 변형 ' + invItems.length)
-    + stat(invFmt(totPDC + totBase) + u('EA'), '총 창고재고 · PDC ' + invFmt(totPDC) + ' / 지하 ' + invFmt(totBase))
+    + stat(invFmt(totPDC + totBase + totHQ) + u('EA'), '총 창고재고 · PDC ' + invFmt(totPDC) + ' / 지하 ' + invFmt(totBase) + ' / 본사 ' + invFmt(totHQ))
     + stat(invFmt(totUnrec) + u('EA'), '미회수 (배부 잔량) · ' + unrecItems + '품목', totUnrec ? 'var(--accent-ar)' : null)
     + stat(invFmt(monthOut) + ' / ' + invFmt(monthRet), '당월 배부 / 회수')
     + stat(reorderCnt, '재주문 필요 · 부족 ' + shortCnt + ' · 소진 ' + outCnt, reorderCnt ? 'var(--accent-ar)' : null)
     + '</div>';
 
   html += '<input class="inv-search" id="invSearch" placeholder="품목·브랜드 검색">';
-  html += '<table class="inv-table"><thead><tr>'
+  html += '<div style="overflow-x:auto;"><table class="inv-table"><thead><tr>'
     + '<th>품목 · 브랜드</th><th>카테고리</th>'
-    + '<th class="num">PDC</th><th class="num">지하창고</th><th class="num">합계</th>'
+    + '<th class="num">PDC</th><th class="num">지하창고</th><th class="num">본사</th><th class="num">합계</th>'
     + '<th>보관위치</th>'
     + '<th class="num">배부</th><th class="num">회수</th><th class="num">미회수</th>'
     + '<th class="ctr">상태</th>'
-    + '</tr></thead><tbody id="invBody"></tbody></table>';
+    + '</tr></thead><tbody id="invBody"></tbody></table></div>';
   html += '<div class="row2" style="margin-top:18px; grid-template-columns:1.1fr 1fr; align-items:start;">'
     + '<div class="info-card"><div class="section-label" style="margin-top:0;">재주문 검토 대상</div><div id="invAlerts"></div></div>'
     + '<div class="info-card"><div class="section-label" style="margin-top:0;">최근 입출고 내역</div><div id="invRecent"></div></div>'
@@ -6974,14 +6975,16 @@ function renderInventory(){
 }
 
 function invRowCells(it){
-  const s = invStock(it.id); const total = s.PDC + s.BASEMENT;
+  const s = invStock(it.id); const total = s.PDC + s.BASEMENT + s.HQ;
   const d = invDist(it.id);
   const st = invStatus(total, it.reorder_point);
   const dim = v => v ? invFmt(v) : '<span style="color:var(--text-dim)">0</span>';
+  const neg = v => v < 0 ? ' style="color:var(--danger);font-weight:600;"' : '';
   const bin = (it.bin_location || '').replace(/"/g, '&quot;');
   return '<td class="muted">' + (it.category || '') + '</td>'
-    + '<td class="num">' + dim(s.PDC) + '</td>'
-    + '<td class="num">' + dim(s.BASEMENT) + '</td>'
+    + '<td class="num"' + neg(s.PDC) + '>' + dim(s.PDC) + '</td>'
+    + '<td class="num"' + neg(s.BASEMENT) + '>' + dim(s.BASEMENT) + '</td>'
+    + '<td class="num"' + neg(s.HQ) + '>' + dim(s.HQ) + '</td>'
     + '<td class="num" style="font-weight:600;">' + invFmt(total) + '</td>'
     + '<td><input class="inv-bin" data-id="' + it.id + '" value="' + bin + '" placeholder="위치 입력"></td>'
     + '<td class="num">' + invFmt(d.out) + '</td>'
@@ -7008,11 +7011,11 @@ function renderInvBody(q){
     }
     const key = 'g_' + name;
     const isCol = !!invCollapsed[key];
-    let pP = 0, pB = 0, so = 0, sr = 0, worst = 'ok';
+    let pP = 0, pB = 0, pH = 0, so = 0, sr = 0, worst = 'ok';
     list.forEach(it => {
-      const s = invStock(it.id); pP += s.PDC; pB += s.BASEMENT;
+      const s = invStock(it.id); pP += s.PDC; pB += s.BASEMENT; pH += s.HQ;
       const d = invDist(it.id); so += d.out; if(it.recoverable) sr += d.ret;
-      const lv = invStatus(s.PDC + s.BASEMENT, it.reorder_point)[0];
+      const lv = invStatus(s.PDC + s.BASEMENT + s.HQ, it.reorder_point)[0];
       if(lv === 'crit') worst = 'crit'; else if(lv === 'warn' && worst !== 'crit') worst = 'warn';
     });
     const gLbl = worst === 'crit' ? '일부 소진' : worst === 'warn' ? '일부 부족' : '정상';
@@ -7021,7 +7024,8 @@ function renderInvBody(q){
       + '<td class="muted">' + (list[0].category || '') + '</td>'
       + '<td class="num" style="color:var(--text-mid)">' + invFmt(pP) + '</td>'
       + '<td class="num" style="color:var(--text-mid)">' + invFmt(pB) + '</td>'
-      + '<td class="num" style="font-weight:600;">' + invFmt(pP + pB) + '</td>'
+      + '<td class="num" style="color:var(--text-mid)">' + invFmt(pH) + '</td>'
+      + '<td class="num" style="font-weight:600;">' + invFmt(pP + pB + pH) + '</td>'
       + '<td></td>'
       + '<td class="num" style="color:var(--text-mid)">' + invFmt(so) + '</td>'
       + '<td class="num" style="color:var(--text-mid)">' + invFmt(sr) + '</td>'
@@ -7060,7 +7064,7 @@ function renderInvAlerts(){
   const el = document.getElementById('invAlerts');
   const arr = [];
   invItems.forEach(it => {
-    const s = invStock(it.id); const total = s.PDC + s.BASEMENT;
+    const s = invStock(it.id); const total = s.PDC + s.BASEMENT + s.HQ;
     const st = invStatus(total, it.reorder_point);
     if(st[0] !== 'ok') arr.push({ it, total, lv: st[0] });
   });
@@ -7169,6 +7173,25 @@ function syncInvTxnPanel(){
   document.getElementById('it_cp_wrap').style.display = (t === 'OUT' || t === 'RETURN') ? '' : 'none';
   document.getElementById('it_cp_label').textContent = t === 'OUT' ? '배부 대상' : '회수 출처';
   document.getElementById('it_qty').placeholder = t === 'ADJ' ? '증감 (음수 가능, 예: -4)' : '예: 200';
+  updateInvAvail();
+}
+function updateInvAvail(){
+  const el = document.getElementById('it_avail');
+  const t = document.getElementById('it_type').value;
+  const item_id = document.getElementById('it_item').value;
+  const wh = document.getElementById('it_wh').value;
+  if(!item_id || !el){ if(el) el.innerHTML = ''; return; }
+  const it = invItems.find(x => x.id === item_id);
+  const s = invStock(item_id);
+  const unit = (it && it.unit) || 'EA';
+  if(t === 'OUT' || t === 'MOVE' || t === 'ADJ'){
+    const short = (s[wh] || 0) <= 0;
+    el.innerHTML = '현재 <b>' + INV_WH[wh] + '</b> 재고: <b style="' + (short ? 'color:var(--danger);' : '') + '">'
+      + invFmt(s[wh] || 0) + ' ' + unit + '</b>'
+      + (t === 'MOVE' ? '  ·  도착 후 ' + INV_WH[document.getElementById('it_to').value] + ': ' + invFmt(s[document.getElementById('it_to').value] || 0) + ' ' + unit : '');
+  } else {
+    el.innerHTML = '입고 전 <b>' + INV_WH[wh] + '</b> 재고: ' + invFmt(s[wh] || 0) + ' ' + unit;
+  }
 }
 async function saveInvTxn(){
   const err = document.getElementById('it_err');
@@ -7181,6 +7204,13 @@ async function saveInvTxn(){
   const wh = document.getElementById('it_wh').value;
   const to = document.getElementById('it_to').value;
   if(t === 'MOVE' && wh === to){ err.textContent = '출발 창고와 도착 창고가 같습니다.'; return; }
+  const avail = (invStock(item_id)[wh]) || 0;
+  if((t === 'OUT' || t === 'MOVE') && qty > avail){
+    err.textContent = '현재 ' + INV_WH[wh] + ' 재고(' + invFmt(avail) + ')보다 많습니다. 창고를 확인하세요.'; return;
+  }
+  if(t === 'ADJ' && (avail + qty) < 0){
+    err.textContent = '조정 후 ' + INV_WH[wh] + ' 재고가 음수(' + invFmt(avail + qty) + ')가 됩니다.'; return;
+  }
   const row = {
     item_id: item_id, txn_type: t, qty: qty, warehouse: wh,
     to_warehouse: t === 'MOVE' ? to : null,
@@ -7200,6 +7230,9 @@ document.getElementById('invNewItemBtn').addEventListener('click', () => openInv
 document.getElementById('invItemSaveBtn').addEventListener('click', saveInvItem);
 document.getElementById('invTxnSaveBtn').addEventListener('click', saveInvTxn);
 document.getElementById('it_type').addEventListener('change', syncInvTxnPanel);
+document.getElementById('it_item').addEventListener('change', updateInvAvail);
+document.getElementById('it_wh').addEventListener('change', updateInvAvail);
+document.getElementById('it_to').addEventListener('change', updateInvAvail);
 document.querySelectorAll('[data-inv-txn]').forEach(b => b.addEventListener('click', () => openInvTxn(b.dataset.invTxn)));
 
 checkSession();
