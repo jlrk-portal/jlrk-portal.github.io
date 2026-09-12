@@ -3768,7 +3768,7 @@ async function loadDashboard(){
      (또는 code). 매칭 안 되는 수동분은 "(수동 업로드)" 가상 유형으로 묶는다.
    - 리테일러 계정은 RLS 로 자기 법인 행만 내려오므로 별도 필터가 필요 없다.
    ================================================================ */
-const HIST_ITEM_LABEL = { SP:'판매대금', SAVEBACK:'사용반환금', SUPPORT:'JLRK 기여금', INCENTIVE:'인센티브' };
+const HIST_ITEM_LABEL = { SP:'판매대금', SAVEBACK:'사용반환금', SUPPORT:'JLRK 기여금', INCENTIVE:'인센티브', PND:'픽업&딜리버리' };
 let histData = null;
 const histView = { typeKey:'', fy:'', expanded:null };
 
@@ -3782,7 +3782,7 @@ async function loadHistory(){
     const typeTbl = isAdmin ? 'settlement_types' : 'settlement_types_public';
     const [tRes, lRes, rRes, cRes, retRes, wsRes] = await Promise.all([
       sb.from(typeTbl).select('id, code, name, direction, source_config'),
-      sb.from('legacy_settlements').select('type_code, item, direction, fiscal_year, quarter, period_key, period_label, data_month, settle_month, retailer_code, workshop_label, amount, amount_jg, amount_lr'),
+      sb.from('legacy_settlements').select('type_code, item, direction, fiscal_year, quarter, period_key, period_label, data_month, settle_month, retailer_code, workshop_label, amount, amount_jg, amount_lr, detail'),
       sb.from('rounds').select('id, type_id, period_label, status, fiscal_year, created_at'),
       sb.from('claims').select('round_id, retailer_id, workshop_id, approved_amount, claimed_amount, status'),
       sb.from('retailers').select('id, code, name'),
@@ -3845,7 +3845,7 @@ function histPeriods(entry){
     g.byItem[r.item] = (g.byItem[r.item] || 0) + amt;
     g.total += amt;
     g.detail.push({ who:`${r.retailer_code} · ${r.workshop_label}`, item:r.item, amount:amt,
-                    jg:Number(r.amount_jg||0), lr:Number(r.amount_lr||0) });
+                    jg:Number(r.amount_jg||0), lr:Number(r.amount_lr||0), extra:r.detail||{} });
   });
   byPeriod.forEach(g => rows.push(g));
 
@@ -3990,24 +3990,35 @@ function buildHistoryDetail(p){
   const multi = items.length > 1;
   const byWho = new Map();
   p.detail.forEach(d => {
-    if(!byWho.has(d.who)) byWho.set(d.who, { who:d.who, sums:{}, total:0, status:d.status });
+    if(!byWho.has(d.who)) byWho.set(d.who, { who:d.who, sums:{}, total:0, status:d.status, ex:{} });
     const e = byWho.get(d.who);
     e.sums[d.item] = (e.sums[d.item] || 0) + d.amount;
     e.total += d.amount;
+    Object.entries(d.extra || {}).forEach(([k,v]) => {
+      if(typeof v === 'number') e.ex[k] = (e.ex[k] || 0) + v;
+    });
   });
   const list = Array.from(byWho.values()).sort((a,b) => a.who.localeCompare(b.who,'ko'));
+  // 원본에 있는 부가 수치만 열로 추가 (유형마다 다름)
+  const EX = [['trips','정산건수','n'], ['claim_cnt','청구건수','n'],
+              ['normal','일반 사용','w'], ['onecare','One Care','w']];
+  const exCols = EX.filter(([k]) => list.some(e => e.ex[k] !== undefined));
   const tbl = document.createElement('table');
   tbl.style.margin = '4px 0';
   tbl.innerHTML = `<thead><tr>
       <th>지점</th>
       ${multi ? items.map(i => `<th style="text-align:right;">${HIST_ITEM_LABEL[i]||i}</th>`).join('') : ''}
       <th style="text-align:right;">${multi ? '합계' : '금액'}</th>
+      ${exCols.map(([,lab]) => `<th style="text-align:right;">${lab}</th>`).join('')}
       ${p.kind === 'portal' ? '<th>상태</th>' : ''}
     </tr></thead><tbody>${
     list.map(e => `<tr>
       <td class="muted">${e.who}</td>
       ${multi ? items.map(i => `<td style="text-align:right;">${e.sums[i] ? fmtWon(e.sums[i]) : '—'}</td>`).join('') : ''}
       <td style="text-align:right;">${e.total ? fmtWon(e.total) : '—'}</td>
+      ${exCols.map(([k,,t]) => `<td style="text-align:right;" class="muted">${
+          e.ex[k] === undefined ? '—'
+          : (t === 'w' ? fmtWon(e.ex[k]) : Math.round(e.ex[k]).toLocaleString('ko-KR'))}</td>`).join('')}
       ${p.kind === 'portal' ? `<td class="muted">${CLAIM_STATUS_LABEL[e.status]||e.status||''}</td>` : ''}
     </tr>`).join('')}</tbody>`;
   return tbl;
