@@ -32,7 +32,7 @@
 | `025_inventory.sql` | 마케팅 제작물/기프트 재고 관리 — `mkt_items`(품목군+브랜드) / `mkt_txns`(입고·배부·회수·이동·조정) / `mkt_stock` 뷰. 창고 PDC·지하 2곳, 보관위치 자유입력. RLS 관리자 전용(`is_admin()`). index.html `재고 관리` 메뉴 |
 | `026_inventory_hq_warehouse.sql` | 재고 관리 창고에 `본사`(HQ) 추가 — `mkt_txns.warehouse`/`to_warehouse` CHECK 제약 확장 |
 | `027_legacy_settlement_history.sql` | **포털 도입 전 청구이력** — `legacy_settlements` 테이블. 1행 = (기간 × 지점 × 항목), `item` = SP(판매대금·AR) / SAVEBACK(사용반환금) / SUPPORT(JLRK 기여금) / INCENTIVE. 워크플로 없는 읽기전용 기록이라 rounds·claims 와 분리. RLS: 관리자 전체 + 리테일러 자기 법인만, 익명 차단 |
-| `028_legacy_engine_oil_seed.sql` | Engine Oil Package 과거 정산 **555행 시드** (FY26 Q3 ~ FY27 Q2 7월). master 9종 + 실제 발행 AP/AR 바우처에서 추출, 27개 기간×항목 합계가 바우처 금액과 100% 일치 검증됨. ⚠️ `027` 먼저 실행. 재실행 시 상단 `delete` 주석 해제 |
+| `028_legacy_engine_oil_seed_1~7.sql` | Engine Oil Package 과거 정산 **555행 시드** (FY26 Q3 ~ FY27 Q2 7월). master 9종 + 실제 발행 AP/AR 바우처에서 추출, 27개 기간×항목 합계가 바우처 금액과 100% 일치 검증됨. ⚠️ `027` 먼저, 그다음 **1~7번 순서대로**. SQL Editor 가 약 50KB 에서 입력을 자르기 때문에(→ `unterminated quoted string`) 7개로 분할함. FK 연결 update + 검증 select 는 7번 파일에 있음. 재실행 시 1번 파일 상단 `delete` 주석 해제 |
 
 ## ⚠️ 알아둘 것
 
