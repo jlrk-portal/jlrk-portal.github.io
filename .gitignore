@@ -5,3 +5,7 @@ supabase/.branches/
 
 # Claude Code 개인 설정 (권한 허용 목록 등)
 .claude/settings.local.json
+
+# 원본 정산 엑셀 (실데이터 — 공개 repo 커밋 금지)
+Engine Oil Package 정산(old)/
+.DS_Store

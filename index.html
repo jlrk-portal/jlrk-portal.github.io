@@ -297,6 +297,7 @@
       <div id="dashBudget"></div>
       <div id="dashActive"></div>
       <div id="dashRecent"></div>
+      <div id="dashLegacy"></div>
     </section>
 
     <!-- ===== 계정 관리 ===== -->
@@ -3729,6 +3730,199 @@ async function loadDashboard(){
     rc.appendChild(tbl);
   }
   recentEl.appendChild(rc);
+
+  // 포털 도입 전 청구이력
+  await loadLegacyHistory();
+}
+
+/* ================================================================
+   포털 도입 전 청구이력 (legacy_settlements)
+   엑셀+메일로 처리했던 과거 정산을 기간/리테일러 축으로 보여준다.
+   워크플로가 없는 읽기 전용 기록이라 rounds/claims 와 분리돼 있다.
+   ================================================================ */
+const LEGACY_ITEMS = [
+  { key:'SP',        label:'판매대금',    dir:'AR' },
+  { key:'SAVEBACK',  label:'사용반환금',  dir:'AP' },
+  { key:'SUPPORT',   label:'JLRK 기여금', dir:'AP' },
+  { key:'INCENTIVE', label:'인센티브',    dir:'AP' }
+];
+let legacyRows = null;          // 전체 행 캐시 (재조회 안 함)
+let legacyRetailerNames = {};   // code → name
+const legacyView = { mode:'period', fy:'', expanded:null };
+
+async function loadLegacyHistory(){
+  const host = document.getElementById('dashLegacy');
+  if(!host) return;
+  if(legacyRows === null){
+    host.innerHTML = '<div class="info-card"><div class="section-label" style="margin-top:0;">이전 청구이력</div><div class="hint">불러오는 중...</div></div>';
+    const { data, error } = await sb.from('legacy_settlements')
+      .select('item, direction, fiscal_year, quarter, period_key, period_label, data_month, settle_month, retailer_code, workshop_label, amount, amount_jg, amount_lr, detail');
+    if(error){                    // 마이그레이션 027/028 미적용 시 조용히 숨김
+      console.warn('legacy_settlements 조회 실패 (마이그레이션 미적용?)', error.message);
+      legacyRows = []; host.innerHTML = ''; return;
+    }
+    legacyRows = data || [];
+    const { data: rets } = await sb.from('retailers').select('code, name');
+    (rets||[]).forEach(r => { legacyRetailerNames[r.code] = r.name; });
+  }
+  if(legacyRows.length === 0){ host.innerHTML = ''; return; }
+  renderLegacyHistory();
+}
+
+function legacySortKey(r){ return r.data_month ? r.data_month.replace('-','') : (r.settle_month || r.period_key); }
+
+function renderLegacyHistory(){
+  const host = document.getElementById('dashLegacy');
+  const fys = Array.from(new Set(legacyRows.map(r => r.fiscal_year))).sort();
+  const rows = legacyRows.filter(r => !legacyView.fy || r.fiscal_year === legacyView.fy);
+
+  const card = document.createElement('div');
+  card.className = 'info-card';
+  card.innerHTML = `
+    <div class="section-label" style="margin-top:0;">이전 청구이력 <span class="hint" style="margin-left:6px;">포털 도입 전 · 엑셀/메일로 처리한 기록</span></div>
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px;">
+      <select id="legacyMode" style="max-width:150px;">
+        <option value="period">기간별</option>
+        <option value="retailer">리테일러별</option>
+      </select>
+      <select id="legacyFy" style="max-width:150px;">
+        <option value="">회계연도 전체</option>
+        ${fys.map(f => `<option value="${f}">${f}</option>`).join('')}
+      </select>
+      <button class="btn btn-ghost btn-sm" id="legacyXlsxBtn">엑셀 내려받기</button>
+    </div>
+    <div id="legacyTableHost"></div>`;
+  host.innerHTML = ''; host.appendChild(card);
+  card.querySelector('#legacyMode').value = legacyView.mode;
+  card.querySelector('#legacyFy').value = legacyView.fy;
+  card.querySelector('#legacyMode').addEventListener('change', e => {
+    legacyView.mode = e.target.value; legacyView.expanded = null; renderLegacyHistory();
+  });
+  card.querySelector('#legacyFy').addEventListener('change', e => {
+    legacyView.fy = e.target.value; legacyView.expanded = null; renderLegacyHistory();
+  });
+  card.querySelector('#legacyXlsxBtn').addEventListener('click', () => downloadLegacyXlsx(rows));
+
+  const groupBy = legacyView.mode === 'period'
+    ? (r => r.period_key)
+    : (r => r.retailer_code);
+  const groupLabel = legacyView.mode === 'period'
+    ? (r => r.period_label)
+    : (r => legacyRetailerNames[r.retailer_code]
+              ? `${r.retailer_code} · ${legacyRetailerNames[r.retailer_code]}`
+              : `${r.retailer_code} (포털 미등록)`);
+
+  // 그룹 → 항목별 합계
+  const groups = new Map();
+  rows.forEach(r => {
+    const k = groupBy(r);
+    if(!groups.has(k)) groups.set(k, { key:k, label:groupLabel(r), sort:legacySortKey(r), sums:{} });
+    const g = groups.get(k);
+    g.sums[r.item] = (g.sums[r.item] || 0) + Number(r.amount || 0);
+    if(legacySortKey(r) < g.sort) g.sort = legacySortKey(r);
+  });
+  const list = Array.from(groups.values()).sort((a,b) =>
+    legacyView.mode === 'period' ? a.sort.localeCompare(b.sort) : a.label.localeCompare(b.label,'ko'));
+
+  const tHost = card.querySelector('#legacyTableHost');
+  const tbl = document.createElement('table');
+  tbl.innerHTML = `<thead><tr>
+      <th>${legacyView.mode === 'period' ? '기간' : '리테일러'}</th>
+      ${LEGACY_ITEMS.map(i => `<th style="text-align:right;">${i.label}<span class="hint" style="margin-left:4px;">${i.dir}</span></th>`).join('')}
+      <th style="text-align:right;">AP 지급 합계</th>
+      <th style="text-align:right;">AR 청구</th>
+    </tr></thead><tbody></tbody>`;
+  const tb = tbl.querySelector('tbody');
+
+  const total = { SP:0, SAVEBACK:0, SUPPORT:0, INCENTIVE:0 };
+  list.forEach(g => {
+    LEGACY_ITEMS.forEach(i => { total[i.key] += g.sums[i.key] || 0; });
+    const ap = (g.sums.SAVEBACK||0) + (g.sums.SUPPORT||0) + (g.sums.INCENTIVE||0);
+    const tr = document.createElement('tr');
+    tr.className = 'clickable';
+    tr.innerHTML = `
+      <td>${g.label}${legacyView.expanded === g.key ? ' ▾' : ''}</td>
+      ${LEGACY_ITEMS.map(i => `<td style="text-align:right;">${g.sums[i.key] ? fmtWon(g.sums[i.key]) : '—'}</td>`).join('')}
+      <td style="text-align:right;">${ap ? fmtWon(ap) : '—'}</td>
+      <td style="text-align:right;">${g.sums.SP ? fmtWon(g.sums.SP) : '—'}</td>`;
+    tr.addEventListener('click', () => {
+      legacyView.expanded = (legacyView.expanded === g.key) ? null : g.key;
+      renderLegacyHistory();
+    });
+    tb.appendChild(tr);
+
+    if(legacyView.expanded === g.key){
+      const detTr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.colSpan = LEGACY_ITEMS.length + 3;
+      td.style.background = 'var(--surface2)';
+      td.appendChild(buildLegacyDetail(rows.filter(r => groupBy(r) === g.key)));
+      detTr.appendChild(td); tb.appendChild(detTr);
+    }
+  });
+  const apT = total.SAVEBACK + total.SUPPORT + total.INCENTIVE;
+  const trT = document.createElement('tr');
+  trT.innerHTML = `<td><b>합계</b></td>
+    ${LEGACY_ITEMS.map(i => `<td style="text-align:right;"><b>${total[i.key] ? fmtWon(total[i.key]) : '—'}</b></td>`).join('')}
+    <td style="text-align:right;"><b>${fmtWon(apT)}</b></td>
+    <td style="text-align:right;"><b>${fmtWon(total.SP)}</b></td>`;
+  tb.appendChild(trT);
+  tHost.appendChild(tbl);
+  tHost.insertAdjacentHTML('beforeend',
+    `<div class="hint" style="margin-top:8px;">행을 클릭하면 ${legacyView.mode === 'period' ? '지점별' : '기간별'} 내역이 펼쳐집니다.
+     AP = JLRK → 리테일러 지급, AR = 리테일러 → JLRK 입금. 전부 공급가액(VAT 별도) 기준.</div>`);
+}
+
+/* 펼침 상세 — 기간별 보기면 지점 축, 리테일러별 보기면 기간 축 */
+function buildLegacyDetail(rows){
+  const byPeriod = legacyView.mode === 'period';
+  const keyOf = byPeriod ? (r => `${r.retailer_code}|${r.workshop_label}`) : (r => r.period_key);
+  const labOf = byPeriod ? (r => `${r.retailer_code} · ${r.workshop_label}`) : (r => r.period_label);
+  const m = new Map();
+  rows.forEach(r => {
+    const k = keyOf(r);
+    if(!m.has(k)) m.set(k, { label:labOf(r), sort:byPeriod ? labOf(r) : legacySortKey(r), sums:{} });
+    const e = m.get(k);
+    e.sums[r.item] = (e.sums[r.item] || 0) + Number(r.amount || 0);
+  });
+  const list = Array.from(m.values()).sort((a,b) => String(a.sort).localeCompare(String(b.sort),'ko'));
+  const tbl = document.createElement('table');
+  tbl.style.margin = '4px 0';
+  tbl.innerHTML = `<thead><tr>
+      <th>${byPeriod ? '지점' : '기간'}</th>
+      ${LEGACY_ITEMS.map(i => `<th style="text-align:right;">${i.label}</th>`).join('')}
+    </tr></thead><tbody>${
+    list.map(e => `<tr>
+        <td class="muted">${e.label}</td>
+        ${LEGACY_ITEMS.map(i => `<td style="text-align:right;">${e.sums[i.key] ? fmtWon(e.sums[i.key]) : '—'}</td>`).join('')}
+      </tr>`).join('')
+    }</tbody>`;
+  return tbl;
+}
+
+function downloadLegacyXlsx(rows){
+  const header = ['회계연도','분기','기간','원본월','정산시기','리테일러','지점','항목','방향','금액','Jaguar','Land Rover'];
+  const aoa = [
+    ['이전 청구이력 (포털 도입 전) — Engine Oil Package'],
+    [`추출 ${new Date().toLocaleString('ko-KR')} · ${rows.length}행 · 금액은 공급가액(VAT 별도)`],
+    [], header,
+    ...rows.slice().sort((a,b) => legacySortKey(a).localeCompare(legacySortKey(b)) || a.item.localeCompare(b.item))
+      .map(r => [
+        r.fiscal_year, r.quarter||'', r.period_label, r.data_month||'', r.settle_month||'',
+        r.retailer_code, r.workshop_label,
+        (LEGACY_ITEMS.find(i => i.key === r.item)||{}).label || r.item,
+        r.direction, Number(r.amount||0), Number(r.amount_jg||0), Number(r.amount_lr||0)
+      ])
+  ];
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, '이전청구이력');
+  const out = XLSX.write(wb, { bookType:'xlsx', type:'array' });
+  const blob = new Blob([out], { type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `이전청구이력_EngineOilPackage_${new Date().toISOString().slice(0,10)}.xlsx`;
+  document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
 }
 
 /* ---------- 예산 구분별 분기 집행 현황 ---------- */

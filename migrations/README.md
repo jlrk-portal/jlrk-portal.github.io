@@ -31,6 +31,8 @@
 | `024_retailer_notify_emails.sql` | 리테일러 8개사 알림 수신 이메일(`retailers.email`) 등록. 담당자 2명(AJ·KCC)은 쉼표 구분. index.html `splitEmails()` 로 다중 수신 |
 | `025_inventory.sql` | 마케팅 제작물/기프트 재고 관리 — `mkt_items`(품목군+브랜드) / `mkt_txns`(입고·배부·회수·이동·조정) / `mkt_stock` 뷰. 창고 PDC·지하 2곳, 보관위치 자유입력. RLS 관리자 전용(`is_admin()`). index.html `재고 관리` 메뉴 |
 | `026_inventory_hq_warehouse.sql` | 재고 관리 창고에 `본사`(HQ) 추가 — `mkt_txns.warehouse`/`to_warehouse` CHECK 제약 확장 |
+| `027_legacy_settlement_history.sql` | **포털 도입 전 청구이력** — `legacy_settlements` 테이블. 1행 = (기간 × 지점 × 항목), `item` = SP(판매대금·AR) / SAVEBACK(사용반환금) / SUPPORT(JLRK 기여금) / INCENTIVE. 워크플로 없는 읽기전용 기록이라 rounds·claims 와 분리. RLS: 관리자 전체 + 리테일러 자기 법인만, 익명 차단 |
+| `028_legacy_engine_oil_seed.sql` | Engine Oil Package 과거 정산 **555행 시드** (FY26 Q3 ~ FY27 Q2 7월). master 9종 + 실제 발행 AP/AR 바우처에서 추출, 27개 기간×항목 합계가 바우처 금액과 100% 일치 검증됨. ⚠️ `027` 먼저 실행. 재실행 시 상단 `delete` 주석 해제 |
 
 ## ⚠️ 알아둘 것
 
@@ -38,6 +40,11 @@
 - `007`, `008`은 스키마 변경이 없는 순수 진단 쿼리라 `diagnostics/`로 분리했음.
 - `diagnostics/check_migrations_status.sql`은 언제든 재실행해서 스키마 상태를 점검할 수 있는 상시 도구.
 - `diagnostics/diag_rls_anon_exposure.sql` — 익명/리테일러 역할의 테이블 노출 점검. `022` 적용 후 재실행해 검증.
+- `028` 시드의 예외 1건: `FY26 Q4 2603 master` 의 좌측 판매대금 표가 나중에 4월 데이터로
+  덮여 있었다(2604 와 지점별 금액 완전 동일). 같은 파일 우측 브랜드 피벗은 3월 데이터가
+  남아있고 합계가 실제 3월 AR 바우처(503,837,400)와 일치하므로 3월 AR 은 그쪽 기준으로 넣었다.
+- `028` 에는 포털 미등록 지점도 들어있다 — 천안(`CH CA`), 브리티시 평촌(`BA PC`, 폐업).
+  `workshop_code`/`retailer_id` 가 null 이라 관리자 화면에서만 보인다.
 
 ## 후속 보안 과제
 
