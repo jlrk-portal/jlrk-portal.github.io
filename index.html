@@ -278,6 +278,7 @@
     <div class="nav-item" data-nav="rounds">회차 관리</div>
     <div class="nav-item" data-nav="retailers">리테일러 관리</div>
     <div class="nav-item" data-nav="accounts">계정 관리</div>
+    <div class="nav-item" data-nav="history">과거 정산내역 조회</div>
     <div class="nav-item" data-nav="inventory">재고 관리</div>
     <div class="nav-item" data-nav="audit">활동 이력</div>
   </nav>
@@ -297,7 +298,6 @@
       <div id="dashBudget"></div>
       <div id="dashActive"></div>
       <div id="dashRecent"></div>
-      <div id="dashLegacy"></div>
     </section>
 
     <!-- ===== 계정 관리 ===== -->
@@ -454,11 +454,37 @@
           <div class="page-title">내 청구</div>
           <div class="page-desc">진행 중인 정산 건을 확인하고 청구서를 제출합니다.</div>
         </div>
-        <button class="btn btn-ghost btn-sm" id="retailerHistoryToggle">제출 이력 보기</button>
+        <div style="display:flex; gap:8px;">
+          <button class="btn btn-ghost btn-sm" id="retailerHistoryToggle">제출 이력 보기</button>
+          <button class="btn btn-ghost btn-sm" id="goHistoryBtn">과거 정산내역 조회</button>
+        </div>
       </div>
       <div id="retailerList"></div>
       <div id="retailerEmpty" class="empty-state" style="display:none;">현재 진행 중인 청구 건이 없습니다.</div>
       <div id="retailerHistory" style="display:none; margin-top:20px;"></div>
+    </section>
+
+    <!-- ===== 과거 정산내역 조회 ===== -->
+    <section id="view-history" style="display:none;">
+      <div class="back-link" id="historyBack" style="display:none;">← 내 청구로 돌아가기</div>
+      <div class="page-head">
+        <div>
+          <div class="page-title">과거 정산내역 조회</div>
+          <div class="page-desc">
+            정산 유형을 선택하면 기간별·리테일러별 정산 금액을 볼 수 있습니다.
+            포털 도입 전 엑셀로 처리한 내역과 포털에서 진행한 회차가 시간순으로 이어집니다.
+          </div>
+        </div>
+        <div style="display:flex; gap:8px;">
+          <button class="btn btn-ghost btn-sm" id="historyRefreshBtn">새로고침</button>
+          <button class="btn btn-ghost btn-sm" id="historyXlsxBtn">엑셀 내려받기</button>
+        </div>
+      </div>
+      <div class="row2" style="max-width:620px; margin-bottom:8px;">
+        <div class="field"><label>정산 유형</label><select id="historyType"></select></div>
+        <div class="field"><label>회계연도</label><select id="historyFy"></select></div>
+      </div>
+      <div id="historyHost"></div>
     </section>
 
     <!-- ===== 재고 관리 (마케팅 제작물/기프트) ===== -->
@@ -1458,6 +1484,7 @@ function switchView(name){
   if(name === 'audit') loadAudit();
   if(name === 'accounts') loadAccounts();
   if(name === 'inventory') loadInventory();
+  if(name === 'history') loadHistory();
   if(name === 'retailer') loadRetailerClaims();
 }
 document.querySelectorAll('#adminNav .nav-item[data-nav]').forEach(item => {
@@ -3730,200 +3757,295 @@ async function loadDashboard(){
     rc.appendChild(tbl);
   }
   recentEl.appendChild(rc);
-
-  // 포털 도입 전 청구이력
-  await loadLegacyHistory();
 }
 
 /* ================================================================
-   포털 도입 전 청구이력 (legacy_settlements)
-   엑셀+메일로 처리했던 과거 정산을 기간/리테일러 축으로 보여준다.
-   워크플로가 없는 읽기 전용 기록이라 rounds/claims 와 분리돼 있다.
+   과거 정산내역 조회 (view-history)
+   정산 유형별로 "포털 도입 전 수동 처리분(legacy_settlements)" 과
+   "포털에서 진행한 회차(rounds+claims)" 를 하나의 시간축에 이어 붙여
+   기간 × 리테일러 금액을 보여준다.
+   - 유형 매칭: legacy_settlements.type_code == settlement_types.source_config.preset
+     (또는 code). 매칭 안 되는 수동분은 "(수동 업로드)" 가상 유형으로 묶는다.
+   - 리테일러 계정은 RLS 로 자기 법인 행만 내려오므로 별도 필터가 필요 없다.
    ================================================================ */
-const LEGACY_ITEMS = [
-  { key:'SP',        label:'판매대금',    dir:'AR' },
-  { key:'SAVEBACK',  label:'사용반환금',  dir:'AP' },
-  { key:'SUPPORT',   label:'JLRK 기여금', dir:'AP' },
-  { key:'INCENTIVE', label:'인센티브',    dir:'AP' }
-];
-let legacyRows = null;          // 전체 행 캐시 (재조회 안 함)
-let legacyRetailerNames = {};   // code → name
-const legacyView = { mode:'period', fy:'', expanded:null };
+const HIST_ITEM_LABEL = { SP:'판매대금', SAVEBACK:'사용반환금', SUPPORT:'JLRK 기여금', INCENTIVE:'인센티브' };
+let histData = null;
+const histView = { typeKey:'', fy:'', expanded:null };
 
-async function loadLegacyHistory(){
-  const host = document.getElementById('dashLegacy');
-  if(!host) return;
-  if(legacyRows === null){
-    host.innerHTML = '<div class="info-card"><div class="section-label" style="margin-top:0;">이전 청구이력</div><div class="hint">불러오는 중...</div></div>';
-    const { data, error } = await sb.from('legacy_settlements')
-      .select('item, direction, fiscal_year, quarter, period_key, period_label, data_month, settle_month, retailer_code, workshop_label, amount, amount_jg, amount_lr, detail');
-    if(error){                    // 마이그레이션 027/028 미적용 시 조용히 숨김
-      console.warn('legacy_settlements 조회 실패 (마이그레이션 미적용?)', error.message);
-      legacyRows = []; host.innerHTML = ''; return;
-    }
-    legacyRows = data || [];
-    const { data: rets } = await sb.from('retailers').select('code, name');
-    (rets||[]).forEach(r => { legacyRetailerNames[r.code] = r.name; });
+async function loadHistory(){
+  const host = document.getElementById('historyHost');
+  const isAdmin = myProfile?.role === 'ADMIN';
+  document.getElementById('historyBack').style.display = isAdmin ? 'none' : 'block';
+
+  if(!histData){
+    host.innerHTML = '<div class="info-card"><div class="hint">불러오는 중...</div></div>';
+    const typeTbl = isAdmin ? 'settlement_types' : 'settlement_types_public';
+    const [tRes, lRes, rRes, cRes, retRes, wsRes] = await Promise.all([
+      sb.from(typeTbl).select('id, code, name, direction, source_config'),
+      sb.from('legacy_settlements').select('type_code, item, direction, fiscal_year, quarter, period_key, period_label, data_month, settle_month, retailer_code, workshop_label, amount, amount_jg, amount_lr'),
+      sb.from('rounds').select('id, type_id, period_label, status, fiscal_year, created_at'),
+      sb.from('claims').select('round_id, retailer_id, workshop_id, approved_amount, claimed_amount, status'),
+      sb.from('retailers').select('id, code, name'),
+      sb.from('workshops').select('id, code, name, retailer_id')
+    ]);
+    if(lRes.error) console.warn('legacy_settlements 조회 실패 (마이그레이션 미적용?)', lRes.error.message);
+    histData = {
+      types: tRes.data || [],
+      legacy: lRes.data || [],
+      rounds: (rRes.data || []).filter(r => r.status !== 'DRAFT'),
+      claims: cRes.data || [],
+      retailers: retRes.data || [],
+      workshops: wsRes.data || []
+    };
+    histData.retById = new Map(histData.retailers.map(r => [r.id, r]));
+    histData.wsById  = new Map(histData.workshops.map(w => [w.id, w]));
   }
-  if(legacyRows.length === 0){ host.innerHTML = ''; return; }
-  renderLegacyHistory();
+  renderHistory();
 }
 
-function legacySortKey(r){ return r.data_month ? r.data_month.replace('-','') : (r.settle_month || r.period_key); }
+/* 유형 목록 — 데이터가 있는 유형만. 수동분이 어느 유형에도 안 붙으면 가상 유형으로. */
+function histTypeList(){
+  const out = [];
+  const usedLegacy = new Set();
+  histData.types.forEach(t => {
+    const preset = t.source_config?.preset || null;
+    const legacy = histData.legacy.filter(r => r.type_code === preset || r.type_code === t.code);
+    const rounds = histData.rounds.filter(r => r.type_id === t.id);
+    if(legacy.length === 0 && rounds.length === 0) return;
+    legacy.forEach(r => usedLegacy.add(r));
+    out.push({ key:t.id, name:t.name, direction:t.direction, legacy, rounds });
+  });
+  const orphan = histData.legacy.filter(r => !usedLegacy.has(r));
+  const byCode = new Map();
+  orphan.forEach(r => {
+    if(!byCode.has(r.type_code)) byCode.set(r.type_code, []);
+    byCode.get(r.type_code).push(r);
+  });
+  byCode.forEach((rows, code) => out.push({
+    key:'legacy:' + code, name:`${code} (수동 업로드분)`, direction:rows[0].direction, legacy:rows, rounds:[]
+  }));
+  return out;
+}
 
-function renderLegacyHistory(){
-  const host = document.getElementById('dashLegacy');
-  const fys = Array.from(new Set(legacyRows.map(r => r.fiscal_year))).sort();
-  const rows = legacyRows.filter(r => !legacyView.fy || r.fiscal_year === legacyView.fy);
+/* 선택 유형 → 기간 행 배열 (오래된 것부터) */
+function histPeriods(entry){
+  const rows = [];
+  // 1) 수동 처리분
+  const byPeriod = new Map();
+  entry.legacy.forEach(r => {
+    if(histView.fy && r.fiscal_year !== histView.fy) return;
+    if(!byPeriod.has(r.period_key)) byPeriod.set(r.period_key, {
+      key:'L:' + r.period_key, label:r.period_label, kind:'manual', status:null,
+      fy:r.fiscal_year, sort:(r.data_month ? r.data_month.replace('-','') : (r.settle_month || '000000')),
+      byRet:{}, byItem:{}, detail:[], total:0
+    });
+    const g = byPeriod.get(r.period_key);
+    const amt = Number(r.amount || 0);
+    g.byRet[r.retailer_code] = (g.byRet[r.retailer_code] || 0) + amt;
+    g.byItem[r.item] = (g.byItem[r.item] || 0) + amt;
+    g.total += amt;
+    g.detail.push({ who:`${r.retailer_code} · ${r.workshop_label}`, item:r.item, amount:amt,
+                    jg:Number(r.amount_jg||0), lr:Number(r.amount_lr||0) });
+  });
+  byPeriod.forEach(g => rows.push(g));
+
+  // 2) 포털 회차
+  entry.rounds.forEach(rd => {
+    if(histView.fy && rd.fiscal_year !== histView.fy) return;
+    const cs = histData.claims.filter(c => c.round_id === rd.id);
+    const g = { key:'R:' + rd.id, label:rd.period_label, kind:'portal', status:rd.status,
+                fy:rd.fiscal_year, sort:(rd.created_at || '').slice(0,7).replace('-',''),
+                byRet:{}, byItem:{}, detail:[], total:0 };
+    cs.forEach(c => {
+      const amt = Number(c.approved_amount ?? c.claimed_amount ?? 0);
+      const ret = histData.retById.get(c.retailer_id);
+      const code = ret?.code || '?';
+      g.byRet[code] = (g.byRet[code] || 0) + amt;
+      g.total += amt;
+      const ws = c.workshop_id ? histData.wsById.get(c.workshop_id) : null;
+      g.detail.push({ who: ws ? `${code} · ${ws.name}` : `${code} (법인)`, item:'PORTAL',
+                      amount:amt, status:c.status });
+    });
+    rows.push(g);
+  });
+  return rows.sort((a,b) => String(a.sort).localeCompare(String(b.sort)));
+}
+
+function renderHistory(){
+  const host = document.getElementById('historyHost');
+  const list = histTypeList();
+  const typeSel = document.getElementById('historyType');
+  const fySel = document.getElementById('historyFy');
+
+  if(list.length === 0){
+    typeSel.innerHTML = ''; fySel.innerHTML = '';
+    host.innerHTML = `<div class="info-card"><div class="hint">조회할 정산 내역이 없습니다.
+      포털 도입 전 수동 처리분은 <code>legacy_settlements</code> 에, 포털 진행분은 회차 확정 후 표시됩니다.</div></div>`;
+    return;
+  }
+  if(!list.some(e => e.key === histView.typeKey)) histView.typeKey = list[0].key;
+  typeSel.innerHTML = list.map(e =>
+    `<option value="${e.key}">${e.name} (${e.direction})</option>`).join('');
+  typeSel.value = histView.typeKey;
+
+  const entry = list.find(e => e.key === histView.typeKey);
+  const fys = Array.from(new Set([
+    ...entry.legacy.map(r => r.fiscal_year),
+    ...entry.rounds.map(r => r.fiscal_year)
+  ].filter(Boolean))).sort();
+  fySel.innerHTML = '<option value="">전체</option>' + fys.map(f => `<option value="${f}">${f}</option>`).join('');
+  if(histView.fy && !fys.includes(histView.fy)) histView.fy = '';
+  fySel.value = histView.fy;
+
+  typeSel.onchange = e => { histView.typeKey = e.target.value; histView.fy = ''; histView.expanded = null; renderHistory(); };
+  fySel.onchange   = e => { histView.fy = e.target.value; histView.expanded = null; renderHistory(); };
+  document.getElementById('historyXlsxBtn').onclick = () => downloadHistoryXlsx(entry);
+
+  const periods = histPeriods(entry);
+  if(periods.length === 0){
+    host.innerHTML = '<div class="info-card"><div class="hint">해당 조건의 정산 내역이 없습니다.</div></div>';
+    return;
+  }
+
+  // 리테일러 열 = 데이터에 등장하는 법인 (관리자는 8개사, 리테일러는 본인 1개)
+  const retCodes = Array.from(new Set(periods.flatMap(p => Object.keys(p.byRet)))).sort();
+  const retName = code => histData.retailers.find(r => r.code === code)?.name || null;
+
+  const grand = {}; retCodes.forEach(c => grand[c] = 0);
+  const itemTotals = {};
+  let grandTotal = 0;
+  periods.forEach(p => {
+    retCodes.forEach(c => grand[c] += (p.byRet[c] || 0));
+    Object.entries(p.byItem).forEach(([k,v]) => itemTotals[k] = (itemTotals[k]||0) + v);
+    grandTotal += p.total;
+  });
+
+  const manualN = periods.filter(p => p.kind === 'manual').length;
+  const portalN = periods.length - manualN;
 
   const card = document.createElement('div');
   card.className = 'info-card';
   card.innerHTML = `
-    <div class="section-label" style="margin-top:0;">이전 청구이력 <span class="hint" style="margin-left:6px;">포털 도입 전 · 엑셀/메일로 처리한 기록</span></div>
-    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px;">
-      <select id="legacyMode" style="max-width:150px;">
-        <option value="period">기간별</option>
-        <option value="retailer">리테일러별</option>
-      </select>
-      <select id="legacyFy" style="max-width:150px;">
-        <option value="">회계연도 전체</option>
-        ${fys.map(f => `<option value="${f}">${f}</option>`).join('')}
-      </select>
-      <button class="btn btn-ghost btn-sm" id="legacyXlsxBtn">엑셀 내려받기</button>
+    <div class="section-label" style="margin-top:0;">${entry.name}
+      <span class="badge ${entry.direction==='AR'?'badge-ar':'badge-ap'}" style="margin-left:8px;">${entry.direction}</span>
+      <span class="hint" style="margin-left:8px;">${
+        entry.direction==='AR' ? '리테일러 → JLRK 청구' : 'JLRK → 리테일러 지급'}</span>
     </div>
-    <div id="legacyTableHost"></div>`;
+    <div class="hint" style="margin-bottom:12px;">
+      기간 ${periods.length}건 (수동 ${manualN} · 포털 ${portalN}) · 누적 ${fmtWon(grandTotal)}
+      ${Object.keys(itemTotals).length > 1 ? ' · ' + Object.entries(itemTotals)
+        .map(([k,v]) => `${HIST_ITEM_LABEL[k]||k} ${fmtWon(v)}`).join(' / ') : ''}
+    </div>
+    <div style="overflow-x:auto;"><table id="histTable">
+      <thead><tr>
+        <th style="white-space:nowrap;">기간</th>
+        <th style="white-space:nowrap;">구분</th>
+        ${retCodes.map(c => `<th style="text-align:right; white-space:nowrap;">${c}${
+            retName(c) ? `<div class="hint" style="font-weight:400;">${retName(c)}</div>` : ''}</th>`).join('')}
+        <th style="text-align:right; white-space:nowrap;">합계</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table></div>
+    <div class="hint" style="margin-top:8px;">
+      행을 클릭하면 지점별 내역이 펼쳐집니다. 금액은 공급가액(VAT 별도) 기준입니다.
+      <b>수동</b> = 포털 도입 전 엑셀·메일로 처리한 기록, <b>포털</b> = 이 시스템에서 진행한 회차.
+    </div>`;
   host.innerHTML = ''; host.appendChild(card);
-  card.querySelector('#legacyMode').value = legacyView.mode;
-  card.querySelector('#legacyFy').value = legacyView.fy;
-  card.querySelector('#legacyMode').addEventListener('change', e => {
-    legacyView.mode = e.target.value; legacyView.expanded = null; renderLegacyHistory();
-  });
-  card.querySelector('#legacyFy').addEventListener('change', e => {
-    legacyView.fy = e.target.value; legacyView.expanded = null; renderLegacyHistory();
-  });
-  card.querySelector('#legacyXlsxBtn').addEventListener('click', () => downloadLegacyXlsx(rows));
 
-  const groupBy = legacyView.mode === 'period'
-    ? (r => r.period_key)
-    : (r => r.retailer_code);
-  const groupLabel = legacyView.mode === 'period'
-    ? (r => r.period_label)
-    : (r => legacyRetailerNames[r.retailer_code]
-              ? `${r.retailer_code} · ${legacyRetailerNames[r.retailer_code]}`
-              : `${r.retailer_code} (포털 미등록)`);
-
-  // 그룹 → 항목별 합계
-  const groups = new Map();
-  rows.forEach(r => {
-    const k = groupBy(r);
-    if(!groups.has(k)) groups.set(k, { key:k, label:groupLabel(r), sort:legacySortKey(r), sums:{} });
-    const g = groups.get(k);
-    g.sums[r.item] = (g.sums[r.item] || 0) + Number(r.amount || 0);
-    if(legacySortKey(r) < g.sort) g.sort = legacySortKey(r);
-  });
-  const list = Array.from(groups.values()).sort((a,b) =>
-    legacyView.mode === 'period' ? a.sort.localeCompare(b.sort) : a.label.localeCompare(b.label,'ko'));
-
-  const tHost = card.querySelector('#legacyTableHost');
-  const tbl = document.createElement('table');
-  tbl.innerHTML = `<thead><tr>
-      <th>${legacyView.mode === 'period' ? '기간' : '리테일러'}</th>
-      ${LEGACY_ITEMS.map(i => `<th style="text-align:right;">${i.label}<span class="hint" style="margin-left:4px;">${i.dir}</span></th>`).join('')}
-      <th style="text-align:right;">AP 지급 합계</th>
-      <th style="text-align:right;">AR 청구</th>
-    </tr></thead><tbody></tbody>`;
-  const tb = tbl.querySelector('tbody');
-
-  const total = { SP:0, SAVEBACK:0, SUPPORT:0, INCENTIVE:0 };
-  list.forEach(g => {
-    LEGACY_ITEMS.forEach(i => { total[i.key] += g.sums[i.key] || 0; });
-    const ap = (g.sums.SAVEBACK||0) + (g.sums.SUPPORT||0) + (g.sums.INCENTIVE||0);
+  const tb = card.querySelector('#histTable tbody');
+  periods.forEach(p => {
     const tr = document.createElement('tr');
     tr.className = 'clickable';
     tr.innerHTML = `
-      <td>${g.label}${legacyView.expanded === g.key ? ' ▾' : ''}</td>
-      ${LEGACY_ITEMS.map(i => `<td style="text-align:right;">${g.sums[i.key] ? fmtWon(g.sums[i.key]) : '—'}</td>`).join('')}
-      <td style="text-align:right;">${ap ? fmtWon(ap) : '—'}</td>
-      <td style="text-align:right;">${g.sums.SP ? fmtWon(g.sums.SP) : '—'}</td>`;
+      <td style="white-space:nowrap;">${p.label}${histView.expanded === p.key ? ' ▾' : ''}</td>
+      <td style="white-space:nowrap;">${p.kind === 'manual'
+          ? '<span class="badge" style="background:var(--surface3); color:var(--text-mid);">수동</span>'
+          : `<span class="badge ${entry.direction==='AR'?'badge-ar':'badge-ap'}">${ROUND_STATUS_LABEL[p.status]||p.status}</span>`}</td>
+      ${retCodes.map(c => `<td style="text-align:right;">${p.byRet[c] ? fmtWon(p.byRet[c]) : '—'}</td>`).join('')}
+      <td style="text-align:right;">${p.total ? fmtWon(p.total) : '—'}</td>`;
     tr.addEventListener('click', () => {
-      legacyView.expanded = (legacyView.expanded === g.key) ? null : g.key;
-      renderLegacyHistory();
+      histView.expanded = (histView.expanded === p.key) ? null : p.key;
+      renderHistory();
     });
     tb.appendChild(tr);
-
-    if(legacyView.expanded === g.key){
-      const detTr = document.createElement('tr');
+    if(histView.expanded === p.key){
+      const dtr = document.createElement('tr');
       const td = document.createElement('td');
-      td.colSpan = LEGACY_ITEMS.length + 3;
+      td.colSpan = retCodes.length + 3;
       td.style.background = 'var(--surface2)';
-      td.appendChild(buildLegacyDetail(rows.filter(r => groupBy(r) === g.key)));
-      detTr.appendChild(td); tb.appendChild(detTr);
+      td.appendChild(buildHistoryDetail(p));
+      dtr.appendChild(td); tb.appendChild(dtr);
     }
   });
-  const apT = total.SAVEBACK + total.SUPPORT + total.INCENTIVE;
   const trT = document.createElement('tr');
-  trT.innerHTML = `<td><b>합계</b></td>
-    ${LEGACY_ITEMS.map(i => `<td style="text-align:right;"><b>${total[i.key] ? fmtWon(total[i.key]) : '—'}</b></td>`).join('')}
-    <td style="text-align:right;"><b>${fmtWon(apT)}</b></td>
-    <td style="text-align:right;"><b>${fmtWon(total.SP)}</b></td>`;
+  trT.innerHTML = `<td><b>합계</b></td><td></td>
+    ${retCodes.map(c => `<td style="text-align:right;"><b>${grand[c] ? fmtWon(grand[c]) : '—'}</b></td>`).join('')}
+    <td style="text-align:right;"><b>${fmtWon(grandTotal)}</b></td>`;
   tb.appendChild(trT);
-  tHost.appendChild(tbl);
-  tHost.insertAdjacentHTML('beforeend',
-    `<div class="hint" style="margin-top:8px;">행을 클릭하면 ${legacyView.mode === 'period' ? '지점별' : '기간별'} 내역이 펼쳐집니다.
-     AP = JLRK → 리테일러 지급, AR = 리테일러 → JLRK 입금. 전부 공급가액(VAT 별도) 기준.</div>`);
 }
 
-/* 펼침 상세 — 기간별 보기면 지점 축, 리테일러별 보기면 기간 축 */
-function buildLegacyDetail(rows){
-  const byPeriod = legacyView.mode === 'period';
-  const keyOf = byPeriod ? (r => `${r.retailer_code}|${r.workshop_label}`) : (r => r.period_key);
-  const labOf = byPeriod ? (r => `${r.retailer_code} · ${r.workshop_label}`) : (r => r.period_label);
-  const m = new Map();
-  rows.forEach(r => {
-    const k = keyOf(r);
-    if(!m.has(k)) m.set(k, { label:labOf(r), sort:byPeriod ? labOf(r) : legacySortKey(r), sums:{} });
-    const e = m.get(k);
-    e.sums[r.item] = (e.sums[r.item] || 0) + Number(r.amount || 0);
+/* 기간 1건의 지점별 상세 */
+function buildHistoryDetail(p){
+  const items = Array.from(new Set(p.detail.map(d => d.item)));
+  const multi = items.length > 1;
+  const byWho = new Map();
+  p.detail.forEach(d => {
+    if(!byWho.has(d.who)) byWho.set(d.who, { who:d.who, sums:{}, total:0, status:d.status });
+    const e = byWho.get(d.who);
+    e.sums[d.item] = (e.sums[d.item] || 0) + d.amount;
+    e.total += d.amount;
   });
-  const list = Array.from(m.values()).sort((a,b) => String(a.sort).localeCompare(String(b.sort),'ko'));
+  const list = Array.from(byWho.values()).sort((a,b) => a.who.localeCompare(b.who,'ko'));
   const tbl = document.createElement('table');
   tbl.style.margin = '4px 0';
   tbl.innerHTML = `<thead><tr>
-      <th>${byPeriod ? '지점' : '기간'}</th>
-      ${LEGACY_ITEMS.map(i => `<th style="text-align:right;">${i.label}</th>`).join('')}
+      <th>지점</th>
+      ${multi ? items.map(i => `<th style="text-align:right;">${HIST_ITEM_LABEL[i]||i}</th>`).join('') : ''}
+      <th style="text-align:right;">${multi ? '합계' : '금액'}</th>
+      ${p.kind === 'portal' ? '<th>상태</th>' : ''}
     </tr></thead><tbody>${
     list.map(e => `<tr>
-        <td class="muted">${e.label}</td>
-        ${LEGACY_ITEMS.map(i => `<td style="text-align:right;">${e.sums[i.key] ? fmtWon(e.sums[i.key]) : '—'}</td>`).join('')}
-      </tr>`).join('')
-    }</tbody>`;
+      <td class="muted">${e.who}</td>
+      ${multi ? items.map(i => `<td style="text-align:right;">${e.sums[i] ? fmtWon(e.sums[i]) : '—'}</td>`).join('') : ''}
+      <td style="text-align:right;">${e.total ? fmtWon(e.total) : '—'}</td>
+      ${p.kind === 'portal' ? `<td class="muted">${CLAIM_STATUS_LABEL[e.status]||e.status||''}</td>` : ''}
+    </tr>`).join('')}</tbody>`;
   return tbl;
 }
 
-function downloadLegacyXlsx(rows){
-  const header = ['회계연도','분기','기간','원본월','정산시기','리테일러','지점','항목','방향','금액','Jaguar','Land Rover'];
+function downloadHistoryXlsx(entry){
+  const periods = histPeriods(entry);
+  const header = ['정산유형','방향','기간','구분','상태','회계연도','리테일러','지점','항목','금액'];
+  const body = [];
+  periods.forEach(p => {
+    p.detail.forEach(d => {
+      const who = d.who.split(' · ');
+      body.push([entry.name, entry.direction, p.label, p.kind === 'manual' ? '수동' : '포털',
+        p.kind === 'manual' ? '' : (ROUND_STATUS_LABEL[p.status]||p.status||''), p.fy||'',
+        who[0]||'', who[1]||'', HIST_ITEM_LABEL[d.item] || (d.item === 'PORTAL' ? '' : d.item),
+        d.amount]);
+    });
+  });
   const aoa = [
-    ['이전 청구이력 (포털 도입 전) — Engine Oil Package'],
-    [`추출 ${new Date().toLocaleString('ko-KR')} · ${rows.length}행 · 금액은 공급가액(VAT 별도)`],
-    [], header,
-    ...rows.slice().sort((a,b) => legacySortKey(a).localeCompare(legacySortKey(b)) || a.item.localeCompare(b.item))
-      .map(r => [
-        r.fiscal_year, r.quarter||'', r.period_label, r.data_month||'', r.settle_month||'',
-        r.retailer_code, r.workshop_label,
-        (LEGACY_ITEMS.find(i => i.key === r.item)||{}).label || r.item,
-        r.direction, Number(r.amount||0), Number(r.amount_jg||0), Number(r.amount_lr||0)
-      ])
+    [`과거 정산내역 — ${entry.name}`],
+    [`추출 ${new Date().toLocaleString('ko-KR')} · 기간 ${periods.length}건 · ${body.length}행 · 공급가액(VAT 별도)`],
+    [], header, ...body
   ];
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, '이전청구이력');
+  XLSX.utils.book_append_sheet(wb, ws, '정산내역');
   const out = XLSX.write(wb, { bookType:'xlsx', type:'array' });
   const blob = new Blob([out], { type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = url; a.download = `이전청구이력_EngineOilPackage_${new Date().toISOString().slice(0,10)}.xlsx`;
+  a.href = url;
+  a.download = `과거정산내역_${sanitizeFilename(entry.name)}_${new Date().toISOString().slice(0,10)}.xlsx`;
   document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
 }
+
+document.getElementById('historyRefreshBtn').addEventListener('click', () => { histData = null; loadHistory(); });
+document.getElementById('goHistoryBtn').addEventListener('click', () => switchView('history'));
+document.getElementById('historyBack').addEventListener('click', () => switchView('retailer'));
 
 /* ---------- 예산 구분별 분기 집행 현황 ---------- */
 async function renderBudgetPanel(rounds, allClaims){
