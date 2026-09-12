@@ -37,6 +37,8 @@
 | `030_asap_settlement_types.sql` | ASAP 정산유형 2종 신설 — `ASAP_SUPPORT`(ASAP 전시차 지원 프로그램, AP·분기·VAT 10%·UPLOAD) / `ASAP_INCENTIVE`(AP·분기·VAT 0%·`amount_mode='ADMIN_UPLOAD'` + `source_config.preset='ASAP_ADMIN_UPLOAD'`). 둘 다 GL 700050800, JG:LR 10:90 고정. 이미 있으면 `where not exists` 로 생성 생략. ⚠️ 청구양식·바우처템플릿은 Storage 파일이라 SQL 로 못 넣는다 — 정산유형 화면에서 업로드 |
 | `031_legacy_asap_seed_1~3.sql` | ASAP 2종 과거 정산 **173행 시드** (FY26 Q1 ~ FY27 Q1, 분기 5회). 출처는 실제 발행 AP 바우처의 `AP_input` 시트(vendor code별) — 10개 바우처 전부 시트합계 = Total행 = 표지 Net 일치 검증. Incentive 는 `ASAP_SVC`(Service) / `ASAP_SALES`(Sales) 2개 item 으로 분리. ⚠️ `027`·`030` 먼저, 1→3 순서 |
 | `032_fix_pnd_duplicate.sql` | **중복 정리** — 029(P&D) 시드가 두 번 실행돼 `legacy_settlements` 가 952행(P&D 224행 = 112×2)이 됐던 것을 (기간 × 지점)별 최초 1행만 남기고 정리. 실행 후 840행이 정상 |
+| `033_one_care_incentive_type.sql` | **One Care Incentive** 유형 신설 — AP·분기·법인단위·VAT 0%·**GL 700030201**·JG:LR 10:90, `amount_mode='ADMIN_UPLOAD'` + `source_config.preset='ADMIN_UPLOAD'` (ASAP Incentive 와 같은 관리자 선업로드 방식). Recall 은 기존 `Recall Upselling Program` 유형을 쓰므로 새로 만들지 않는다 |
+| `034_legacy_onecare_recall_seed_1~3.sql` | One Care Incentive + Recall 업셀링 과거 **179행** (FY26 Q1~FY27 Q1). One Care 는 `ONECARE_SVC`/`ONECARE_SR` 2개 item(94행 100,600,000 / 44행 15,200,000), Recall 은 `RECALL`(41행 167,971,662). 10개 바우처 전부 시트합계=Total행=표지 Net 일치 검증. 마지막 파일에서 type_code 를 실제 유형 코드로 교정 |
 
 ## ⚠️ 알아둘 것
 
@@ -58,6 +60,10 @@
 - ASAP Incentive 의 `ADMIN_UPLOAD` 흐름은 스키마 변경이 없다 — `claims.detail` 에
   `admin_amount`/`admin_file_path`/`retailer_action`/`retailer_note` 를 담고 회신 파일은 `claims.file_path`.
   리테일러 쓰기는 기존 `claims_retailer_write` 정책(OPEN + 마감 전, 또는 REJECTED)이 그대로 커버한다.
+- `034` 의 One Care FY26 Q2·Q3 는 원본 파일명이 'EW Incentive'(연장보증) — One Care 로
+  개편되기 전 이름이라 같은 프로그램으로 묶었다.
+- `034` 에는 지점 마스터에 없는 **SR(쇼룸) 사이트**가 있다: 'CH GN SR'(천일 강남),
+  'EN DG SR'(인타이어 대구). workshop_code 는 null 이고 리테일러 합계에는 정상 포함된다.
 - `028` 에는 포털 미등록 지점도 들어있다 — 천안(`CH CA`), 브리티시 평촌(`BA PC`, 폐업).
   `workshop_code`/`retailer_id` 가 null 이라 관리자 화면에서만 보인다.
 

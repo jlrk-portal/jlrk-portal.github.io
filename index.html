@@ -3769,7 +3769,9 @@ async function loadDashboard(){
      (또는 code). 매칭 안 되는 수동분은 "(수동 업로드)" 가상 유형으로 묶는다.
    - 리테일러 계정은 RLS 로 자기 법인 행만 내려오므로 별도 필터가 필요 없다.
    ================================================================ */
-const HIST_ITEM_LABEL = { SP:'판매대금', SAVEBACK:'사용반환금', SUPPORT:'JLRK 기여금', INCENTIVE:'인센티브', PND:'픽업&딜리버리' };
+const HIST_ITEM_LABEL = { SP:'판매대금', SAVEBACK:'사용반환금', SUPPORT:'JLRK 기여금', INCENTIVE:'인센티브',
+  PND:'픽업&딜리버리', ASAP_SUPPORT:'전시차 지원', ASAP_SVC:'Service', ASAP_SALES:'Sales',
+  ONECARE_SVC:'Service', ONECARE_SR:'Sales(SR)', RECALL:'리콜 업셀링' };
 let histData = null;
 const histView = { typeKey:'', fy:'', expanded:null };
 
@@ -4068,9 +4070,9 @@ document.getElementById('historyBack').addEventListener('click', () => switchVie
    스키마 변경 없음 — claims.detail(jsonb) / file_path / claimed_amount 를 사용한다.
    리테일러 UI 는 settlement_types_public 뷰만 읽으므로 preset 으로 분기한다.
    ================================================================ */
-const ADMIN_UPLOAD_PRESET = 'ASAP_ADMIN_UPLOAD';
+const ADMIN_UPLOAD_PRESETS = ['ADMIN_UPLOAD', 'ASAP_ADMIN_UPLOAD'];
 const isAdminUploadType = (t) =>
-  t?.amount_mode === 'ADMIN_UPLOAD' || t?.source_config?.preset === ADMIN_UPLOAD_PRESET;
+  t?.amount_mode === 'ADMIN_UPLOAD' || ADMIN_UPLOAD_PRESETS.includes(t?.source_config?.preset);
 
 /* ---------- 관리자: 산정내역 등록 섹션 ---------- */
 async function renderAdminUploadSection(round, type, claims){
