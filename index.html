@@ -681,6 +681,7 @@
           <option value="SYSTEM">시스템 산출 (리테일러 입력 없음)</option>
           <option value="UNIT">수량 × 단가 계산</option>
           <option value="MANUAL">관리자 직접 입력</option>
+          <option value="ADMIN_UPLOAD">관리자 산정 후 공유 → 리테일러 확인·수정 회신</option>
         </select>
       </div>
       <div class="field" id="grp_unit_price"><label>단가 (수량×단가 방식일 때)</label><input id="f_unit_price" type="number" step="0.0001" placeholder="예: 109329.6667"></div>
@@ -4058,6 +4059,237 @@ document.getElementById('historyRefreshBtn').addEventListener('click', () => { h
 document.getElementById('goHistoryBtn').addEventListener('click', () => switchView('history'));
 document.getElementById('historyBack').addEventListener('click', () => switchView('retailer'));
 
+/* ================================================================
+   ADMIN_UPLOAD 흐름 — 관리자가 먼저 산정해 공유, 리테일러가 검토·수정 회신
+   (ASAP Incentive 처럼 JLRK가 금액을 계산해서 내려주는 유형)
+     관리자: ① 청구 대상 생성 → ② 리테일러별 산정금액·산정파일 등록
+             → ③ 공유(개설) → 리테일러 회신 확인 → 마감 → 기존 검토 화면에서 확정
+     리테일러: 산정파일 내려받기 → "이대로 확인" 또는 "수정본 제출"(파일+금액+코멘트)
+   스키마 변경 없음 — claims.detail(jsonb) / file_path / claimed_amount 를 사용한다.
+   리테일러 UI 는 settlement_types_public 뷰만 읽으므로 preset 으로 분기한다.
+   ================================================================ */
+const ADMIN_UPLOAD_PRESET = 'ASAP_ADMIN_UPLOAD';
+const isAdminUploadType = (t) =>
+  t?.amount_mode === 'ADMIN_UPLOAD' || t?.source_config?.preset === ADMIN_UPLOAD_PRESET;
+
+/* ---------- 관리자: 산정내역 등록 섹션 ---------- */
+async function renderAdminUploadSection(round, type, claims){
+  const host = document.getElementById('reviewSection');
+  const editable = ['DRAFT','OPEN'].includes(round.status);
+  const card = document.createElement('div');
+  card.className = 'info-card';
+  card.innerHTML = `
+    <div class="section-label" style="margin-top:0;">JLRK 산정 내역 ${editable ? '— 금액 입력 · 파일 업로드' : ''}</div>
+    <div class="hint" style="margin-bottom:10px;">
+      이 유형은 <b>JLRK가 먼저 산정</b>해서 공유하고, 리테일러는 그대로 확인하거나 <b>수정본을 회신</b>합니다.
+      ${round.status === 'DRAFT' ? '공유(개설) 전까지는 리테일러에게 보이지 않습니다.' : ''}
+    </div>`;
+  if((claims||[]).length === 0){
+    card.innerHTML += '<div class="hint">먼저 위에서 <b>청구 대상 생성</b>을 눌러주세요.</div>';
+    host.appendChild(card); return;
+  }
+  const tbl = document.createElement('table');
+  tbl.innerHTML = `<thead><tr>
+      <th>대상</th><th>산정금액</th><th>산정 파일</th>
+      <th>리테일러 회신</th><th>회신 파일</th><th>코멘트</th>
+    </tr></thead><tbody></tbody>`;
+  const tb = tbl.querySelector('tbody');
+  (claims||[]).forEach(c => {
+    const label = c.workshops ? `${c.retailers?.code} · ${c.workshops.name}` : (c.retailers?.name || c.retailers?.code);
+    const adminAmt = c.detail?.admin_amount ?? c.claimed_amount;
+    const act = c.detail?.retailer_action;
+    const reply = act === 'CONFIRMED' ? '<span class="badge badge-ap">그대로 확인</span>'
+                : act === 'REVISED'   ? '<span class="badge badge-warn">수정본 회신</span>'
+                : (c.status === 'NOT_SUBMITTED' ? '<span class="muted">대기</span>'
+                                                : `<span class="badge">${CLAIM_STATUS_LABEL[c.status]||c.status}</span>`);
+    const replyAmt = (act === 'REVISED' && c.claimed_amount != null)
+      ? `<div class="hint">회신금액 ${Number(c.claimed_amount).toLocaleString('ko-KR')}원</div>` : '';
+    const tr = document.createElement('tr');
+    tr.dataset.claimId = c.id;
+    tr.dataset.retailerId = c.retailer_id;
+    tr.innerHTML = `
+      <td>${label}</td>
+      <td>${editable
+        ? `<input type="text" inputmode="numeric" class="row-amt-input au-amt" style="width:120px;" value="${adminAmt != null ? Number(adminAmt).toLocaleString('ko-KR') : ''}">`
+        : (adminAmt != null ? Number(adminAmt).toLocaleString('ko-KR')+'원' : '—')}</td>
+      <td>${c.detail?.admin_file_path
+            ? `<span class="file-link" data-path="${c.detail.admin_file_path}">현재 파일</span>` : '<span class="muted">없음</span>'}
+          ${editable ? '<input type="file" class="au-file" accept=".xlsx,.xls,.pdf" style="font-size:11px; width:140px; margin-top:4px;">' : ''}</td>
+      <td>${reply}${replyAmt}</td>
+      <td>${c.file_path ? `<span class="file-link" data-path="${c.file_path}">회신 파일</span>` : '—'}</td>
+      <td class="muted" style="max-width:220px;">${c.detail?.retailer_note ? String(c.detail.retailer_note).replace(/[<>]/g,'') : '—'}</td>`;
+    tb.appendChild(tr);
+  });
+  card.appendChild(tbl);
+  card.querySelectorAll('.row-amt-input').forEach(formatAmountInput);
+  card.querySelectorAll('.file-link').forEach(el =>
+    el.addEventListener('click', () => downloadFile(el.dataset.path)));
+
+  if(editable){
+    const bar = document.createElement('div');
+    bar.className = 'action-row';
+    bar.innerHTML = `<button class="btn" id="auSaveBtn">산정 내역 저장</button>
+      <span class="hint" id="auSaveHint" style="margin-left:10px;"></span>`;
+    card.appendChild(bar);
+    bar.querySelector('#auSaveBtn').addEventListener('click', async () => {
+      const btn = bar.querySelector('#auSaveBtn'); const hint = bar.querySelector('#auSaveHint');
+      btn.disabled = true;
+      let saved = 0, failed = 0;
+      for(const tr of card.querySelectorAll('tbody tr')){
+        const claimId = tr.dataset.claimId;
+        const amt = readAmountInput(tr.querySelector('.au-amt'));
+        const file = tr.querySelector('.au-file')?.files?.[0];
+        const cur = (claims||[]).find(x => x.id === claimId) || {};
+        const detail = { ...(cur.detail || {}) };
+        if(file){
+          hint.textContent = `파일 업로드 중... (${saved+1})`;
+          const path = `${tr.dataset.retailerId}/${round.id}/admin-${Date.now()}-${sanitizeFilename(file.name)}`;
+          const { error: upErr } = await sb.storage.from('settlements').upload(path, file, { upsert:true });
+          if(upErr){ failed++; console.warn('산정파일 업로드 실패', upErr.message); continue; }
+          detail.admin_file_path = path;
+          detail.admin_file_name = file.name;
+        }
+        detail.admin_amount = (amt === null || amt === undefined || Number.isNaN(amt)) ? null : amt;
+        detail.admin_uploaded_at = new Date().toISOString();
+        const patch = { detail };
+        // 리테일러가 아직 회신하지 않았으면 청구금액도 산정액으로 채워둔다
+        if(!detail.retailer_action) patch.claimed_amount = detail.admin_amount;
+        const { error } = await sb.from('claims').update(patch).eq('id', claimId);
+        if(error){ failed++; console.warn('저장 실패', error.message); } else saved++;
+      }
+      hint.textContent = `저장 ${saved}건${failed ? ` · 실패 ${failed}건` : ''}`;
+      await logAudit('CLAIM_ADMIN_UPLOAD','ROUND',round.id,
+        {label:`${type.name} · ${round.period_label} · 산정내역 ${saved}건 저장`});
+      btn.disabled = false;
+      await renderRoundDetail();
+    });
+  }
+  host.appendChild(card);
+}
+
+/* 이미 청구 대상이 만들어진 회차를 개설(공유)만 한다 — openRound 는 claims 를 새로 넣으므로 못 씀 */
+async function shareAdminUploadRound(round, type, claims){
+  const missing = (claims||[]).filter(c => (c.detail?.admin_amount ?? c.claimed_amount) == null);
+  if(missing.length && !confirm(`산정금액이 비어 있는 대상 ${missing.length}건이 있습니다. 그대로 공유할까요?`)) return;
+  if(!confirm(`${round.period_label} 산정 내역을 리테일러에게 공유할까요? 공유 후에는 리테일러가 확인·수정 회신을 할 수 있습니다.`)) return;
+  const { error } = await sb.from('rounds').update({ status:'OPEN' }).eq('id', round.id);
+  if(error){ alert('공유 실패: ' + error.message); return; }
+  await logAudit('ROUND_OPEN','ROUND',round.id,{label:`${type.name} · ${round.period_label} · 산정내역 공유`});
+  const ids = [...new Set((claims||[]).map(c => c.retailer_id))];
+  await notifyRoundOpened(round, type, ids);
+  await renderRoundDetail();
+}
+
+/* ---------- 리테일러: 확인 / 수정본 회신 카드 ---------- */
+async function renderAdminUploadRetailerCard(listEl, round, items){
+  const withinDeadline = round.status === 'OPEN' && (!round.claim_due_at || new Date(round.claim_due_at) > new Date());
+  const card = document.createElement('div');
+  card.className = 'claim-card';
+  const dueStr = round.claim_due_at ? new Date(round.claim_due_at).toLocaleString('ko-KR') : '미설정';
+  let html = `
+    <div class="claim-head">
+      <div>
+        <div class="claim-name">${round.settlement_types?.name || ''} · ${round.period_label}</div>
+        <div class="claim-sub">회신 마감 ${dueStr} ${dDayBadge(round.claim_due_at, round.status==='OPEN')}
+          · <span class="badge ${round.status==='OPEN'?'badge-ap':'badge-off'}">${ROUND_STATUS_LABEL[round.status]||round.status}</span></div>
+      </div>
+    </div>
+    <div class="hint" style="margin-bottom:12px;">
+      JLR Korea가 산정한 정산 내역입니다. 파일을 확인하신 뒤 <b>이대로 확인</b>하거나,
+      수정이 필요하면 <b>수정본을 제출</b>해주세요. 수정본은 JLR Korea 담당자가 검토합니다.
+    </div>
+    <table><thead><tr><th>대상</th><th>상태</th><th>JLRK 산정금액</th><th>산정 파일</th><th>내 회신</th></tr></thead><tbody>`;
+  items.forEach(c => {
+    const label = c.workshops ? c.workshops.name : (myRetailer?.name || '법인 전체');
+    const adminAmt = c.detail?.admin_amount ?? c.claimed_amount;
+    const act = c.detail?.retailer_action;
+    const canAct = withinDeadline && (c.status === 'NOT_SUBMITTED' || c.status === 'REJECTED' || !act);
+    const statusBadge = act === 'CONFIRMED' ? '<span class="badge badge-ap">확인 완료</span>'
+                      : act === 'REVISED'   ? '<span class="badge badge-warn">수정본 제출</span>'
+                      : `<span class="badge ${c.status==='NOT_SUBMITTED'?'badge-warn':(c.status==='REJECTED'?'badge-danger':'badge-ap')}">${CLAIM_STATUS_LABEL[c.status]||c.status}</span>`;
+    const extra = [
+      c.status === 'REJECTED' && c.reject_reason ? `<div class="hint" style="color:var(--danger);">사유: ${c.reject_reason}</div>` : '',
+      c.approved_amount != null ? `<div class="hint">확정금액 <b style="color:var(--accent);">${Number(c.approved_amount).toLocaleString('ko-KR')}원</b></div>` : ''
+    ].join('');
+    html += `<tr data-claim-id="${c.id}">
+      <td>${label}</td>
+      <td>${statusBadge}${extra}</td>
+      <td>${adminAmt != null ? Number(adminAmt).toLocaleString('ko-KR')+'원' : '<span class="muted">미산정</span>'}</td>
+      <td>${c.detail?.admin_file_path
+            ? `<span class="file-link" data-path="${c.detail.admin_file_path}">내려받기</span>`
+            : '<span class="muted">없음</span>'}</td>
+      <td>${canAct ? `
+        <div style="display:flex; flex-direction:column; gap:6px;">
+          <button class="btn btn-sm au-confirm-btn">이대로 확인</button>
+          <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+            <input type="text" inputmode="numeric" class="row-amt-input au-rev-amt" style="width:110px;" placeholder="수정금액">
+            <input type="file" class="au-rev-file" accept=".xlsx,.xls,.pdf" style="font-size:11px; max-width:150px;">
+          </div>
+          <input type="text" class="au-rev-note" placeholder="수정 사유 (필수)" style="font-size:12px;">
+          <button class="btn btn-ghost btn-sm au-revise-btn">수정본 제출</button>
+        </div>`
+        : (act === 'REVISED'
+            ? `${c.file_path ? `<span class="file-link" data-path="${c.file_path}">제출한 파일</span>` : '—'}
+               <div class="hint">${c.detail?.retailer_note ? String(c.detail.retailer_note).replace(/[<>]/g,'') : ''}</div>`
+            : '<span class="muted">—</span>')}</td>
+    </tr>`;
+  });
+  html += '</tbody></table>';
+  card.innerHTML = html;
+  listEl.appendChild(card);
+
+  card.querySelectorAll('.row-amt-input').forEach(formatAmountInput);
+  card.querySelectorAll('.file-link').forEach(el =>
+    el.addEventListener('click', () => downloadFile(el.dataset.path)));
+
+  card.querySelectorAll('tr[data-claim-id]').forEach(tr => {
+    const claimId = tr.dataset.claimId;
+    const claim = items.find(c => c.id === claimId);
+    const confirmBtn = tr.querySelector('.au-confirm-btn');
+    const reviseBtn  = tr.querySelector('.au-revise-btn');
+    if(confirmBtn) confirmBtn.addEventListener('click', async () => {
+      if(!confirm('JLRK 산정금액을 그대로 확인하시겠습니까?')) return;
+      confirmBtn.disabled = true;
+      const adminAmt = claim.detail?.admin_amount ?? claim.claimed_amount;
+      const { error } = await sb.from('claims').update({
+        status:'SUBMITTED', claimed_amount: adminAmt, submitted_at: new Date().toISOString(),
+        detail: { ...(claim.detail||{}), retailer_action:'CONFIRMED', retailer_replied_at: new Date().toISOString() }
+      }).eq('id', claimId);
+      if(error){ alert('처리 실패: ' + error.message); confirmBtn.disabled = false; return; }
+      await logAudit('CLAIM_SUBMIT','CLAIM',claimId,{label:`${round.settlement_types?.name||''} · ${round.period_label} · 산정내역 확인`});
+      await loadRetailerClaims();
+    });
+    if(reviseBtn) reviseBtn.addEventListener('click', async () => {
+      const amt = readAmountInput(tr.querySelector('.au-rev-amt'));
+      const file = tr.querySelector('.au-rev-file')?.files?.[0];
+      const note = (tr.querySelector('.au-rev-note')?.value || '').trim();
+      if(!note){ alert('수정 사유를 입력해주세요.'); return; }
+      if(amt == null && !file){ alert('수정금액 또는 수정본 파일 중 하나는 입력해주세요.'); return; }
+      reviseBtn.disabled = true;
+      let filePath = claim.file_path || null;
+      if(file){
+        const path = `${myProfile.retailer_id}/${round.id}/revised-${Date.now()}-${sanitizeFilename(file.name)}`;
+        const { error: upErr } = await sb.storage.from('settlements').upload(path, file, { upsert:true });
+        if(upErr){ alert('파일 업로드 실패: ' + upErr.message); reviseBtn.disabled = false; return; }
+        filePath = path;
+      }
+      const adminAmt = claim.detail?.admin_amount ?? claim.claimed_amount;
+      const { error } = await sb.from('claims').update({
+        status:'SUBMITTED',
+        claimed_amount: amt != null ? amt : adminAmt,
+        file_path: filePath,
+        submitted_at: new Date().toISOString(),
+        detail: { ...(claim.detail||{}), retailer_action:'REVISED', retailer_note: note,
+                  retailer_replied_at: new Date().toISOString() }
+      }).eq('id', claimId);
+      if(error){ alert('제출 실패: ' + error.message); reviseBtn.disabled = false; return; }
+      await logAudit('CLAIM_SUBMIT','CLAIM',claimId,
+        {label:`${round.settlement_types?.name||''} · ${round.period_label} · 수정본 회신`});
+      await loadRetailerClaims();
+    });
+  });
+}
+
 /* ---------- 예산 구분별 분기 집행 현황 ---------- */
 async function renderBudgetPanel(rounds, allClaims){
   const host = document.getElementById('dashBudget');
@@ -4893,7 +5125,26 @@ async function renderRoundDetail(){
   /* ---------- 상단 액션 ---------- */
   const actions = document.getElementById('rd_actions');
   actions.innerHTML = '';
-  if(round.status === 'DRAFT'){
+  if(round.status === 'DRAFT' && isAdminUploadType(type)){
+    // 관리자 선업로드 유형: 청구 대상을 먼저 만들고 산정내역을 채운 뒤 공유한다
+    const btn = document.createElement('button');
+    btn.className = 'btn';
+    if((claims||[]).length === 0){
+      btn.textContent = '① 청구 대상 생성 (산정내역 입력 준비)';
+      btn.addEventListener('click', () => regenerateClaimTargets(round, type));
+    } else {
+      btn.textContent = '② 리테일러에게 산정내역 공유 (개설)';
+      btn.addEventListener('click', () => shareAdminUploadRound(round, type, claims));
+    }
+    actions.appendChild(btn);
+    const hint = document.createElement('div');
+    hint.className = 'hint'; hint.style.marginTop = '8px';
+    hint.textContent = (claims||[]).length === 0
+      ? '※ 대상을 만들면 아래에 리테일러별 산정금액·파일 입력란이 열립니다.'
+      : '※ 아래에서 산정금액과 파일을 저장한 뒤 공유하세요. 공유하면 리테일러에게 메일이 갑니다.';
+    actions.appendChild(hint);
+    appendDueEditor(actions, round, type);
+  } else if(round.status === 'DRAFT'){
     const btn = document.createElement('button');
     btn.className = 'btn'; btn.textContent = '리테일러에게 청구 요청 시작 (개설)';
     btn.addEventListener('click', () => openRound(round, type));
@@ -4957,6 +5208,10 @@ async function renderRoundDetail(){
   // 시스템 산출 유형: 원본 업로드 섹션 (리테일러 입력 없음)
   if(type.amount_mode === 'SYSTEM' && ['DRAFT','OPEN','CLOSED'].includes(round.status)){
     await renderSystemSourceSection(round, type, claims);
+  }
+  // 관리자 선업로드 유형: 리테일러별 산정금액·파일 등록 + 회신 현황
+  if(isAdminUploadType(type) && ['DRAFT','OPEN','CLOSED','CONFIRMED'].includes(round.status)){
+    await renderAdminUploadSection(round, type, claims);
   }
   if(round.status === 'CLOSED' || round.status === 'CONFIRMED'){
     const pendingClaims = (claims||[]).filter(c => c.status === 'SUBMITTED');
@@ -6802,6 +7057,11 @@ async function loadRetailerClaims(){
     // Engine Oil (AP · 시스템 산출) — 확인 전용 카드
     if(isEnginePreset(round.settlement_types)){
       await renderEngineOilRetailerCard(listEl, round, items);
+      continue;
+    }
+    // 관리자 선업로드 유형(ASAP Incentive 등) — 확인 / 수정본 회신 카드
+    if(isAdminUploadType(round.settlement_types)){
+      await renderAdminUploadRetailerCard(listEl, round, items);
       continue;
     }
     // AR(JLRK가 청구)은 별도 카드로 렌더링

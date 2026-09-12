@@ -34,6 +34,8 @@
 | `027_legacy_settlement_history.sql` | **포털 도입 전 청구이력** — `legacy_settlements` 테이블. 1행 = (기간 × 지점 × 항목), `item` = SP(판매대금·AR) / SAVEBACK(사용반환금) / SUPPORT(JLRK 기여금) / INCENTIVE. 워크플로 없는 읽기전용 기록이라 rounds·claims 와 분리. RLS: 관리자 전체 + 리테일러 자기 법인만, 익명 차단 |
 | `028_legacy_engine_oil_seed_1~7.sql` | Engine Oil Package 과거 정산 **555행 시드** (FY26 Q3 ~ FY27 Q2 7월). master 9종 + 실제 발행 AP/AR 바우처에서 추출, 27개 기간×항목 합계가 바우처 금액과 100% 일치 검증됨. ⚠️ `027` 먼저, 그다음 **1~7번 순서대로**. SQL Editor 가 약 50KB 에서 입력을 자르기 때문에(→ `unterminated quoted string`) 7개로 분할함. FK 연결 update + 검증 select 는 7번 파일에 있음. 재실행 시 1번 파일 상단 `delete` 주석 해제 |
 | `029_legacy_pickup_delivery_seed_1~2.sql` | Pick up & Delivery 과거 정산 **112행 시드** (FY26 Q1 ~ FY27 Q1, 분기 5회, AP·VAT 10%). 각 분기 내역서의 `JLRK 전체리스트` 원본 로우데이터를 지점별 집계 → 5개 분기 × 리테일러 9개사 전부 실제 AP 바우처 금액과 원 단위 일치 검증. 마지막 파일에서 `settlement_types` 의 실제 Pick up & Delivery 유형 코드로 `type_code` 를 자동 교정한다. ⚠️ `027` 먼저, 1→2 순서 |
+| `030_asap_settlement_types.sql` | ASAP 정산유형 2종 신설 — `ASAP_SUPPORT`(ASAP 전시차 지원 프로그램, AP·분기·VAT 10%·UPLOAD) / `ASAP_INCENTIVE`(AP·분기·VAT 0%·`amount_mode='ADMIN_UPLOAD'` + `source_config.preset='ASAP_ADMIN_UPLOAD'`). 둘 다 GL 700050800, JG:LR 10:90 고정. 이미 있으면 `where not exists` 로 생성 생략. ⚠️ 청구양식·바우처템플릿은 Storage 파일이라 SQL 로 못 넣는다 — 정산유형 화면에서 업로드 |
+| `031_legacy_asap_seed_1~3.sql` | ASAP 2종 과거 정산 **173행 시드** (FY26 Q1 ~ FY27 Q1, 분기 5회). 출처는 실제 발행 AP 바우처의 `AP_input` 시트(vendor code별) — 10개 바우처 전부 시트합계 = Total행 = 표지 Net 일치 검증. Incentive 는 `ASAP_SVC`(Service) / `ASAP_SALES`(Sales) 2개 item 으로 분리. ⚠️ `027`·`030` 먼저, 1→3 순서 |
 
 ## ⚠️ 알아둘 것
 
@@ -50,6 +52,11 @@
 - `029` One Care 분해는 FY26 Q2 만 바우처와 불일치(그 분기 분류 기준이 달랐음)라서
   Q2 행에는 normal/onecare 를 넣지 않았다. 브랜드(JG/LR) 는 원본에 Brand 컬럼이 있는
   FY26 Q2·Q4 / FY27 Q1 만 채웠다.
+- `031`(ASAP) 은 전시차 지원 내역서 원본이 사진 때문에 48MB~314MB 라 열지 않고 **바우처 기준**으로 넣었다.
+  실제 청구·지급된 금액이 바우처이므로 이력으로는 그쪽이 맞다.
+- ASAP Incentive 의 `ADMIN_UPLOAD` 흐름은 스키마 변경이 없다 — `claims.detail` 에
+  `admin_amount`/`admin_file_path`/`retailer_action`/`retailer_note` 를 담고 회신 파일은 `claims.file_path`.
+  리테일러 쓰기는 기존 `claims_retailer_write` 정책(OPEN + 마감 전, 또는 REJECTED)이 그대로 커버한다.
 - `028` 에는 포털 미등록 지점도 들어있다 — 천안(`CH CA`), 브리티시 평촌(`BA PC`, 폐업).
   `workshop_code`/`retailer_id` 가 null 이라 관리자 화면에서만 보인다.
 
