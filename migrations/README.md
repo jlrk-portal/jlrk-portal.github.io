@@ -36,6 +36,7 @@
 | `029_legacy_pickup_delivery_seed_1~2.sql` | Pick up & Delivery 과거 정산 **112행 시드** (FY26 Q1 ~ FY27 Q1, 분기 5회, AP·VAT 10%). 각 분기 내역서의 `JLRK 전체리스트` 원본 로우데이터를 지점별 집계 → 5개 분기 × 리테일러 9개사 전부 실제 AP 바우처 금액과 원 단위 일치 검증. 마지막 파일에서 `settlement_types` 의 실제 Pick up & Delivery 유형 코드로 `type_code` 를 자동 교정한다. ⚠️ `027` 먼저, 1→2 순서 |
 | `030_asap_settlement_types.sql` | ASAP 정산유형 2종 신설 — `ASAP_SUPPORT`(ASAP 전시차 지원 프로그램, AP·분기·VAT 10%·UPLOAD) / `ASAP_INCENTIVE`(AP·분기·VAT 0%·`amount_mode='ADMIN_UPLOAD'` + `source_config.preset='ASAP_ADMIN_UPLOAD'`). 둘 다 GL 700050800, JG:LR 10:90 고정. 이미 있으면 `where not exists` 로 생성 생략. ⚠️ 청구양식·바우처템플릿은 Storage 파일이라 SQL 로 못 넣는다 — 정산유형 화면에서 업로드 |
 | `031_legacy_asap_seed_1~3.sql` | ASAP 2종 과거 정산 **173행 시드** (FY26 Q1 ~ FY27 Q1, 분기 5회). 출처는 실제 발행 AP 바우처의 `AP_input` 시트(vendor code별) — 10개 바우처 전부 시트합계 = Total행 = 표지 Net 일치 검증. Incentive 는 `ASAP_SVC`(Service) / `ASAP_SALES`(Sales) 2개 item 으로 분리. ⚠️ `027`·`030` 먼저, 1→3 순서 |
+| `032_fix_pnd_duplicate.sql` | **중복 정리** — 029(P&D) 시드가 두 번 실행돼 `legacy_settlements` 가 952행(P&D 224행 = 112×2)이 됐던 것을 (기간 × 지점)별 최초 1행만 남기고 정리. 실행 후 840행이 정상 |
 
 ## ⚠️ 알아둘 것
 
