@@ -3769,6 +3769,19 @@ async function loadDashboard(){
      (또는 code). 매칭 안 되는 수동분은 "(수동 업로드)" 가상 유형으로 묶는다.
    - 리테일러 계정은 RLS 로 자기 법인 행만 내려오므로 별도 필터가 필요 없다.
    ================================================================ */
+/* PostgREST 1000행 응답 상한을 넘어서도 전부 가져온다. { data, error } 형태로 돌려줘
+   기존 호출부(lRes.data / lRes.error)를 그대로 쓸 수 있게 맞춘다. */
+async function fetchAllRows(table, select, pageSize = 1000){
+  const out = [];
+  for(let from = 0; ; from += pageSize){
+    const { data, error } = await sb.from(table).select(select).range(from, from + pageSize - 1);
+    if(error) return { data: out, error };
+    out.push(...(data || []));
+    if(!data || data.length < pageSize) break;
+  }
+  return { data: out, error: null };
+}
+
 const HIST_ITEM_LABEL = { SP:'판매대금', SAVEBACK:'사용반환금', SUPPORT:'JLRK 기여금', INCENTIVE:'인센티브',
   PND:'픽업&딜리버리', ASAP_SUPPORT:'전시차 지원', ASAP_SVC:'Service', ASAP_SALES:'Sales',
   ONECARE_SVC:'Service', ONECARE_SR:'Sales(SR)', RECALL:'리콜 업셀링' };
@@ -3785,7 +3798,9 @@ async function loadHistory(){
     const typeTbl = isAdmin ? 'settlement_types' : 'settlement_types_public';
     const [tRes, lRes, rRes, cRes, retRes, wsRes] = await Promise.all([
       sb.from(typeTbl).select('id, code, name, direction, source_config'),
-      sb.from('legacy_settlements').select('type_code, item, direction, fiscal_year, quarter, period_key, period_label, data_month, settle_month, retailer_code, workshop_label, amount, amount_jg, amount_lr, detail'),
+      // ⚠️ PostgREST 는 한 응답을 1000행에서 자른다. 과거이력은 이미 1000행을 넘었으므로
+      //    반드시 range() 로 나눠 받아야 한다 (안 그러면 뒤쪽 유형이 통째로 누락된다).
+      fetchAllRows('legacy_settlements', 'type_code, item, direction, fiscal_year, quarter, period_key, period_label, data_month, settle_month, retailer_code, workshop_label, amount, amount_jg, amount_lr, detail'),
       sb.from('rounds').select('id, type_id, period_label, status, fiscal_year, created_at'),
       sb.from('claims').select('round_id, retailer_id, workshop_id, approved_amount, claimed_amount, status'),
       sb.from('retailers').select('id, code, name'),
