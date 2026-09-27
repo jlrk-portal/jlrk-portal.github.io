@@ -67,7 +67,7 @@ cat ~/.claude/plugins/cache/claude-plugins-official/discord/0.0.4/.in_use/* 2>/d
 ## 2. 디스코드 채널을 붙여서 실행 ← 핵심
 
 ```bash
-cd ~/Desktop/jlrk-settlement
+cd ~/icloud/Claude/jlrk-settlement
 claude --channels plugin:discord@claude-plugins-official
 ```
 
@@ -88,7 +88,7 @@ claude --channels plugin:discord@claude-plugins-official
 로그로도 확인:
 
 ```bash
-ls -t ~/Library/Caches/claude-cli-nodejs/-Users-youngjung-Desktop-jlrk-settlement/mcp-logs-plugin-discord-discord/*.jsonl \
+ls -t ~/Library/Caches/claude-cli-nodejs/-Users-youngjung-Library-Mobile-Documents-com-apple-CloudDocs-Claude-jlrk-settlement/mcp-logs-plugin-discord-discord/*.jsonl \
   | head -1 | xargs grep -o 'Channel notifications [a-z]*' | tail -1
 ```
 
@@ -105,8 +105,8 @@ ls -t ~/Library/Caches/claude-cli-nodejs/-Users-youngjung-Desktop-jlrk-settlemen
 
 | 봇 | 작업폴더 | Discord 설정폴더 | alias |
 |---|---|---|---|
-| ① 정산/CC 봇 | `~/Desktop/jlrk-settlement` | `~/.claude/channels/discord` (기본) | `jlrk` |
-| ② 비서(PA) 봇 | `~/pa` | `~/.claude/channels/discord-pa` | `pa` |
+| ① 정산/CC 봇 | `~/icloud/Claude/jlrk-settlement` | `~/.claude/channels/discord` (기본) | `jlrk` |
+| ② 비서(PA) 봇 | `~/icloud/Claude/pa` | `~/.claude/channels/discord-pa` | `pa` |
 
 **터미널을 새로 켤 필요 없다.** 이미 `screen`에 붙어 있으면 창만 하나 더 만들면 된다.
 
@@ -180,13 +180,13 @@ ps ax | grep '[c]laude --channels' | wc -l
 ## 앞으로 매번 하는 일 (요약)
 
 ```bash
-cd ~/Desktop/jlrk-settlement && claude --channels plugin:discord@claude-plugins-official
+cd ~/icloud/Claude/jlrk-settlement && claude --channels plugin:discord@claude-plugins-official
 ```
 
 alias 등록:
 
 ```bash
-echo "alias jlrk='cd ~/Desktop/jlrk-settlement && claude --channels plugin:discord@claude-plugins-official'" >> ~/.zshrc
+echo "alias jlrk='cd ~/icloud/Claude/jlrk-settlement && claude --channels plugin:discord@claude-plugins-official'" >> ~/.zshrc
 source ~/.zshrc
 ```
 
@@ -206,7 +206,7 @@ source ~/.zshrc
 | 여러 세션에서 인바운드가 겹침 | `.in_use/<pid>` 락은 한 세션만 유효. 나머지 세션 종료. |
 | 봇이 그룹 채널 메시지에 무반응 | 그룹은 `requireMention: true` → 반드시 봇 멘션 필요. DM은 `allowFrom`에 있는 사용자만. |
 | `zsh: unknown file attribute: ^` | 명령어 뒤 `# 주석`을 같이 붙여넣음. zsh 대화형 셸은 `#`을 주석으로 안 본다 → 명령이 실행되지 않았다. 주석 떼고 다시. |
-| PA 봇만 무반응 | `~/pa` 세션이 죽은 것. `ps ax \| grep '[c]laude --channels' \| wc -l` 이 `1`이면 4번 절대로 `pa --continue`. |
+| PA 봇만 무반응 | `~/icloud/Claude/pa` 세션이 죽은 것. `ps ax \| grep '[c]laude --channels' \| wc -l` 이 `1`이면 4번 절대로 `pa --continue`. |
 | PA 봇이 정산봇 설정을 씀 | `pa` alias 없이 맨 `claude`로 띄웠음. `DISCORD_STATE_DIR`가 빠지면 기본 폴더(`discord`)를 쓴다. alias로 다시. |
 
 ## 관련 파일 / 개념
@@ -216,6 +216,6 @@ source ~/.zshrc
 - 첨부 수신함: `~/.claude/channels/discord/inbox/`
 - 채널 소유 락: `~/.claude/plugins/cache/claude-plugins-official/discord/0.0.4/.in_use/<pid>`
 - MCP 서버 소스: 같은 경로의 `server.ts` (discord.js 게이트웨이 + MCP stdio)
-- MCP 로그: `~/Library/Caches/claude-cli-nodejs/-Users-youngjung-Desktop-jlrk-settlement/mcp-logs-plugin-discord-discord/*.jsonl`
+- MCP 로그: `~/Library/Caches/claude-cli-nodejs/-Users-youngjung-Library-Mobile-Documents-com-apple-CloudDocs-Claude-jlrk-settlement/mcp-logs-plugin-discord-discord/*.jsonl`
 - PA 봇 설정폴더: `~/.claude/channels/discord-pa/` (`.env`, `access.json`, `inbox/`) — `DISCORD_STATE_DIR`로 지정
-- PA 봇 작업폴더 / MCP 로그: `~/pa` / `~/Library/Caches/claude-cli-nodejs/-Users-youngjung-pa/mcp-logs-plugin-discord-discord/*.jsonl`
+- PA 봇 작업폴더 / MCP 로그: `~/icloud/Claude/pa` / `~/Library/Caches/claude-cli-nodejs/-Users-youngjung-Library-Mobile-Documents-com-apple-CloudDocs-Claude-pa/mcp-logs-plugin-discord-discord/*.jsonl`

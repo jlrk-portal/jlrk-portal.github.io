@@ -107,8 +107,9 @@ sudo launchctl kickstart -k system/com.openssh.sshd
 `~/.zshrc` 맨 아래에 추가:
 ```bash
 # --- 원격 작업용 ---
-alias work='screen -DR main'   # main 세션에 재접속, 없으면 생성
-alias jlrk='cd ~/Desktop/jlrk-settlement && claude --channels plugin:discord@claude-plugins-official'
+alias work='screen -DR main'
+alias jlrk='cd ~/icloud/Claude/jlrk-settlement && claude --channels plugin:discord@claude-plugins-official'
+alias pa='cd ~/icloud/Claude/pa && DISCORD_STATE_DIR="$HOME/.claude/channels/discord-pa" claude --channels plugin:discord@claude-plugins-official'
 ```
 적용: `source ~/.zshrc`
 

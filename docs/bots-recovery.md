@@ -4,8 +4,12 @@
 
 | 봇 | 채널에서 보이는 이름 | 작업폴더 | Discord 설정폴더 | 실행 alias |
 |---|---|---|---|---|
-| ① 정산/CC 봇 | Client Care & Digital Analyst | `~/Desktop/jlrk-settlement` | `~/.claude/channels/discord` (기본) | `jlrk` |
-| ② 비서(PA) 봇 | (새 봇 이름) | `~/pa` | `~/.claude/channels/discord-pa` | `pa` |
+| ① 정산/CC 봇 | Client Care & Digital Analyst | `~/icloud/Claude/jlrk-settlement` | `~/.claude/channels/discord` (기본) | `jlrk` |
+| ② 비서(PA) 봇 | (새 봇 이름) | `~/icloud/Claude/pa` | `~/.claude/channels/discord-pa` | `pa` |
+
+> 📁 **작업폴더 2개는 iCloud Drive 안에 있다** (2026-09-27 이전). `~/icloud` = iCloud Drive 루트 심볼릭링크.
+> 옛 경로 `~/pa`·`~/Desktop/jlrk-settlement` 도 심볼릭링크로 남겨뒀으니 어느 쪽으로 `cd` 해도 같은 폴더다.
+> 자세한 구조는 `docs/icloud-folder-layout.md`.
 
 **핵심 규칙 3개**
 1. 각 봇 = Claude Code 세션 1개. 세션이 죽으면 봇이 오프라인.
@@ -86,8 +90,8 @@ pa --continue
 `--continue` 는 직전 대화를 이어간다. 새로 시작하려면 `pa` 만.
 ⚠️ 정산봇 Claude Code가 돌고 있는 창에 타이핑하면 안 된다. 반드시 `Ctrl-a` `c` 로 만든 **새 창**에서.
 
-> `jlrk` = `cd ~/Desktop/jlrk-settlement && claude --channels plugin:discord@claude-plugins-official`
-> `pa`   = `cd ~/pa && DISCORD_STATE_DIR="$HOME/.claude/channels/discord-pa" claude --channels plugin:discord@claude-plugins-official`
+> `jlrk` = `cd ~/icloud/Claude/jlrk-settlement && claude --channels plugin:discord@claude-plugins-official`
+> `pa`   = `cd ~/icloud/Claude/pa && DISCORD_STATE_DIR="$HOME/.claude/channels/discord-pa" claude --channels plugin:discord@claude-plugins-official`
 > 뒤에 `--continue` 붙이면 그 폴더의 **마지막 대화**를 이어감. `-r` 붙이면 대화 목록에서 고름.
 
 ### 3. 살아있는지 확인 — 프로세스 수로 본다

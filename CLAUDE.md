@@ -20,6 +20,10 @@ JLR Korea가 8개 리테일러(21개 지점)와 주고받는 정산·청구 업�
 
 ## 저장소 구조
 
+> ⚠️ 이 저장소의 실제 위치는 **`~/icloud/Claude/jlrk-settlement`** (iCloud Drive, 2026-09-27 이전).
+> `~/Desktop/jlrk-settlement` 는 심볼릭링크. `.git` 은 iCloud 손상을 피해
+> `~/.local/claude-git/jlrk-settlement.git` 에 분리해뒀다 — 구조·주의사항은 `docs/icloud-folder-layout.md`.
+
 ```
 /index.html                 ← 애플리케이션 전체 (HTML+CSS+JS 단일 파일)
 /migrations/                ← 실행 순서대로 정리된 SQL. README.md에 각 파일 설명 있음
