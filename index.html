@@ -5119,10 +5119,12 @@ async function renderRoundDetail(){
 
   // One DMS License Fee (AR · 시스템 산출 · 로우데이터 업로드 → 자동 산출)
   if(type.source_config?.preset === 'ONE_DMS_AR'){ return renderOneDmsRoundDetail(round, type); }
+  // Engine Oil (시스템 산출 · 리테일러 확인만) — RS(AP,월) / SI(AP,분기) / SP(AR,월)
+  //   ⚠️ AR 분기보다 먼저 봐야 한다. SP 는 direction='AR' 이라 아래 AR 분기에 먼저 걸리면
+  //      원본 업로드·미리보기가 없는 일반 수동입력 화면으로 떨어진다.
+  if(isEnginePreset(type)){ return renderEngineOilRoundDetail(round, type); }
   // AR(JLRK → 리테일러 청구)은 흐름이 반대라 별도 화면으로 분기
   if(type.direction === 'AR'){ return renderARRoundDetail(round, type); }
-  // Engine Oil (AP · 시스템 산출 · 리테일러 입력 없음) — RS(월) / SI(분기)
-  if(isEnginePreset(type)){ return renderEngineOilRoundDetail(round, type); }
   document.getElementById('claimsTable').style.display = 'table'; // AR에서 돌아온 경우 복구
 
   document.getElementById('rd_title').textContent = `${type.name} · ${round.period_label}`;
