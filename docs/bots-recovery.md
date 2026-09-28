@@ -50,7 +50,7 @@ screen -DR main
 
 ### 1. 유령 프로세스 확인·정리
 ```
-ps ax | grep '[c]laude --channels'
+ps ax -o pid,command | grep '[[:space:]]claude .*--channels'
 ```
 - 각 봇당 프로세스가 **정확히 1개**여야 함.
 - 죽었는데 프로세스가 남아있거나, 2개 이상이면 그 PID 종료:
@@ -97,7 +97,7 @@ pa --continue
 ### 3. 살아있는지 확인 — 프로세스 수로 본다
 
 ```
-ps ax | grep '[c]laude --channels' | wc -l
+ps ax -o command | grep -c '^claude .*--channels'
 ```
 
 - `2` → 두 봇 다 온라인
@@ -105,8 +105,19 @@ ps ax | grep '[c]laude --channels' | wc -l
 - `0` → 둘 다 죽음
 
 ```
-ps ax -o pid,etime,command | grep '[c]laude --channels'
+ps ax -o pid,etime,command | grep '[[:space:]]claude .*--channels'
 ```
+
+> ⚠️ **같은 봇이 2개 떠 있으면 한 메시지에 답이 2번 온다.** (2026-09-28 실제 발생)
+> `DISCORD_STATE_DIR` 없이 맨 `claude --channels ...` 로 정산봇 폴더에서 하나 더 띄우면
+> **같은 토큰·같은 봇 이름**으로 붙어서, 두 세션이 같은 메시지를 받고 각자 답한다.
+> 서로 다른 결론을 내놓을 수도 있다. 위 명령으로 세션의 **cwd 와 개수**를 같이 확인할 것:
+>
+> ```
+> for p in $(ps ax -o pid,command | grep '[[:space:]]claude .*--channels' | awk '{print $1}'); do printf "PID %s " $p; lsof -a -p $p -d cwd | tail -1 | sed 's/.*   //'; done
+> ```
+>
+> 같은 폴더가 2번 나오면 중복이다. 나중에 뜬 PID 를 `kill` 한다.
 
 > ⚠️ **MCP 로그 grep으로 생존 확인하지 말 것.**
 > `mcp-logs-plugin-discord-discord/*.jsonl` 은 세션 시작 시 만들어져 계속 append되므로,
@@ -158,6 +169,6 @@ source ~/.zshrc && pa
 | screen 나가기(봇 유지) | `Ctrl-a` `d` |
 | 정산봇 켜기 | `jlrk` (이어서: `jlrk --continue`) |
 | PA봇 켜기 | `pa` (이어서: `pa --continue`) |
-| 돌아가는 세션 보기 | `ps ax \| grep '[c]laude --channels'` |
-| 두 봇 다 살아있나 | `ps ax \| grep '[c]laude --channels' \| wc -l` → `2` |
+| 돌아가는 세션 보기 | `ps ax -o pid,command \| grep '[[:space:]]claude .*--channels'` |
+| 두 봇 다 살아있나 | `ps ax -o command \| grep -c '^claude .*--channels'` → `2` |
 | 세션 죽이기 | `kill <PID>` |

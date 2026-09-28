@@ -137,7 +137,7 @@ pa --continue
 **살아있는지 확인 — 프로세스 수로 본다:**
 
 ```bash
-ps ax | grep '[c]laude --channels' | wc -l
+ps ax -o command | grep -c '^claude .*--channels'
 ```
 
 `2`면 두 봇 다 온라인. 최종 확인은 채널에서 각 봇을 @멘션.
@@ -162,7 +162,7 @@ ps ax | grep '[c]laude --channels' | wc -l
 - ⚠️ 세션 안에서 `/model` 로 다른 모델을 고르면 이 파일의 기본값까지 바뀔 수 있다.
   임시로 바꿨다면 되돌려 둘 것. 기본값이 이상하면 항상 이 파일을 먼저 확인.
 
-## ⚠️ 붙여넣기 함정 2개 (2026-09-12 실제로 걸림)
+## ⚠️ 붙여넣기 함정 3개
 
 1. **명령어 뒤에 `# 주석`을 같이 붙여넣지 말 것.**
    zsh 대화형 셸은 기본값(`INTERACTIVE_COMMENTS` off)에서 `#`을 주석으로 보지 않는다.
@@ -174,8 +174,15 @@ ps ax | grep '[c]laude --channels' | wc -l
    `mcp-logs-plugin-discord-discord/*.jsonl`은 세션 시작 시 만들어져 계속 append되므로,
    세션이 죽어도 과거의 `Channel notifications registered` 가 그대로 남는다.
    (2026-09-12: 9/4에 생성된 로그를 보고 PA가 켜진 줄 알았지만 실제로는 꺼져 있었다.)
-   → 생존 확인은 **프로세스 수**(위 `ps … | wc -l`), 로그는 "그 세션이 켜질 때 채널이 붙었는지"
+   → 생존 확인은 **프로세스 수**(위 `ps …`), 로그는 "그 세션이 켜질 때 채널이 붙었는지"
    판정용으로만 쓴다.
+
+3. **세션 수 세는 명령이 `--model` 때문에 0을 뱉던 문제.** (2026-09-28 수정)
+   옛 명령 `ps ax | grep '[c]laude --channels' | wc -l` 은 `claude` 와 `--channels` 가
+   **붙어 있을 때만** 맞는다. alias 에 `--model "opus[1m]"` 가 들어가면서 사이가 벌어져
+   **항상 0**이 나왔고, 그래서 봇이 2개 떠 있는 걸 못 잡았다.
+   → `ps ax -o command | grep -c '^claude .*--channels'` 를 쓴다.
+   `pgrep -f` 도 자기 세션을 빼먹으니 쓰지 말 것 (실측: 2개인데 1 반환).
 
 ## 앞으로 매번 하는 일 (요약)
 
@@ -206,7 +213,7 @@ source ~/.zshrc
 | 여러 세션에서 인바운드가 겹침 | `.in_use/<pid>` 락은 한 세션만 유효. 나머지 세션 종료. |
 | 봇이 그룹 채널 메시지에 무반응 | 그룹은 `requireMention: true` → 반드시 봇 멘션 필요. DM은 `allowFrom`에 있는 사용자만. |
 | `zsh: unknown file attribute: ^` | 명령어 뒤 `# 주석`을 같이 붙여넣음. zsh 대화형 셸은 `#`을 주석으로 안 본다 → 명령이 실행되지 않았다. 주석 떼고 다시. |
-| PA 봇만 무반응 | `~/icloud/Claude/pa` 세션이 죽은 것. `ps ax \| grep '[c]laude --channels' \| wc -l` 이 `1`이면 4번 절대로 `pa --continue`. |
+| PA 봇만 무반응 | `~/icloud/Claude/pa` 세션이 죽은 것. `ps ax -o command \| grep -c '^claude .*--channels'` 이 `1`이면 4번 절대로 `pa --continue`. |
 | PA 봇이 정산봇 설정을 씀 | `pa` alias 없이 맨 `claude`로 띄웠음. `DISCORD_STATE_DIR`가 빠지면 기본 폴더(`discord`)를 쓴다. alias로 다시. |
 
 ## 관련 파일 / 개념
