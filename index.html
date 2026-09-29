@@ -1953,7 +1953,9 @@ async function parseEngineOilCoupon(buf, type){
   if(!hdr) throw new Error('쿠폰 클레임 원본에서 헤더(차대번호·총금액·클레임상태·쿠폰번호)를 찾지 못했습니다.');
   const c = hdr.map;
   const iVin = c['차대번호'], iTot = c['총금액'], iStatus = c['클레임상태'], iCpn = c['쿠폰번호'];
-  const iRef = c['쿠폰사용 참조번호'], iSite = c['지점'];
+  // 지점 컬럼명은 원본에 따라 '지점'(CouponClaim 현황) / '지점명'(master Claim list) 둘 다 온다.
+  // 하나만 보면 다른 양식을 올렸을 때 전 행이 미매칭으로 빠지고 "0건"만 나온다. (2026-09-29)
+  const iRef = c['쿠폰사용 참조번호'], iSite = c['지점'] ?? c['지점명'];
 
   // 기정산 지문
   const known = new Set();
@@ -2503,12 +2505,16 @@ async function publishEngineOilRound(round, type){
     if(!bd.retailers.length) throw new Error('매칭된 리테일러가 없습니다. 미매칭 지점: ' + bd.unmatched.join(', '));
 
     // claims upsert (리테일러당 1건, workshop_id null)
+    // ⚠️ 재공지(정정)일 때 8개사 전부에게 메일이 다시 나가면 안 된다.
+    //    금액이 실제로 바뀐 곳 + 신규만 모아서 그쪽에만 통지한다. (2026-09-29)
+    const notifyTargets = [];
     for(const rt of bd.retailers){
       const { data: existing } = await sb.from('claims')
-        .select('id').eq('round_id', round.id).eq('retailer_id', rt.retailer_id).is('workshop_id', null).maybeSingle();
+        .select('id, approved_amount').eq('round_id', round.id).eq('retailer_id', rt.retailer_id).is('workshop_id', null).maybeSingle();
+      const amount = Math.round(rt.total);
       const payload = {
         round_id: round.id, retailer_id: rt.retailer_id, workshop_id: null,
-        status: 'SUBMITTED', approved_amount: Math.round(rt.total),
+        status: 'SUBMITTED', approved_amount: amount,
         jg_amount: eo.sp ? Math.round(rt.sp_jg) : null,
         lr_amount: eo.sp ? Math.round(rt.sp_lr) : null,
         detail: rt, confirmed_at: null, submitted_at: new Date().toISOString()
@@ -2517,6 +2523,8 @@ async function publishEngineOilRound(round, type){
         ? await sb.from('claims').update(payload).eq('id', existing.id)
         : await sb.from('claims').insert(payload);
       if(error) throw error;
+      const prev = existing ? Math.round(Number(existing.approved_amount)) : null;
+      if(prev === null || Number.isNaN(prev) || prev !== amount) notifyTargets.push(rt);
     }
 
     const cSrc = eo.coupon || eo.sales || eo.sp;
@@ -2531,8 +2539,8 @@ async function publishEngineOilRound(round, type){
     const { error: rErr } = await sb.from('rounds')
       .update({ status:'PUBLISHED', source_summary: summary, invoice_issue_date: issueDate }).eq('id', round.id);
     if(rErr) throw rErr;
-    await logAudit('EO3V_PUBLISH','ROUND',round.id,{label:`${type.name} · ${round.period_label}`, retailers: bd.retailers.length});
-    try{ await notifyEngineOilPublished(round, type, bd.retailers); }catch(e){ console.warn(e); }
+    await logAudit('EO3V_PUBLISH','ROUND',round.id,{label:`${type.name} · ${round.period_label}`, retailers: bd.retailers.length, notified: notifyTargets.length});
+    try{ await notifyEngineOilPublished(round, type, notifyTargets); }catch(e){ console.warn(e); }
     await renderRoundDetail();
   }catch(err){
     console.error(err);
