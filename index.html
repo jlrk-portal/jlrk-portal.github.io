@@ -2514,21 +2514,26 @@ async function publishEngineOilRound(round, type){
     const notifyTargets = [];
     for(const rt of bd.retailers){
       const { data: existing } = await sb.from('claims')
-        .select('id, approved_amount').eq('round_id', round.id).eq('retailer_id', rt.retailer_id).is('workshop_id', null).maybeSingle();
+        .select('id, approved_amount, confirmed_at').eq('round_id', round.id).eq('retailer_id', rt.retailer_id).is('workshop_id', null).maybeSingle();
       const amount = Math.round(rt.total);
+      const prev = existing ? Math.round(Number(existing.approved_amount)) : null;
+      const changed = (prev === null || Number.isNaN(prev) || prev !== amount);
       const payload = {
         round_id: round.id, retailer_id: rt.retailer_id, workshop_id: null,
         status: 'SUBMITTED', approved_amount: amount,
         jg_amount: eo.sp ? Math.round(rt.sp_jg) : null,
         lr_amount: eo.sp ? Math.round(rt.sp_lr) : null,
-        detail: rt, confirmed_at: null, submitted_at: new Date().toISOString()
+        detail: rt,
+        // 금액이 그대로면 이미 받아둔 확정을 유지한다.
+        // (정정 재공지 때문에 관계없는 리테일러의 확정까지 풀리면, 통지도 안 가므로 영영 안 눌린다)
+        confirmed_at: changed ? null : (existing?.confirmed_at ?? null),
+        submitted_at: new Date().toISOString()
       };
       const { error } = existing
         ? await sb.from('claims').update(payload).eq('id', existing.id)
         : await sb.from('claims').insert(payload);
       if(error) throw error;
-      const prev = existing ? Math.round(Number(existing.approved_amount)) : null;
-      if(prev === null || Number.isNaN(prev) || prev !== amount) notifyTargets.push(rt);
+      if(changed) notifyTargets.push(rt);
     }
 
     const cSrc = eo.coupon || eo.sales || eo.sp;
