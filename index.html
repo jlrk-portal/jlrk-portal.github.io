@@ -3248,6 +3248,16 @@ function eo3vMapInputRows(wb, sheetName){
   return map;
 }
 
+// ⚠️ 바우처 템플릿은 직전 회차 바우처 그대로다. 이번 회차에 실적이 없는 지점 행은
+//    아무도 덮어쓰지 않아 옛 금액이 그대로 살아남고 합계가 부푼다.
+//    (2026-08 정산에서 천안 KRJD01270 의 622,414원이 그대로 남아 발견됨 — 2026-09-30)
+//    → 코드가 잡힌 모든 행의 금액칸을 먼저 0 으로 비우고 그 위에 이번 회차 값을 덮는다.
+function eo3vBlankRows(rows, cols = ['M','N']){
+  const out = {};
+  Object.values(rows).forEach(r => cols.forEach(c => { out[c + r] = 0; }));
+  return out;
+}
+
 async function eo3vFillTemplate(tplBuf, { inputFills, coverDate }){
   const zip = await JSZip.loadAsync(tplBuf);
   let wbXml = await zip.file('xl/workbook.xml').async('string');
@@ -3360,7 +3370,7 @@ async function generateEngineOilVouchers(round, type){
     if(eo.comps.includes('saveback')){
       const wb = XLSX.read(new Uint8Array(bufs.saveback), { type:'array' });
       const rows = eo3vMapInputRows(wb, 'AP_input reqeust');
-      const cells = {};
+      const cells = eo3vBlankRows(rows);
       Object.entries(rmap).forEach(([vc, v]) => { const r = rows[vc]; if(!r) return; cells['M'+r] = R(v.customer.jg); cells['N'+r] = R(v.customer.lr); });
       files.push({ name:`Engine Oil Package_사용반환금_${per}.xlsx`,
         blob: await eo3vFillTemplate(bufs.saveback, { inputFills: { 'AP_input reqeust': cells }, coverDate: date }) });
@@ -3369,7 +3379,7 @@ async function generateEngineOilVouchers(round, type){
       const wb = XLSX.read(new Uint8Array(bufs.support), { type:'array' });
       const rV = eo3vMapInputRows(wb, 'AP_input reqeust (VME)');
       const rC = eo3vMapInputRows(wb, 'AP_input reqeust (Castrol)');
-      const cV = {}, cC = {};
+      const cV = eo3vBlankRows(rV), cC = eo3vBlankRows(rC);
       Object.entries(rmap).forEach(([vc, v]) => {
         if(rV[vc]){ cV['M'+rV[vc]] = R(v.vme.jg); cV['N'+rV[vc]] = R(v.vme.lr); }
         if(rC[vc]){ cC['M'+rC[vc]] = R(v.castrol.jg); cC['N'+rC[vc]] = R(v.castrol.lr); }
@@ -3380,7 +3390,7 @@ async function generateEngineOilVouchers(round, type){
     if(eo.comps.includes('incentive')){
       const wb = XLSX.read(new Uint8Array(bufs.incentive), { type:'array' });
       const rows = eo3vMapInputRows(wb, 'AP_input reqeust');
-      const cells = {};
+      const cells = eo3vBlankRows(rows);
       Object.entries(rmap).forEach(([vc, v]) => { const r = rows[vc]; if(!r || !v.incentive) return; cells['I'+r] = R(v.incentive); });
       files.push({ name:`Engine Oil Package_Sales Incentive_${per}.xlsx`,
         blob: await eo3vFillTemplate(bufs.incentive, { inputFills: { 'AP_input reqeust': cells }, coverDate: date }) });
@@ -3445,6 +3455,13 @@ async function generateEngineOilSpVoucher(round, type, s){
 
     setP('금액을 배치하는 중...');
     const inputCells = {};
+    // ⚠️ 템플릿은 직전 회차 바우처라 금액이 남아 있다. 이번 회차에 실적이 없는 지점은
+    //    그 옛 금액이 그대로 살아남아 합계가 부풀었다 (2026-08: 천안 660,000원).
+    //    → 코드가 있는 모든 행을 먼저 0 으로 비우고, 아래에서 이번 회차 값으로 덮어쓴다.
+    custRowMap.forEach(rowNum => {
+      inputCells[`I${rowNum}`] = 0; inputCells[`J${rowNum}`] = 0;
+      inputCells[`M${rowNum}`] = 0; inputCells[`N${rowNum}`] = 0;
+    });
     const unmatched = [];
     const placed = [];
     (s.retailers||[]).forEach(rt => (rt.workshops||[]).forEach(w => {
@@ -3459,7 +3476,8 @@ async function generateEngineOilSpVoucher(round, type, s){
       inputCells[`I${rowNum}`] = jg + lr;
       placed.push(`${w.code} ${fmtWon(jg+lr)}`);
     }));
-    if(Object.keys(inputCells).length === 0) throw new Error('배치할 금액이 없습니다. 지점 마스터에 Customer code 가 있는지, 템플릿 D열과 맞는지 확인하세요.');
+    // inputCells 는 위에서 0 으로 미리 채워지므로 비어있을 수 없다 — 실제 배치 건수로 판정한다.
+    if(placed.length === 0) throw new Error('배치할 금액이 없습니다. 지점 마스터에 Customer code 가 있는지, 템플릿 D열과 맞는지 확인하세요.');
 
     const vLine = type.voucher_lines?.[0] || {};
     const issueDate = round.invoice_issue_date
