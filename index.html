@@ -3062,7 +3062,9 @@ async function generateOneDmsVoucher(round, type, claims){
     const tplBuffer = await (await fetch(signed.signedUrl)).arrayBuffer();
 
     const readWb = XLSX.read(tplBuffer, { type:'array' });
-    const inputSheetName = readWb.SheetNames.find(n => /AR_input\s*reque?st/i.test(n));
+    // 실제 JLR 템플릿 시트명은 'AR_input reqeust ' — request 오타에 끝 공백까지 붙어 있어
+    // reque?st 로는 안 잡힌다. 'AR_input' 까지만 본다 (다른 시트는 'AR without PO' 뿐).
+    const inputSheetName = readWb.SheetNames.find(n => /AR[_\s]*input/i.test(n));
     const coverSheetName = readWb.SheetNames.find(n => /AR without PO/i.test(n));
     if(!inputSheetName) throw new Error("템플릿에서 'AR_input reqeust' 시트를 찾지 못했습니다.");
 
@@ -3428,7 +3430,9 @@ async function generateEngineOilSpVoucher(round, type, s){
     }
     const tplBuffer = await data.arrayBuffer();
     const readWb = XLSX.read(tplBuffer, { type:'array' });
-    const inputSheetName = readWb.SheetNames.find(n => /AR_input\s*reque?st/i.test(n));
+    // 실제 JLR 템플릿 시트명은 'AR_input reqeust ' — request 오타에 끝 공백까지 붙어 있어
+    // reque?st 로는 안 잡힌다. 'AR_input' 까지만 본다 (다른 시트는 'AR without PO' 뿐).
+    const inputSheetName = readWb.SheetNames.find(n => /AR[_\s]*input/i.test(n));
     const coverSheetName = readWb.SheetNames.find(n => /AR without PO/i.test(n));
     if(!inputSheetName) throw new Error("템플릿에서 'AR_input reqeust' 시트를 찾지 못했습니다.");
 
@@ -5905,7 +5909,9 @@ async function generateARVoucher(round, type, claims){
 
     // AR 템플릿의 input 시트 이름은 끝에 공백이 있는 경우가 있음 ('AR_input reqeust ')
     const readWb = XLSX.read(tplBuffer, { type:'array' });
-    const inputSheetName = readWb.SheetNames.find(n => /AR_input\s*reque?st/i.test(n));
+    // 실제 JLR 템플릿 시트명은 'AR_input reqeust ' — request 오타에 끝 공백까지 붙어 있어
+    // reque?st 로는 안 잡힌다. 'AR_input' 까지만 본다 (다른 시트는 'AR without PO' 뿐).
+    const inputSheetName = readWb.SheetNames.find(n => /AR[_\s]*input/i.test(n));
     const coverSheetName = readWb.SheetNames.find(n => /AR without PO/i.test(n));
     if(!inputSheetName) throw new Error("템플릿에서 'AR_input reqeust' 시트를 찾지 못했습니다.");
 
