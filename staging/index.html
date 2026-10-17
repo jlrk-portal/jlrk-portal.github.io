@@ -1505,7 +1505,11 @@ document.getElementById('loginBtn').addEventListener('click', async () => {
 
 document.getElementById('logoutBtn').addEventListener('click', async () => {
   await sb.auth.signOut();
-  showLogin();
+  /* ★ 반드시 새로고침한다. histData · retailers · activeTypes · invItems 같은
+     모듈 전역 캐시는 로그아웃으로 지워지지 않아서, 관리자로 보던 전체 리테일러
+     데이터가 다음에 로그인한 리테일러 화면에 그대로 렌더된다 (2026-10-17 실측).
+     showLogin() 만으로는 상태가 남으므로 페이지를 통째로 다시 띄운다. */
+  location.reload();
 });
 
 /* ---------- 뷰 전환 (관리자) ---------- */
