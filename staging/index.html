@@ -279,6 +279,7 @@
     <div class="nav-item" data-nav="retailers">리테일러 관리</div>
     <div class="nav-item" data-nav="accounts">계정 관리</div>
     <div class="nav-item" data-nav="history">과거 정산내역 조회</div>
+    <div class="nav-item" data-nav="outbox">메일 발송 대기함 <span id="obBadge" class="badge badge-ar" style="display:none; margin-left:6px;">0</span></div>
     <div class="nav-item" data-nav="inventory">재고 관리</div>
     <div class="nav-item" data-nav="audit">활동 이력</div>
   </nav>
@@ -485,6 +486,24 @@
         <div class="field"><label>회계연도</label><select id="historyFy"></select></div>
       </div>
       <div id="historyHost"></div>
+    </section>
+
+    <!-- ===== 메일 발송 대기함 ===== -->
+    <section id="view-outbox" style="display:none;">
+      <div class="page-head">
+        <div>
+          <div class="page-title">메일 발송 대기함</div>
+          <div class="page-desc">
+            포털에서 만들어진 모든 메일은 <b>자동으로 나가지 않습니다.</b> 여기서 내용을 확인하고
+            <b>[발송]</b> 을 눌러야 실제로 전송됩니다. 실수로 리테일러에게 나가는 것을 막기 위한 장치입니다.
+          </div>
+        </div>
+        <div style="display:flex; gap:8px;">
+          <button class="btn btn-ghost btn-sm" id="obRefresh">새로고침</button>
+          <button class="btn btn-sm" id="obSendAll">대기 전체 발송</button>
+        </div>
+      </div>
+      <div id="outboxHost"></div>
     </section>
 
     <!-- ===== 재고 관리 (마케팅 제작물/기프트) ===== -->
@@ -1215,21 +1234,115 @@ function emailShell(title, bodyHtml){
 }
 
 // 실제 발송. 실패해도 예외를 던지지 않음 (알림 실패가 업무 흐름을 막으면 안 됨)
-async function sendEmail(to, subject, html){
+/* ★ 메일은 절대 자동으로 나가지 않는다 (2026-10-17 유영중 매니저 지시).
+   sendEmail() 은 실제 발송 대신 email_outbox 에 PENDING 으로 쌓고,
+   관리자가 「메일 발송 대기함」에서 [발송] 을 눌러야 send-email 이 호출된다.
+   호출부 13곳은 그대로 두고 이 함수만 바꿔 전 경로를 한 번에 막는다. */
+async function sendEmail(to, subject, html, context){
   try{
     const recipients = (Array.isArray(to) ? to : [to])
       .filter(e => e && !/placeholder@example\.com/i.test(e));
-    if(recipients.length === 0){ console.warn('[알림] 수신자 없음 — 발송 생략:', subject); return false; }
-    const { data, error } = await sb.functions.invoke('send-email', {
-      body: { to: recipients, subject, html }
+    if(recipients.length === 0){ console.warn('[메일] 수신자 없음 — 적재 생략:', subject); return false; }
+    const { data: { user } } = await sb.auth.getUser();
+    const { error } = await sb.from('email_outbox').insert({
+      to_addrs: recipients, subject, html,
+      context: context || null, status: 'PENDING', created_by: user?.id || null
     });
-    if(error){ console.warn('[알림] 발송 실패:', subject, error.message); return false; }
-    console.log('[알림] 발송 완료:', subject, data);
+    if(error){ console.warn('[메일] 대기함 적재 실패:', subject, error.message); return false; }
+    console.log('[메일] 발송 대기함에 적재됨 — 포털에서 발송하세요:', subject);
+    refreshOutboxBadge();
     return true;
   } catch(e){
-    console.warn('[알림] 발송 예외:', subject, e);
+    console.warn('[메일] 적재 예외:', subject, e);
     return false;
   }
+}
+
+/* 실제 발송 — 대기함 화면에서만 호출한다 */
+async function dispatchOutbox(row){
+  const { data, error } = await sb.functions.invoke('send-email', {
+    body: { to: row.to_addrs, subject: row.subject, html: row.html }
+  });
+  const { data: { user } } = await sb.auth.getUser();
+  if(error){
+    await sb.from('email_outbox').update({ status:'FAILED', error: error.message }).eq('id', row.id);
+    return { ok:false, msg: error.message };
+  }
+  await sb.from('email_outbox')
+    .update({ status:'SENT', sent_at:new Date().toISOString(), sent_by:user?.id||null, error:null })
+    .eq('id', row.id);
+  await logAudit('EMAIL_SEND','EMAIL',row.id,{ subject:row.subject, to:row.to_addrs });
+  return { ok:true, data };
+}
+
+async function refreshOutboxBadge(){
+  const el = document.getElementById('obBadge');
+  if(!el || myProfile?.role !== 'ADMIN') return;
+  const { count } = await sb.from('email_outbox').select('id', { count:'exact', head:true }).eq('status','PENDING');
+  el.textContent = count || 0;
+  el.style.display = count ? 'inline-block' : 'none';
+}
+
+let outboxRows = [];
+async function loadOutbox(){
+  const host = document.getElementById('outboxHost');
+  host.innerHTML = '<div class="info-card"><div class="hint">불러오는 중...</div></div>';
+  const { data, error } = await sb.from('email_outbox').select('*').order('created_at', { ascending:false }).limit(200);
+  if(error){ host.innerHTML = `<div class="info-card"><div class="hint">조회 실패: ${error.message}</div></div>`; return; }
+  outboxRows = data || [];
+  renderOutbox();
+  refreshOutboxBadge();
+}
+
+function renderOutbox(){
+  const host = document.getElementById('outboxHost');
+  const pending = outboxRows.filter(r => r.status === 'PENDING');
+  const LABEL = { PENDING:'발송 대기', SENT:'발송됨', CANCELLED:'취소됨', FAILED:'발송 실패' };
+  const BADGE = { PENDING:'badge-ar', SENT:'badge-ap', CANCELLED:'badge-off', FAILED:'badge-warn' };
+  document.getElementById('obSendAll').disabled = pending.length === 0;
+  document.getElementById('obSendAll').textContent = pending.length ? `대기 전체 발송 (${pending.length}건)` : '대기 전체 발송';
+  if(outboxRows.length === 0){
+    host.innerHTML = '<div class="info-card"><div class="hint">대기 중인 메일이 없습니다.</div></div>';
+    return;
+  }
+  host.innerHTML = outboxRows.map(r => `
+    <div class="info-card" style="margin-bottom:10px;">
+      <div style="display:flex; align-items:flex-start; gap:10px; flex-wrap:wrap;">
+        <div style="flex:1; min-width:280px;">
+          <div style="font-weight:600;">${r.subject}
+            <span class="badge ${BADGE[r.status]}" style="margin-left:6px;">${LABEL[r.status]||r.status}</span></div>
+          <div class="hint" style="margin-top:3px;">받는 사람 : ${(r.to_addrs||[]).join(', ')}</div>
+          <div class="hint">생성 ${fmtDate(r.created_at)}${r.sent_at?` · 발송 ${fmtDate(r.sent_at)}`:''}${r.error?` · <span style="color:var(--danger);">${r.error}</span>`:''}</div>
+        </div>
+        <div style="display:flex; gap:6px;">
+          <button class="btn btn-sm btn-ghost ob-view" data-id="${r.id}">내용 보기</button>
+          ${r.status==='PENDING' ? `<button class="btn btn-sm btn-ghost ob-cancel" data-id="${r.id}">취소</button>
+                                    <button class="btn btn-sm ob-send" data-id="${r.id}">발송</button>` : ''}
+        </div>
+      </div>
+      <div class="ob-body" data-id="${r.id}" style="display:none; margin-top:10px; padding:12px;
+           background:#fff; border:1px solid var(--surface3); border-radius:6px; max-height:420px; overflow:auto;"></div>
+    </div>`).join('');
+
+  host.querySelectorAll('.ob-view').forEach(b => b.addEventListener('click', () => {
+    const box = host.querySelector(`.ob-body[data-id="${b.dataset.id}"]`);
+    const row = outboxRows.find(x => x.id === b.dataset.id);
+    if(box.style.display === 'none'){ box.innerHTML = row.html; box.style.display = 'block'; b.textContent = '접기'; }
+    else { box.style.display = 'none'; b.textContent = '내용 보기'; }
+  }));
+  host.querySelectorAll('.ob-cancel').forEach(b => b.addEventListener('click', async () => {
+    if(!confirm('이 메일을 발송하지 않고 취소할까요?')) return;
+    await sb.from('email_outbox').update({ status:'CANCELLED' }).eq('id', b.dataset.id);
+    loadOutbox();
+  }));
+  host.querySelectorAll('.ob-send').forEach(b => b.addEventListener('click', async () => {
+    const row = outboxRows.find(x => x.id === b.dataset.id);
+    if(!confirm(`아래 주소로 실제 발송합니다.\n\n${(row.to_addrs||[]).join('\n')}\n\n제목: ${row.subject}`)) return;
+    b.disabled = true; b.textContent = '발송 중...';
+    const r = await dispatchOutbox(row);
+    if(!r.ok) alert('발송 실패: ' + r.msg);
+    loadOutbox();
+  }));
 }
 
 // 관리자 알림 수신 주소 조회
@@ -1453,6 +1566,7 @@ async function enterApp(session){
     document.getElementById('adminNav').style.display = 'block';
     await loadRetailers();
     switchView('dashboard');
+    refreshOutboxBadge();
   } else {
     document.getElementById('brandSub').textContent = 'Settlement Portal · Retailer';
     app.classList.add('retailer-mode');
@@ -1524,6 +1638,7 @@ function switchView(name){
   if(name === 'audit') loadAudit();
   if(name === 'accounts') loadAccounts();
   if(name === 'inventory') loadInventory();
+  if(name === 'outbox') loadOutbox();
   if(name === 'history') loadHistory();
   if(name === 'retailer') loadRetailerClaims();
 }
@@ -4535,6 +4650,18 @@ function downloadHistoryXlsx(entry){
   a.download = `과거정산내역_${sanitizeFilename(entry.name)}_${new Date().toISOString().slice(0,10)}.xlsx`;
   document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
 }
+
+document.getElementById('obRefresh').addEventListener('click', loadOutbox);
+document.getElementById('obSendAll').addEventListener('click', async () => {
+  const pending = outboxRows.filter(r => r.status === 'PENDING');
+  if(!pending.length) return;
+  if(!confirm(`대기 중인 ${pending.length}건을 전부 발송합니다. 계속할까요?`)) return;
+  const btn = document.getElementById('obSendAll'); btn.disabled = true;
+  let ok = 0, ng = 0;
+  for(const row of pending){ const r = await dispatchOutbox(row); r.ok ? ok++ : ng++; }
+  alert(`발송 완료 ${ok}건${ng?` · 실패 ${ng}건`:''}`);
+  loadOutbox();
+});
 
 document.getElementById('historyRefreshBtn').addEventListener('click', () => { histData = null; loadHistory(); });
 document.getElementById('goHistoryBtn').addEventListener('click', () => switchView('history'));
