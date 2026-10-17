@@ -279,6 +279,7 @@
     <div class="nav-item" data-nav="retailers">리테일러 관리</div>
     <div class="nav-item" data-nav="accounts">계정 관리</div>
     <div class="nav-item" data-nav="history">과거 정산내역 조회</div>
+    <div class="nav-item" data-nav="outbox">메일 발송 대기함 <span id="obBadge" class="badge badge-ar" style="display:none; margin-left:6px;">0</span></div>
     <div class="nav-item" data-nav="inventory">재고 관리</div>
     <div class="nav-item" data-nav="audit">활동 이력</div>
   </nav>
@@ -485,6 +486,24 @@
         <div class="field"><label>회계연도</label><select id="historyFy"></select></div>
       </div>
       <div id="historyHost"></div>
+    </section>
+
+    <!-- ===== 메일 발송 대기함 ===== -->
+    <section id="view-outbox" style="display:none;">
+      <div class="page-head">
+        <div>
+          <div class="page-title">메일 발송 대기함</div>
+          <div class="page-desc">
+            포털에서 만들어진 모든 메일은 <b>자동으로 나가지 않습니다.</b> 여기서 내용을 확인하고
+            <b>[발송]</b> 을 눌러야 실제로 전송됩니다. 실수로 리테일러에게 나가는 것을 막기 위한 장치입니다.
+          </div>
+        </div>
+        <div style="display:flex; gap:8px;">
+          <button class="btn btn-ghost btn-sm" id="obRefresh">새로고침</button>
+          <button class="btn btn-sm" id="obSendAll">대기 전체 발송</button>
+        </div>
+      </div>
+      <div id="outboxHost"></div>
     </section>
 
     <!-- ===== 재고 관리 (마케팅 제작물/기프트) ===== -->
@@ -908,10 +927,45 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script>
-const SUPABASE_URL = "https://yomuvsquaewmfxhfcgao.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_FfntgS9kX9mVfW7E_sBA7A_l8VX5nDA";
+/* ── 환경 분기 ─────────────────────────────────────────────────────
+   운영 : https://jlrk-portal.github.io/
+   검증 : https://jlrk-portal.github.io/staging/   ·   localhost
+   접속 주소로만 갈린다. 파일은 /index.html(운영) 과 /staging/index.html(검증)
+   두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
+const ENVS = {
+  prod: {
+    label: null,
+    url : "https://yomuvsquaewmfxhfcgao.supabase.co",
+    key : "sb_publishable_FfntgS9kX9mVfW7E_sBA7A_l8VX5nDA",
+  },
+  staging: {
+    label: "검증 환경 — 실제 리테일러에게 메일이 발송되지 않습니다",
+    url : "https://vrgjpibiecslnxhajinw.supabase.co",
+    key : "sb_publishable_md0lHpC-Z5qvBnZqM2npvQ_0Hp0krpd",
+  },
+};
+const IS_PROD = location.hostname === "jlrk-portal.github.io"
+             && !location.pathname.startsWith("/staging");
+const ENV = IS_PROD ? ENVS.prod : ENVS.staging;
+
+const SUPABASE_URL = ENV.url;
+const SUPABASE_ANON_KEY = ENV.key;
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+/* 검증 환경이면 상단에 주황 띠를 깔아 운영과 절대 혼동되지 않게 한다 */
+if (ENV.label) {
+  addEventListener("DOMContentLoaded", () => {
+    const b = document.createElement("div");
+    b.textContent = ENV.label;
+    b.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:99999;background:#B6571E;"
+      + "color:#fff;font-weight:600;font-size:12px;line-height:28px;text-align:center;"
+      + "letter-spacing:.3px;font-family:inherit";
+    document.body.style.paddingTop = "28px";
+    document.body.prepend(b);
+    document.title = "[검증] " + document.title;
+  });
+}
 
 let myProfile = null;
 let myRetailer = null;      // { id, code, name }
@@ -1180,21 +1234,122 @@ function emailShell(title, bodyHtml){
 }
 
 // 실제 발송. 실패해도 예외를 던지지 않음 (알림 실패가 업무 흐름을 막으면 안 됨)
-async function sendEmail(to, subject, html){
+/* ★ 메일은 절대 자동으로 나가지 않는다 (2026-10-17 유영중 매니저 지시).
+   sendEmail() 은 실제 발송 대신 email_outbox 에 PENDING 으로 쌓고,
+   관리자가 「메일 발송 대기함」에서 [발송] 을 눌러야 send-email 이 호출된다.
+   호출부 13곳은 그대로 두고 이 함수만 바꿔 전 경로를 한 번에 막는다. */
+async function sendEmail(to, subject, html, context){
   try{
     const recipients = (Array.isArray(to) ? to : [to])
       .filter(e => e && !/placeholder@example\.com/i.test(e));
-    if(recipients.length === 0){ console.warn('[알림] 수신자 없음 — 발송 생략:', subject); return false; }
-    const { data, error } = await sb.functions.invoke('send-email', {
-      body: { to: recipients, subject, html }
+    if(recipients.length === 0){ console.warn('[메일] 수신자 없음 — 적재 생략:', subject); return false; }
+    const { data: { user } } = await sb.auth.getUser();
+    const { error } = await sb.from('email_outbox').insert({
+      to_addrs: recipients, subject, html,
+      context: context || null, status: 'PENDING', created_by: user?.id || null
     });
-    if(error){ console.warn('[알림] 발송 실패:', subject, error.message); return false; }
-    console.log('[알림] 발송 완료:', subject, data);
+    if(error){ console.warn('[메일] 대기함 적재 실패:', subject, error.message); return false; }
+    console.log('[메일] 발송 대기함에 적재됨 — 포털에서 발송하세요:', subject);
+    refreshOutboxBadge();
     return true;
   } catch(e){
-    console.warn('[알림] 발송 예외:', subject, e);
+    console.warn('[메일] 적재 예외:', subject, e);
     return false;
   }
+}
+
+/* 실제 발송 — 대기함 화면에서만 호출한다 */
+async function dispatchOutbox(row){
+  const { data, error } = await sb.functions.invoke('send-email', {
+    body: { to: row.to_addrs, subject: row.subject, html: row.html }
+  });
+  const { data: { user } } = await sb.auth.getUser();
+  if(error){
+    await sb.from('email_outbox').update({ status:'FAILED', error: error.message }).eq('id', row.id);
+    return { ok:false, msg: error.message };
+  }
+  await sb.from('email_outbox')
+    .update({ status:'SENT', sent_at:new Date().toISOString(), sent_by:user?.id||null, error:null })
+    .eq('id', row.id);
+  await logAudit('EMAIL_SEND','EMAIL',row.id,{ subject:row.subject, to:row.to_addrs });
+  return { ok:true, data };
+}
+
+async function refreshOutboxBadge(){
+  const el = document.getElementById('obBadge');
+  if(!el || myProfile?.role !== 'ADMIN') return;
+  const { count } = await sb.from('email_outbox').select('id', { count:'exact', head:true }).eq('status','PENDING');
+  el.textContent = count || 0;
+  el.style.display = count ? 'inline-block' : 'none';
+}
+
+let outboxRows = [];
+async function loadOutbox(){
+  const host = document.getElementById('outboxHost');
+  host.innerHTML = '<div class="info-card"><div class="hint">불러오는 중...</div></div>';
+  const { data, error } = await sb.from('email_outbox').select('*').order('created_at', { ascending:false }).limit(200);
+  if(error){
+    const missing = /relation .*email_outbox.* does not exist|could not find the table/i.test(error.message||'');
+    host.innerHTML = `<div class="info-card">
+      <div class="hint">${missing
+        ? '발송 대기함 테이블이 아직 없습니다. Supabase SQL Editor 에서 <code>migrations/035_email_outbox.sql</code> 을 실행해주세요.<br>그 전까지는 <b>메일이 한 통도 나가지 않습니다</b> (자동 발송은 이미 차단된 상태입니다).'
+        : '조회 실패: ' + error.message}</div></div>`;
+    return;
+  }
+  outboxRows = data || [];
+  renderOutbox();
+  refreshOutboxBadge();
+}
+
+function renderOutbox(){
+  const host = document.getElementById('outboxHost');
+  const pending = outboxRows.filter(r => r.status === 'PENDING');
+  const LABEL = { PENDING:'발송 대기', SENT:'발송됨', CANCELLED:'취소됨', FAILED:'발송 실패' };
+  const BADGE = { PENDING:'badge-ar', SENT:'badge-ap', CANCELLED:'badge-off', FAILED:'badge-warn' };
+  document.getElementById('obSendAll').disabled = pending.length === 0;
+  document.getElementById('obSendAll').textContent = pending.length ? `대기 전체 발송 (${pending.length}건)` : '대기 전체 발송';
+  if(outboxRows.length === 0){
+    host.innerHTML = '<div class="info-card"><div class="hint">대기 중인 메일이 없습니다.</div></div>';
+    return;
+  }
+  host.innerHTML = outboxRows.map(r => `
+    <div class="info-card" style="margin-bottom:10px;">
+      <div style="display:flex; align-items:flex-start; gap:10px; flex-wrap:wrap;">
+        <div style="flex:1; min-width:280px;">
+          <div style="font-weight:600;">${r.subject}
+            <span class="badge ${BADGE[r.status]}" style="margin-left:6px;">${LABEL[r.status]||r.status}</span></div>
+          <div class="hint" style="margin-top:3px;">받는 사람 : ${(r.to_addrs||[]).join(', ')}</div>
+          <div class="hint">생성 ${fmtDate(r.created_at)}${r.sent_at?` · 발송 ${fmtDate(r.sent_at)}`:''}${r.error?` · <span style="color:var(--danger);">${r.error}</span>`:''}</div>
+        </div>
+        <div style="display:flex; gap:6px;">
+          <button class="btn btn-sm btn-ghost ob-view" data-id="${r.id}">내용 보기</button>
+          ${r.status==='PENDING' ? `<button class="btn btn-sm btn-ghost ob-cancel" data-id="${r.id}">취소</button>
+                                    <button class="btn btn-sm ob-send" data-id="${r.id}">발송</button>` : ''}
+        </div>
+      </div>
+      <div class="ob-body" data-id="${r.id}" style="display:none; margin-top:10px; padding:12px;
+           background:#fff; border:1px solid var(--surface3); border-radius:6px; max-height:420px; overflow:auto;"></div>
+    </div>`).join('');
+
+  host.querySelectorAll('.ob-view').forEach(b => b.addEventListener('click', () => {
+    const box = host.querySelector(`.ob-body[data-id="${b.dataset.id}"]`);
+    const row = outboxRows.find(x => x.id === b.dataset.id);
+    if(box.style.display === 'none'){ box.innerHTML = row.html; box.style.display = 'block'; b.textContent = '접기'; }
+    else { box.style.display = 'none'; b.textContent = '내용 보기'; }
+  }));
+  host.querySelectorAll('.ob-cancel').forEach(b => b.addEventListener('click', async () => {
+    if(!confirm('이 메일을 발송하지 않고 취소할까요?')) return;
+    await sb.from('email_outbox').update({ status:'CANCELLED' }).eq('id', b.dataset.id);
+    loadOutbox();
+  }));
+  host.querySelectorAll('.ob-send').forEach(b => b.addEventListener('click', async () => {
+    const row = outboxRows.find(x => x.id === b.dataset.id);
+    if(!confirm(`아래 주소로 실제 발송합니다.\n\n${(row.to_addrs||[]).join('\n')}\n\n제목: ${row.subject}`)) return;
+    b.disabled = true; b.textContent = '발송 중...';
+    const r = await dispatchOutbox(row);
+    if(!r.ok) alert('발송 실패: ' + r.msg);
+    loadOutbox();
+  }));
 }
 
 // 관리자 알림 수신 주소 조회
@@ -1418,6 +1573,7 @@ async function enterApp(session){
     document.getElementById('adminNav').style.display = 'block';
     await loadRetailers();
     switchView('dashboard');
+    refreshOutboxBadge();
   } else {
     document.getElementById('brandSub').textContent = 'Settlement Portal · Retailer';
     app.classList.add('retailer-mode');
@@ -1470,7 +1626,11 @@ document.getElementById('loginBtn').addEventListener('click', async () => {
 
 document.getElementById('logoutBtn').addEventListener('click', async () => {
   await sb.auth.signOut();
-  showLogin();
+  /* ★ 반드시 새로고침한다. histData · retailers · activeTypes · invItems 같은
+     모듈 전역 캐시는 로그아웃으로 지워지지 않아서, 관리자로 보던 전체 리테일러
+     데이터가 다음에 로그인한 리테일러 화면에 그대로 렌더된다 (2026-10-17 실측).
+     showLogin() 만으로는 상태가 남으므로 페이지를 통째로 다시 띄운다. */
+  location.reload();
 });
 
 /* ---------- 뷰 전환 (관리자) ---------- */
@@ -1485,6 +1645,7 @@ function switchView(name){
   if(name === 'audit') loadAudit();
   if(name === 'accounts') loadAccounts();
   if(name === 'inventory') loadInventory();
+  if(name === 'outbox') loadOutbox();
   if(name === 'history') loadHistory();
   if(name === 'retailer') loadRetailerClaims();
 }
@@ -2938,17 +3099,81 @@ async function renderOneDmsRoundDetail(round, type){
   const s = round.source_summary || {};
   const card = document.createElement('div');
   card.className = 'info-card';
-  const rows = (claims||[]).map(c => `
-    <tr><td>${c.retailers?.code||''} ${c.retailers?.name||''}</td>
+  const editable = round.status === 'PUBLISHED';
+  const adjLine = (c) => (c.detail?.adjustments||[]).map((a,i) =>
+    `<div class="hint" style="color:var(--accent-ar);">${a.label||'조정'} ${a.amount<0?'−':'+'}${fmtWon(Math.abs(a.amount))}
+       ${a.note?`· ${a.note}`:''}
+       ${editable?`<a class="file-link od-adj-del" data-cid="${c.id}" data-i="${i}">삭제</a>`:''}</div>`).join('');
+  const rows = (claims||[]).map(c => {
+    const base = Number(c.detail?.amount ?? c.approved_amount ?? 0);
+    const adj  = (c.detail?.adjustments||[]).reduce((a,x)=>a+Number(x.amount||0),0);
+    return `
+    <tr><td>${c.retailers?.code||''} ${c.retailers?.name||''}${adjLine(c)}</td>
       <td style="text-align:right;">${(c.detail?.user_count ?? (c.detail?.users||[]).length)}명 / ${c.detail?.user_months||0}</td>
-      <td style="text-align:right;">${fmtWon(c.approved_amount)}</td>
-      <td>${c.confirmed_at ? `<span class="badge badge-ap">확정 ${fmtDate(c.confirmed_at)}</span>` : '<span class="badge badge-off">확인 대기</span>'}</td>
-    </tr>`).join('');
+      <td style="text-align:right;">${adj ? `<span class="hint">${fmtWon(base)} ${adj<0?'−':'+'} ${fmtWon(Math.abs(adj))}</span><br>` : ''}${fmtWon(c.approved_amount)}</td>
+      <td>${c.confirmed_at ? `<span class="badge badge-ap">확정 ${fmtDate(c.confirmed_at)}</span>` : '<span class="badge badge-off">확인 대기</span>'}
+        ${editable?`<br><a class="file-link od-adj-add" data-cid="${c.id}" data-code="${c.retailers?.code||''}">조정 라인 추가</a>`:''}</td>
+    </tr>`; }).join('');
+  const sumAmt = (claims||[]).reduce((a,c)=>a+Number(c.approved_amount||0),0);
   card.innerHTML = `
     <div class="section-label" style="margin-top:0;">리테일러 확정 현황 (${confirmed}/${total})</div>
     <table><thead><tr><th>리테일러</th><th style="text-align:right;">인원 / 유저-month</th><th style="text-align:right;">청구금액</th><th>상태</th></tr></thead><tbody>${rows}</tbody></table>
-    <div class="hint" style="margin-top:8px;">합계 ${fmtWon(s.grand?.amount)} · VAT ${fmtWon(s.grand?.vat)} · Total ${fmtWon(s.grand?.total)} · 유저당 월단가 ${fmtWon(s.rate)} (${s.fiscal_year||''})</div>`;
+    <div class="hint" style="margin-top:8px;">현재 합계 <b>${fmtWon(sumAmt)}</b> (조정 반영) · 산정 합계 ${fmtWon(s.grand?.amount)} · 유저당 월단가 ${fmtWon(s.rate)} (${s.fiscal_year||''})</div>
+    ${editable?'<div class="hint">조정 라인 = 과청구 환입처럼 산정식 밖에서 더하거나 빼는 금액. 음수로 넣으면 차감됩니다.</div>':''}`;
   document.getElementById('reviewSection').appendChild(card);
+
+  /* 조정 라인 추가·삭제 */
+  const saveAdj = async (cid, next) => {
+    const c = (claims||[]).find(x => x.id === cid); if(!c) return;
+    const det = { ...(c.detail||{}), adjustments: next };
+    const base = Number(det.amount || 0);
+    const amt  = base + next.reduce((a,x)=>a+Number(x.amount||0),0);
+    const jg = Math.round(amt * 0.10);
+    det.vat = Math.round(amt * 0.1);
+    const { error } = await sb.from('claims')
+      .update({ detail: det, approved_amount: amt, jg_amount: jg, lr_amount: amt - jg, confirmed_at: null })
+      .eq('id', cid);
+    if(error){ alert('저장 실패: ' + error.message); return; }
+    await logAudit('AR_ADJUST','CLAIM',cid,{round:round.period_label, adjustments:next});
+    renderOneDmsRoundDetail(round, type);
+  };
+  card.querySelectorAll('.od-adj-add').forEach(a => a.addEventListener('click', async () => {
+    const c = (claims||[]).find(x => x.id === a.dataset.cid); if(!c) return;
+    const label = prompt(`${a.dataset.code} — 조정 항목명\n예) FY26 Q4 과청구 환입`, 'FY26 Q4 과청구 환입');
+    if(label === null) return;
+    const raw = prompt('조정 금액 (공급가 기준, 차감이면 음수)\n예) -328611', '-');
+    if(raw === null) return;
+    const amount = Number(String(raw).replace(/[,\s원]/g,''));
+    if(!isFinite(amount) || amount === 0){ alert('숫자를 넣어주세요.'); return; }
+    const note = prompt('사유 (리테일러 화면에 표시됩니다)', '') || '';
+    await saveAdj(c.id, [ ...(c.detail?.adjustments||[]), { label, amount, note } ]);
+  }));
+  card.querySelectorAll('.od-adj-del').forEach(a => a.addEventListener('click', async () => {
+    const c = (claims||[]).find(x => x.id === a.dataset.cid); if(!c) return;
+    if(!confirm('이 조정 라인을 삭제할까요?')) return;
+    const next = (c.detail?.adjustments||[]).filter((_,i) => i !== Number(a.dataset.i));
+    await saveAdj(c.id, next);
+  }));
+
+  /* 리테일러가 올린 이의 */
+  const { data: disputes } = await sb.from('disputes').select('*, retailers(code,name)')
+    .eq('round_id', round.id).order('created_at', { ascending:false });
+  if((disputes||[]).length){
+    const dc = document.createElement('div');
+    dc.className = 'info-card';
+    dc.innerHTML = `
+      <div class="section-label" style="margin-top:0;">리테일러 이의 제기 (${disputes.length}건)</div>
+      ${disputes.map(x => `
+        <div style="border-top:1px solid var(--surface3); padding:8px 0;">
+          <div><b>${x.retailers?.code||''} ${x.retailers?.name||''}</b>
+            <span class="badge ${x.status==='RAISED'?'badge-ar':'badge-ap'}" style="margin-left:6px;">${x.status==='RAISED'?'검토 대기':x.status}</span>
+            <span class="hint" style="margin-left:6px;">${fmtDate(x.created_at)}</span></div>
+          <div class="hint" style="white-space:pre-wrap; margin-top:4px;">${(x.reason||'').replace(/</g,'&lt;')}</div>
+          ${x.requested_amount!=null?`<div class="hint">요청 금액 ${fmtWon(x.requested_amount)}</div>`:''}
+        </div>`).join('')}
+      <div class="hint" style="margin-top:8px;">웅진 확인 후 위의 <b>조정 라인 추가</b> 로 반영하세요.</div>`;
+    document.getElementById('reviewSection').appendChild(dc);
+  }
 
   const vs = document.getElementById('voucherSection');
   if(round.status === 'PUBLISHED'){
@@ -3124,57 +3349,198 @@ async function generateOneDmsVoucher(round, type, claims){
   }
 }
 
-/* ---------- 리테일러 화면: One DMS 청구내역 확인 카드 (라이선스 종류 비공개) ---------- */
+const OD_REASONS = ['직전 분기 이전 퇴사','미사용 계정','중복 계정','담당자 아님','지점이 다름','기타'];
+
+/* ---------- 리테일러 화면: One DMS 청구내역 확인 카드 (라이선스 종류 비공개)
+   2026-10-17 개편 — 기본 접힘 + NEW 마크 + 지점·재직상태·역할 필터 + 금액/버튼 상단 배치 ---------- */
 async function renderOneDmsRetailerCard(listEl, round, items){
   const c = items[0];
   const d = c.detail || {};
   const won = (n) => fmtWon(Math.round(n||0));
   const canConfirm = round.status === 'PUBLISHED' && !c.confirmed_at;
   const months = d.month_labels || [];
+  const users = d.users || [];
+  const uid = 'od' + String(c.id).slice(0,8);
+
+  /* 조정 라인 — 과청구 환입 등. detail.adjustments = [{label, amount, note}] */
+  const adjs = d.adjustments || [];
+  const adjSum = adjs.reduce((a,x) => a + Number(x.amount||0), 0);
+  const base = Number(d.amount||0);
+  const net  = base + adjSum;
+  const vat  = Math.round(net * 0.1);
+
+  /* NEW = 아직 확정 안 했고 공지된 지 7일 이내 */
+  const days = c.submitted_at ? (Date.now() - new Date(c.submitted_at)) / 864e5 : 999;
+  const isNew = !c.confirmed_at && days <= 7;
+
+  const uniq = (k) => Array.from(new Set(users.map(u => (u[k]||'').trim()).filter(Boolean))).sort();
+  const branches = uniq('workshop');          // 웅진 원본에 지점 컬럼이 없으면 빈 배열
+  const statuses = uniq('status');
+  const roles    = uniq('role');
+
   const card = document.createElement('div');
   card.className = 'claim-card';
-
-  const userRows = (d.users||[]).map(u => `
-    <tr>
-      <td>${u.name||''}</td><td class="muted">${u.login||''}</td><td>${u.role||''}</td>
-      <td class="muted">${u.first||''}</td><td>${u.status||''}</td><td class="muted">${u.retire||''}</td>
-      ${(u.flags||[]).map(f => `<td style="text-align:center;">${f?'O':'·'}</td>`).join('')}
-      <td style="text-align:right;">${u.months_active||0}</td>
-    </tr>`).join('');
-
   card.innerHTML = `
-    <div class="claim-head">
+    <div class="claim-head" style="cursor:pointer;" data-od-toggle="${uid}">
       <div>
-        <div class="claim-name">${round.settlement_types?.name||''} · ${round.period_label}</div>
-        <div class="claim-sub">JLR Korea 청구 · 대상 인원 확인 후 확정
+        <div class="claim-name">
+          <span style="display:inline-block; width:18px; color:var(--muted,#7a8699);" id="${uid}-caret">＋</span>
+          ${round.settlement_types?.name||''} · ${round.period_label}
+          ${isNew ? '<span class="badge badge-ar" style="margin-left:8px;">NEW</span>' : ''}
+        </div>
+        <div class="claim-sub" style="margin-left:18px;">JLR Korea 청구 · 대상 ${d.user_count||users.length}명 · ${d.user_months||0} 유저-month
           · <span class="badge ${round.status==='PUBLISHED'?'badge-ap':'badge-off'}">${ROUND_STATUS_LABEL[round.status]||round.status}</span></div>
       </div>
       ${c.confirmed_at ? '<span class="badge badge-ap">확정완료</span>' : '<span class="badge badge-off">확인 대기</span>'}
     </div>
-    <div class="hint" style="margin:8px 0;">아래 인원이 해당 기간(${months.join(' / ')}) 동안 One DMS를 사용하여 청구됩니다. (${d.user_count||(d.users||[]).length}명 · ${d.user_months||0} 유저-month)</div>
-    <div style="overflow-x:auto;">
-    <table style="min-width:640px;">
-      <thead><tr><th>이름</th><th>로그인 ID</th><th>역할</th><th>첫 로그인</th><th>재직상태</th><th>퇴직일</th>${months.map(m=>`<th style="text-align:center;">${m}</th>`).join('')}<th style="text-align:right;">사용 개월</th></tr></thead>
-      <tbody>${userRows}</tbody>
-    </table>
+
+    <!-- 금액 + 버튼 : 접혀 있어도 항상 보인다 -->
+    <div style="display:flex; align-items:center; gap:18px; flex-wrap:wrap; margin:10px 0 0;
+                padding:10px 12px; background:var(--surface2); border-radius:6px;">
+      <div><div class="hint">${adjs.length ? '산정 금액' : '공급가액'}</div><div style="font-weight:600;">${won(base)}</div></div>
+      ${adjs.map(a => `<div><div class="hint">${a.label||'조정'}</div>
+        <div style="font-weight:600; color:var(--accent-ar);" title="${(a.note||'').replace(/"/g,'')}">${a.amount<0?'−':'+'}${won(Math.abs(a.amount))}</div></div>`).join('')}
+      ${adjs.length ? `<div><div class="hint">공급가액</div><div style="font-weight:600;">${won(net)}</div></div>` : ''}
+      <div><div class="hint">부가세 (10%)</div><div style="font-weight:600;">${won(vat)}</div></div>
+      <div><div class="hint">합계</div><div style="font-weight:700; font-size:16px; color:var(--accent);">${won(net+vat)}</div></div>
+      <div style="margin-left:auto; display:flex; gap:8px;">
+        <button class="btn btn-sm btn-ghost od-xlsx-btn">엑셀 다운로드</button>
+        ${canConfirm ? '<button class="btn btn-sm btn-ghost od-dispute-btn" disabled>이의 제출</button>' : ''}
+        ${canConfirm ? '<button class="btn btn-sm od-confirm-btn">정산 확정</button>' : ''}
+      </div>
     </div>
-    <table style="margin-top:10px; max-width:340px;">
-      <tbody>
-        <tr><td>공급가액</td><td style="text-align:right;">${won(d.amount)}</td></tr>
-        <tr><td>부가세 (10%)</td><td style="text-align:right;">${won(d.vat)}</td></tr>
-        <tr style="font-weight:600;"><td>합계</td><td style="text-align:right;color:var(--accent-ap);">${won((d.amount||0)+(d.vat||0))}</td></tr>
-      </tbody>
-    </table>
-    <div style="margin-top:10px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-      <button class="btn btn-sm btn-ghost od-xlsx-btn">엑셀 다운로드</button>
-      ${canConfirm ? '<button class="btn btn-sm od-confirm-btn">정산 확정</button>' : ''}
+
+    <div id="${uid}-body" style="display:none;">
+      <div class="hint" style="margin:10px 0 8px;">아래 인원이 해당 기간(${months.join(' / ')}) 동안 One DMS를 사용하여 청구됩니다.
+        ${canConfirm ? '잘못된 인원이 있으면 <b>맨 왼쪽을 체크</b>하고 사유를 골라 <b>[이의 제출]</b> 을 눌러주세요. 확인되는 금액은 다음 분기 청구에서 정산됩니다.' : ''}</div>
+      <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end; margin-bottom:8px;">
+        <div class="field" style="min-width:150px; margin:0;"><label>지점</label>
+          <select class="od-f" data-k="workshop" ${branches.length?'':'disabled'}>
+            <option value="">${branches.length ? '전체' : '지점 정보 없음'}</option>
+            ${branches.map(b=>`<option>${b}</option>`).join('')}
+          </select></div>
+        <div class="field" style="min-width:130px; margin:0;"><label>재직상태</label>
+          <select class="od-f" data-k="status"><option value="">전체</option>${statuses.map(x=>`<option>${x}</option>`).join('')}</select></div>
+        <div class="field" style="min-width:180px; margin:0;"><label>역할</label>
+          <select class="od-f" data-k="role"><option value="">전체</option>${roles.map(x=>`<option>${x}</option>`).join('')}</select></div>
+        <div class="field" style="min-width:170px; margin:0;"><label>이름 · 로그인 ID 검색</label>
+          <input class="od-q" placeholder="검색"></div>
+      </div>
+      <div style="overflow-x:auto;">
+      <table style="min-width:680px;">
+        <thead><tr>${canConfirm?'<th style="width:34px; text-align:center;"><input type="checkbox" class="od-all"></th>':''}${branches.length?'<th>지점</th>':''}<th>이름</th><th>로그인 ID</th><th>역할</th><th>첫 로그인</th><th>재직상태</th><th>퇴직일</th>${months.map(m=>`<th style="text-align:center;">${m}</th>`).join('')}<th style="text-align:right;">사용 개월</th></tr></thead>
+        <tbody class="od-tbody"></tbody>
+        <tfoot><tr style="border-top:2px solid var(--surface3); font-weight:700;">
+          <td colspan="${(branches.length?7:6)+(canConfirm?1:0)}">표시 인원 <span class="od-cnt">0</span>명 <span class="hint od-of"></span>
+            <span class="od-sel hint" style="color:var(--accent-ar);"></span></td>
+          ${months.map(()=>'<td></td>').join('')}
+          <td style="text-align:right;"><span class="od-um">0</span></td>
+        </tr></tfoot>
+      </table>
+      </div>
     </div>`;
 
-  card.querySelector('.od-xlsx-btn').addEventListener('click', () => downloadOneDmsRetailerXlsx(c, round));
+  /* 이의 제기 상태 : { login: 사유 } */
+  const disp = {};
+  const syncDispute = () => {
+    const n = Object.keys(disp).length;
+    const b = card.querySelector('.od-dispute-btn');
+    if(b){ b.disabled = n === 0; b.textContent = n ? `이의 제출 (${n}건)` : '이의 제출'; }
+    const tag = card.querySelector('.od-sel');
+    if(tag) tag.textContent = n ? ` · 이의 표시 ${n}명` : '';
+  };
+
+  /* 표 그리기 — 필터 반영 */
+  const draw = () => {
+    const f = {};
+    card.querySelectorAll('.od-f').forEach(sel => { if(sel.value) f[sel.dataset.k] = sel.value; });
+    const q = (card.querySelector('.od-q').value || '').trim().toLowerCase();
+    const rows = users.filter(u =>
+      Object.entries(f).every(([k,v]) => (u[k]||'').trim() === v) &&
+      (!q || ((u.name||'') + (u.login||'')).toLowerCase().includes(q)));
+    card.querySelector('.od-tbody').innerHTML = rows.map(u => `
+      <tr data-login="${u.login||''}" class="${disp[u.login]?'od-row-sel':''}">
+        ${canConfirm?`<td style="text-align:center;"><input type="checkbox" class="od-chk" data-login="${u.login||''}" ${disp[u.login]?'checked':''}></td>`:''}
+        ${branches.length?`<td>${u.workshop||''}</td>`:''}
+        <td>${u.name||''}</td><td class="muted">${u.login||''}</td><td>${u.role||''}</td>
+        <td class="muted">${u.first||''}</td>
+        <td>${u.status && u.status!=='재직' ? `<span class="badge badge-ar">${u.status}</span>` : (u.status||'')}</td>
+        <td class="muted">${u.retire||''}</td>
+        ${(u.flags||[]).map(x => `<td style="text-align:center;">${x?'O':'·'}</td>`).join('')}
+        <td style="text-align:right;">${u.months_active||0}</td>
+      </tr>${disp[u.login] ? `<tr class="od-rsn"><td colspan="${(branches.length?8:7)+months.length+(canConfirm?1:0)}"
+         style="background:var(--surface2); padding:8px 12px;">
+         <span class="hint" style="margin-right:6px;">사유</span>
+         <select class="od-rsn-sel" data-login="${u.login||''}" style="padding:4px 8px;">
+           ${OD_REASONS.map(r=>`<option ${disp[u.login]===r?'selected':''}>${r}</option>`).join('')}
+         </select>
+         <span class="hint" style="margin-left:10px;">${u.name||''} · ${u.months_active||0}개월</span></td></tr>` : ''}`).join('')
+      || `<tr><td colspan="${(branches.length?8:7)+months.length+(canConfirm?1:0)}" class="hint">조건에 맞는 인원이 없습니다.</td></tr>`;
+    card.querySelector('.od-cnt').textContent = rows.length;
+    card.querySelector('.od-of').textContent = rows.length === users.length ? '' : `(전체 ${users.length}명 중)`;
+    card.querySelector('.od-um').textContent = rows.reduce((a,u)=>a+(u.months_active||0),0);
+    syncDispute();
+  };
+  draw();
+
+  card.querySelectorAll('.od-f').forEach(sel => sel.addEventListener('change', draw));
+  card.querySelector('.od-q').addEventListener('input', draw);
+
+  card.addEventListener('change', (e) => {
+    const t = e.target;
+    if(t.classList.contains('od-chk')){
+      if(t.checked) disp[t.dataset.login] = OD_REASONS[0]; else delete disp[t.dataset.login];
+      draw();
+    }
+    if(t.classList.contains('od-rsn-sel')) disp[t.dataset.login] = t.value;
+    if(t.classList.contains('od-all')){
+      card.querySelectorAll('.od-chk').forEach(ch => {
+        if(t.checked) disp[ch.dataset.login] = disp[ch.dataset.login] || OD_REASONS[0];
+        else delete disp[ch.dataset.login];
+      });
+      draw();
+    }
+  });
+
+  const db = card.querySelector('.od-dispute-btn');
+  if(db){
+    db.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const picked = Object.entries(disp);
+      if(!picked.length) return;
+      const byLogin = new Map(users.map(u => [u.login, u]));
+      const months_off = picked.reduce((a,[lg]) => a + (byLogin.get(lg)?.months_active || 0), 0);
+      const cut = Math.round(months_off * Number(d.rate || 0));
+      const lines = picked.map(([lg,rsn]) => {
+        const u = byLogin.get(lg) || {};
+        return `${u.name||lg} (${lg}) — ${rsn}${u.retire?` · 퇴사 ${u.retire}`:''} · ${u.months_active||0}개월`;
+      });
+      if(!confirm(`${picked.length}명에 대해 이의를 제출합니다.\n조정 요청 금액 ${won(cut)} (공급가 기준)\n\n` + lines.join('\n'))) return;
+      db.disabled = true; db.textContent = '제출 중...';
+      const { error } = await sb.from('disputes').insert({
+        round_id: round.id, retailer_id: c.retailer_id, status: 'RAISED',
+        requested_amount: Math.max(0, net - cut),
+        reason: `[One DMS 대상 인원 이의 ${picked.length}건 · 조정 요청 ${won(cut)}]\n` + lines.join('\n')
+      });
+      if(error){ alert('제출 실패: ' + error.message); db.disabled = false; syncDispute(); return; }
+      alert('이의를 제출했습니다. JLR Korea 가 웅진에 확인 후 회신드립니다.');
+      await loadRetailerClaims();
+    });
+  }
+  card.querySelector('[data-od-toggle]').addEventListener('click', () => {
+    const b = card.querySelector('#'+uid+'-body');
+    const open = b.style.display !== 'none';
+    b.style.display = open ? 'none' : 'block';
+    card.querySelector('#'+uid+'-caret').textContent = open ? '＋' : '－';
+  });
+
+  card.querySelector('.od-xlsx-btn').addEventListener('click', (e) => { e.stopPropagation(); downloadOneDmsRetailerXlsx(c, round); });
   const cb = card.querySelector('.od-confirm-btn');
   if(cb){
-    cb.addEventListener('click', async () => {
-      if(!confirm(`청구금액 ${won((d.amount||0)+(d.vat||0))} (VAT 포함) 을(를) 확정할까요? 확정 후에는 취소할 수 없습니다.`)) return;
+    cb.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if(Object.keys(disp).length && !confirm('이의 표시된 인원이 있습니다. 이의를 제출하지 않고 그대로 확정할까요?')) return;
+      if(!confirm(`청구금액 ${won(net+vat)} (VAT 포함) 을(를) 확정할까요? 확정 후에는 취소할 수 없습니다.`)) return;
       const { error } = await sb.from('claims').update({ confirmed_at: new Date().toISOString() }).eq('id', c.id);
       if(error){ alert('처리 실패: ' + error.message); return; }
       await loadRetailerClaims();
@@ -3928,11 +4294,192 @@ function histPeriods(entry){
   return rows.sort((a,b) => String(a.sort).localeCompare(String(b.sort)));
 }
 
+
+/* ================================================================
+   리테일러용 과거 정산내역 대시보드 (2026-10-17 개편)
+   - AP/AR 같은 내부 용어를 쓰지 않는다 → "JLRK → 리테일러" / "리테일러 → JLRK"
+   - 기본값은 전체 유형을 이어서, 드롭다운으로 개별 선택도 가능
+   - 유형 블록 = 가로 분기 × 세로 지점 매트릭스
+   - 맨 위에 최근 분기·최근 월 지원금과 분기별 추세
+   관리자 화면(교차 리테일러 매트릭스)은 그대로 둔다.
+   ================================================================ */
+const HIST_DIR_TEXT = { AP:'JLRK → 리테일러 지급', AR:'리테일러 → JLRK 청구' };
+const histWon = n => (Math.round(n)).toLocaleString('ko-KR') + '원';
+
+/* 한 행(수동/포털)을 {fy, q, qkey, month, who, amount} 로 정규화 */
+function histNorm(entry){
+  const out = [];
+  entry.legacy.forEach(r => {
+    const q = r.quarter || (String(r.period_label||'').match(/Q([1-4])/) ? 'Q'+RegExp.$1 : null);
+    if(!r.fiscal_year || !q) return;
+    out.push({ fy:r.fiscal_year, q, qkey:`${r.fiscal_year} ${q}`,
+               month:(r.data_month || '').slice(0,7),
+               who:r.workshop_label || '법인', amount:Number(r.amount||0), kind:'manual' });
+  });
+  entry.rounds.forEach(rd => {
+    const m = String(rd.period_label||'').match(/Q([1-4])/);
+    const q = m ? 'Q'+m[1] : null;
+    if(!rd.fiscal_year || !q) return;
+    histData.claims.filter(c => c.round_id === rd.id).forEach(c => {
+      const ws = c.workshop_id ? histData.wsById.get(c.workshop_id) : null;
+      out.push({ fy:rd.fiscal_year, q, qkey:`${rd.fiscal_year} ${q}`,
+                 month:(rd.created_at||'').slice(0,7),
+                 who: ws ? `${myRetailer?.code||''} ${ws.name}`.trim() : '법인',
+                 amount:Number(c.approved_amount ?? c.claimed_amount ?? 0), kind:'portal' });
+    });
+  });
+  return out;
+}
+
+function renderHistoryRetailer(list){
+  const host  = document.getElementById('historyHost');
+  const typeSel = document.getElementById('historyType');
+  const fySel   = document.getElementById('historyFy');
+
+  /* ── 드롭다운 : 전체 + 개별 유형 ── */
+  if(histView.typeKey !== '__ALL__' && !list.some(e => e.key === histView.typeKey)) histView.typeKey = '__ALL__';
+  typeSel.innerHTML = `<option value="__ALL__">전체 보기</option>`
+    + list.map(e => `<option value="${e.key}">${e.name}</option>`).join('');
+  typeSel.value = histView.typeKey;
+
+  const norm = new Map(list.map(e => [e.key, histNorm(e)]));
+  const fys = Array.from(new Set([...norm.values()].flat().map(r => r.fy))).sort();
+  if(histView.fy !== '__ALL__' && !fys.includes(histView.fy)) histView.fy = '__ALL__';
+  fySel.innerHTML = `<option value="__ALL__">전체 (${fys[0]||''}~${fys[fys.length-1]||''})</option>`
+    + fys.slice().reverse().map(f => `<option value="${f}">${f}</option>`).join('');
+  fySel.value = histView.fy;
+  const fyText = histView.fy === '__ALL__' ? '전체 기간' : histView.fy;
+
+  const shown = histView.typeKey === '__ALL__' ? list : list.filter(e => e.key === histView.typeKey);
+  const inFy  = k => norm.get(k).filter(r => histView.fy === '__ALL__' || r.fy === histView.fy);
+
+  /* ── 상단 대시보드 : 지원금(JLRK→리테일러) 기준 ── */
+  const paid = list.filter(e => e.direction !== 'AR');
+  const allPaid = paid.flatMap(e => norm.get(e.key));
+  const qTot = {};  allPaid.forEach(r => qTot[r.qkey] = (qTot[r.qkey]||0) + r.amount);
+  const qKeys = Object.keys(qTot).sort();
+  /* 월 단위 정산 유형이 몇 개 없어 '최근 월' 카드는 쓰지 않는다 (2026-10-17). 모두 분기로 합산. */
+
+  const lastQ = qKeys[qKeys.length-1], prevQ = qKeys[qKeys.length-2];
+  const diff  = (lastQ && prevQ) ? qTot[lastQ] - qTot[prevQ] : null;
+  const inScope = r => histView.fy === '__ALL__' || r.fy === histView.fy;
+  const fyPaid = allPaid.filter(inScope).reduce((a,b)=>a+b.amount,0);
+  const fyBill = list.filter(e => e.direction === 'AR').flatMap(e => norm.get(e.key))
+                     .filter(inScope).reduce((a,b)=>a+b.amount,0);
+
+  /* 정산 대기 = 리테일러가 제출했는데 JLRK 가 아직 승인하지 않은 금액 (JLRK → 리테일러 유형) */
+  const apTypeIds = new Set(histData.types.filter(t => t.direction !== 'AR').map(t => t.id));
+  const roundById = new Map(histData.rounds.map(r => [r.id, r]));
+  let waitAmt = 0, waitN = 0;
+  histData.claims.forEach(c => {
+    if(c.status !== 'SUBMITTED') return;
+    const rd = roundById.get(c.round_id);
+    if(!rd || !apTypeIds.has(rd.type_id)) return;
+    if(histView.fy !== '__ALL__' && rd.fiscal_year !== histView.fy) return;
+    waitAmt += Number(c.claimed_amount ?? c.approved_amount ?? 0); waitN++;
+  });
+
+  const kpi = (label, value, sub, tone) => `
+    <div style="flex:1; min-width:170px; background:var(--surface); border:1px solid var(--surface3);
+                border-radius:8px; padding:14px 16px;">
+      <div style="font-size:11.5px; color:var(--muted,#7a8699); letter-spacing:.2px;">${label}</div>
+      <div style="font-size:21px; font-weight:700; margin-top:4px; ${tone||''}">${value}</div>
+      <div style="font-size:11.5px; color:var(--muted,#7a8699); margin-top:3px;">${sub||'&nbsp;'}</div>
+    </div>`;
+
+  const max = Math.max(1, ...qKeys.map(k => qTot[k]));
+  const bars = qKeys.map(k => {
+    const h = Math.max(2, Math.round(qTot[k] / max * 86));
+    const on = k === lastQ;
+    return `<div style="flex:1; min-width:46px; display:flex; flex-direction:column; justify-content:flex-end;
+                        align-items:center; gap:5px;">
+      <div style="font-size:10.5px; color:var(--muted,#7a8699); white-space:nowrap;">${Math.round(qTot[k]/1e6)}M</div>
+      <div title="${histWon(qTot[k])}" style="width:62%; height:${h}px; border-radius:3px 3px 0 0;
+           background:${on?'var(--accent)':'var(--surface3)'};"></div>
+      <div style="font-size:10.5px; color:${on?'var(--accent)':'var(--muted,#7a8699)'};
+                  font-weight:${on?700:400}; white-space:nowrap;">${k.replace(' ',' ')}</div>
+    </div>`; }).join('');
+
+  let html = `
+    <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px;">
+      ${kpi('최근 분기 지원금', lastQ ? histWon(qTot[lastQ]) : '—', lastQ || '', 'color:var(--accent);')}
+      ${kpi('직전 분기 대비', diff===null ? '—' : (diff>=0?'▲ ':'▼ ') + histWon(Math.abs(diff)),
+            prevQ ? `${prevQ} → ${lastQ}` : '', diff===null?'':(diff>=0?'color:var(--accent);':'color:var(--accent-ar);'))}
+      ${kpi('정산 대기 금액', waitAmt ? histWon(waitAmt) : '0원',
+            waitN ? `제출 ${waitN}건 · JLRK 승인 대기` : '승인 대기 중인 청구 없음',
+            waitAmt ? 'color:var(--accent-ar);' : '')}
+      ${kpi(`${fyText} 누적 지원금`, histWon(fyPaid), fyBill ? `JLRK 청구분 ${histWon(fyBill)} 별도` : '')}
+    </div>
+    <div class="info-card" style="margin-bottom:12px;">
+      <div class="section-label" style="margin-top:0;">분기별 지원금 추세
+        <span class="hint" style="margin-left:8px;">JLRK → 리테일러 지급 기준 · 전 유형 합계</span></div>
+      <div style="display:flex; align-items:flex-end; gap:8px; height:130px; padding:6px 2px 0;">${bars || ''}</div>
+    </div>`;
+
+  /* ── 유형별 매트릭스 : 가로 분기 × 세로 지점 ── */
+  shown.forEach(e => {
+    const rows = inFy(e.key);
+    if(rows.length === 0) return;
+    const qs  = Array.from(new Set(rows.map(r => r.qkey))).sort();
+    const whos = Array.from(new Set(rows.map(r => r.who))).sort();
+    const cell = {};
+    rows.forEach(r => { cell[r.who+'|'+r.qkey] = (cell[r.who+'|'+r.qkey]||0) + r.amount; });
+    const colTot = qs.map(q => whos.reduce((a,w) => a + (cell[w+'|'+q]||0), 0));
+    const grand  = colTot.reduce((a,b)=>a+b,0);
+    const isAR = e.direction === 'AR';
+
+    html += `
+      <div class="info-card" style="margin-bottom:12px;">
+        <div class="section-label" style="margin-top:0;">${e.name}
+          <span class="hint" style="margin-left:8px; color:${isAR?'var(--accent-ar)':'var(--accent)'};">
+            ${HIST_DIR_TEXT[e.direction] || ''}</span></div>
+        <div class="hint" style="margin-bottom:8px;">${fyText} · ${whos.length}개 지점 · 누적 ${histWon(grand)}</div>
+        <table>
+          <thead><tr>
+            <th style="text-align:left;">지점</th>
+            ${qs.map(q => `<th style="text-align:right;">${q}</th>`).join('')}
+            <th style="text-align:right;">합계</th>
+          </tr></thead>
+          <tbody>
+            ${whos.map(w => {
+              const t = qs.reduce((a,q)=>a+(cell[w+'|'+q]||0),0);
+              return `<tr><td style="text-align:left; white-space:nowrap;">${w}</td>
+                ${qs.map(q => `<td style="text-align:right;">${cell[w+'|'+q] ? histWon(cell[w+'|'+q]) : '—'}</td>`).join('')}
+                <td style="text-align:right; font-weight:600;">${histWon(t)}</td></tr>`;
+            }).join('')}
+            <tr style="border-top:2px solid var(--surface3);">
+              <td style="text-align:left; font-weight:700;">합계</td>
+              ${colTot.map(v => `<td style="text-align:right; font-weight:700;">${v ? histWon(v) : '—'}</td>`).join('')}
+              <td style="text-align:right; font-weight:700;">${histWon(grand)}</td></tr>
+          </tbody>
+        </table>
+      </div>`;
+  });
+
+  if(shown.every(e => inFy(e.key).length === 0))
+    html += '<div class="info-card"><div class="hint">선택한 기간에 내역이 없습니다.</div></div>';
+
+  host.innerHTML = html;
+  typeSel.onchange = () => { histView.typeKey = typeSel.value; renderHistory(); };
+  fySel.onchange   = () => { histView.fy = fySel.value; renderHistory(); };
+}
+
 function renderHistory(){
   const host = document.getElementById('historyHost');
   const list = histTypeList();
   const typeSel = document.getElementById('historyType');
   const fySel = document.getElementById('historyFy');
+
+  /* 리테일러는 개편된 대시보드로 (관리자는 기존 교차 매트릭스 유지) */
+  if(myProfile?.role !== 'ADMIN'){
+    const l = histTypeList();
+    if(l.length === 0){
+      typeSel.innerHTML = ''; fySel.innerHTML = '';
+      host.innerHTML = '<div class="info-card"><div class="hint">조회할 정산 내역이 없습니다.</div></div>';
+      return;
+    }
+    return renderHistoryRetailer(l);
+  }
 
   if(list.length === 0){
     typeSel.innerHTML = ''; fySel.innerHTML = '';
@@ -4110,6 +4657,18 @@ function downloadHistoryXlsx(entry){
   a.download = `과거정산내역_${sanitizeFilename(entry.name)}_${new Date().toISOString().slice(0,10)}.xlsx`;
   document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
 }
+
+document.getElementById('obRefresh').addEventListener('click', loadOutbox);
+document.getElementById('obSendAll').addEventListener('click', async () => {
+  const pending = outboxRows.filter(r => r.status === 'PENDING');
+  if(!pending.length) return;
+  if(!confirm(`대기 중인 ${pending.length}건을 전부 발송합니다. 계속할까요?`)) return;
+  const btn = document.getElementById('obSendAll'); btn.disabled = true;
+  let ok = 0, ng = 0;
+  for(const row of pending){ const r = await dispatchOutbox(row); r.ok ? ok++ : ng++; }
+  alert(`발송 완료 ${ok}건${ng?` · 실패 ${ng}건`:''}`);
+  loadOutbox();
+});
 
 document.getElementById('historyRefreshBtn').addEventListener('click', () => { histData = null; loadHistory(); });
 document.getElementById('goHistoryBtn').addEventListener('click', () => switchView('history'));
