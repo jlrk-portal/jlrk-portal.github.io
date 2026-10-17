@@ -3967,11 +3967,177 @@ function histPeriods(entry){
   return rows.sort((a,b) => String(a.sort).localeCompare(String(b.sort)));
 }
 
+
+/* ================================================================
+   리테일러용 과거 정산내역 대시보드 (2026-10-17 개편)
+   - AP/AR 같은 내부 용어를 쓰지 않는다 → "JLRK → 리테일러" / "리테일러 → JLRK"
+   - 기본값은 전체 유형을 이어서, 드롭다운으로 개별 선택도 가능
+   - 유형 블록 = 가로 분기 × 세로 지점 매트릭스
+   - 맨 위에 최근 분기·최근 월 지원금과 분기별 추세
+   관리자 화면(교차 리테일러 매트릭스)은 그대로 둔다.
+   ================================================================ */
+const HIST_DIR_TEXT = { AP:'JLRK → 리테일러 지급', AR:'리테일러 → JLRK 청구' };
+const histWon = n => (Math.round(n)).toLocaleString('ko-KR') + '원';
+
+/* 한 행(수동/포털)을 {fy, q, qkey, month, who, amount} 로 정규화 */
+function histNorm(entry){
+  const out = [];
+  entry.legacy.forEach(r => {
+    const q = r.quarter || (String(r.period_label||'').match(/Q([1-4])/) ? 'Q'+RegExp.$1 : null);
+    if(!r.fiscal_year || !q) return;
+    out.push({ fy:r.fiscal_year, q, qkey:`${r.fiscal_year} ${q}`,
+               month:(r.data_month || '').slice(0,7),
+               who:r.workshop_label || '법인', amount:Number(r.amount||0), kind:'manual' });
+  });
+  entry.rounds.forEach(rd => {
+    const m = String(rd.period_label||'').match(/Q([1-4])/);
+    const q = m ? 'Q'+m[1] : null;
+    if(!rd.fiscal_year || !q) return;
+    histData.claims.filter(c => c.round_id === rd.id).forEach(c => {
+      const ws = c.workshop_id ? histData.wsById.get(c.workshop_id) : null;
+      out.push({ fy:rd.fiscal_year, q, qkey:`${rd.fiscal_year} ${q}`,
+                 month:(rd.created_at||'').slice(0,7),
+                 who: ws ? `${myRetailer?.code||''} ${ws.name}`.trim() : '법인',
+                 amount:Number(c.approved_amount ?? c.claimed_amount ?? 0), kind:'portal' });
+    });
+  });
+  return out;
+}
+
+function renderHistoryRetailer(list){
+  const host  = document.getElementById('historyHost');
+  const typeSel = document.getElementById('historyType');
+  const fySel   = document.getElementById('historyFy');
+
+  /* ── 드롭다운 : 전체 + 개별 유형 ── */
+  if(histView.typeKey !== '__ALL__' && !list.some(e => e.key === histView.typeKey)) histView.typeKey = '__ALL__';
+  typeSel.innerHTML = `<option value="__ALL__">전체 보기</option>`
+    + list.map(e => `<option value="${e.key}">${e.name}</option>`).join('');
+  typeSel.value = histView.typeKey;
+
+  const norm = new Map(list.map(e => [e.key, histNorm(e)]));
+  const fys = Array.from(new Set([...norm.values()].flat().map(r => r.fy))).sort().reverse();
+  if(!fys.includes(histView.fy)) histView.fy = fys[0] || '';
+  fySel.innerHTML = fys.map(f => `<option value="${f}">${f}</option>`).join('');
+  fySel.value = histView.fy;
+
+  const shown = histView.typeKey === '__ALL__' ? list : list.filter(e => e.key === histView.typeKey);
+  const inFy  = k => norm.get(k).filter(r => r.fy === histView.fy);
+
+  /* ── 상단 대시보드 : 지원금(JLRK→리테일러) 기준 ── */
+  const paid = list.filter(e => e.direction !== 'AR');
+  const allPaid = paid.flatMap(e => norm.get(e.key));
+  const qTot = {};  allPaid.forEach(r => qTot[r.qkey] = (qTot[r.qkey]||0) + r.amount);
+  const qKeys = Object.keys(qTot).sort();
+  const mTot = {};  allPaid.forEach(r => { if(r.month) mTot[r.month] = (mTot[r.month]||0) + r.amount; });
+  const mKeys = Object.keys(mTot).sort();
+
+  const lastQ = qKeys[qKeys.length-1], prevQ = qKeys[qKeys.length-2];
+  const lastM = mKeys[mKeys.length-1];
+  const diff  = (lastQ && prevQ) ? qTot[lastQ] - qTot[prevQ] : null;
+  const fyPaid = allPaid.filter(r => r.fy === histView.fy).reduce((a,b)=>a+b.amount,0);
+  const fyBill = list.filter(e => e.direction === 'AR').flatMap(e => norm.get(e.key))
+                     .filter(r => r.fy === histView.fy).reduce((a,b)=>a+b.amount,0);
+
+  const kpi = (label, value, sub, tone) => `
+    <div style="flex:1; min-width:170px; background:var(--surface); border:1px solid var(--surface3);
+                border-radius:8px; padding:14px 16px;">
+      <div style="font-size:11.5px; color:var(--muted,#7a8699); letter-spacing:.2px;">${label}</div>
+      <div style="font-size:21px; font-weight:700; margin-top:4px; ${tone||''}">${value}</div>
+      <div style="font-size:11.5px; color:var(--muted,#7a8699); margin-top:3px;">${sub||'&nbsp;'}</div>
+    </div>`;
+
+  const max = Math.max(1, ...qKeys.map(k => qTot[k]));
+  const bars = qKeys.map(k => {
+    const h = Math.max(2, Math.round(qTot[k] / max * 86));
+    const on = k === lastQ;
+    return `<div style="flex:1; min-width:46px; display:flex; flex-direction:column; justify-content:flex-end;
+                        align-items:center; gap:5px;">
+      <div style="font-size:10.5px; color:var(--muted,#7a8699); white-space:nowrap;">${Math.round(qTot[k]/1e6)}M</div>
+      <div title="${histWon(qTot[k])}" style="width:62%; height:${h}px; border-radius:3px 3px 0 0;
+           background:${on?'var(--accent)':'var(--surface3)'};"></div>
+      <div style="font-size:10.5px; color:${on?'var(--accent)':'var(--muted,#7a8699)'};
+                  font-weight:${on?700:400}; white-space:nowrap;">${k.replace(' ',' ')}</div>
+    </div>`; }).join('');
+
+  let html = `
+    <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px;">
+      ${kpi('최근 분기 지원금', lastQ ? histWon(qTot[lastQ]) : '—', lastQ || '', 'color:var(--accent);')}
+      ${kpi('최근 월 지원금', lastM ? histWon(mTot[lastM]) : '—', lastM ? lastM.replace('-','년 ')+'월' : '월 단위 정산 유형 기준')}
+      ${kpi('직전 분기 대비', diff===null ? '—' : (diff>=0?'▲ ':'▼ ') + histWon(Math.abs(diff)),
+            prevQ ? `${prevQ} → ${lastQ}` : '', diff===null?'':(diff>=0?'color:var(--accent);':'color:var(--accent-ar);'))}
+      ${kpi(`${histView.fy} 누적 지원금`, histWon(fyPaid), fyBill ? `JLRK 청구분 ${histWon(fyBill)} 별도` : '')}
+    </div>
+    <div class="info-card" style="margin-bottom:12px;">
+      <div class="section-label" style="margin-top:0;">분기별 지원금 추세
+        <span class="hint" style="margin-left:8px;">JLRK → 리테일러 지급 기준 · 전 유형 합계</span></div>
+      <div style="display:flex; align-items:flex-end; gap:8px; height:130px; padding:6px 2px 0;">${bars || ''}</div>
+    </div>`;
+
+  /* ── 유형별 매트릭스 : 가로 분기 × 세로 지점 ── */
+  shown.forEach(e => {
+    const rows = inFy(e.key);
+    if(rows.length === 0) return;
+    const qs  = Array.from(new Set(rows.map(r => r.qkey))).sort();
+    const whos = Array.from(new Set(rows.map(r => r.who))).sort();
+    const cell = {};
+    rows.forEach(r => { cell[r.who+'|'+r.qkey] = (cell[r.who+'|'+r.qkey]||0) + r.amount; });
+    const colTot = qs.map(q => whos.reduce((a,w) => a + (cell[w+'|'+q]||0), 0));
+    const grand  = colTot.reduce((a,b)=>a+b,0);
+    const isAR = e.direction === 'AR';
+
+    html += `
+      <div class="info-card" style="margin-bottom:12px;">
+        <div class="section-label" style="margin-top:0;">${e.name}
+          <span class="hint" style="margin-left:8px; color:${isAR?'var(--accent-ar)':'var(--accent)'};">
+            ${HIST_DIR_TEXT[e.direction] || ''}</span></div>
+        <div class="hint" style="margin-bottom:8px;">${histView.fy} · ${whos.length}개 지점 · 누적 ${histWon(grand)}</div>
+        <table>
+          <thead><tr>
+            <th style="text-align:left;">지점</th>
+            ${qs.map(q => `<th style="text-align:right;">${q}</th>`).join('')}
+            <th style="text-align:right;">합계</th>
+          </tr></thead>
+          <tbody>
+            ${whos.map(w => {
+              const t = qs.reduce((a,q)=>a+(cell[w+'|'+q]||0),0);
+              return `<tr><td style="text-align:left; white-space:nowrap;">${w}</td>
+                ${qs.map(q => `<td style="text-align:right;">${cell[w+'|'+q] ? histWon(cell[w+'|'+q]) : '—'}</td>`).join('')}
+                <td style="text-align:right; font-weight:600;">${histWon(t)}</td></tr>`;
+            }).join('')}
+            <tr style="border-top:2px solid var(--surface3);">
+              <td style="text-align:left; font-weight:700;">합계</td>
+              ${colTot.map(v => `<td style="text-align:right; font-weight:700;">${v ? histWon(v) : '—'}</td>`).join('')}
+              <td style="text-align:right; font-weight:700;">${histWon(grand)}</td></tr>
+          </tbody>
+        </table>
+      </div>`;
+  });
+
+  if(shown.every(e => inFy(e.key).length === 0))
+    html += '<div class="info-card"><div class="hint">선택한 회계연도에 내역이 없습니다.</div></div>';
+
+  host.innerHTML = html;
+  typeSel.onchange = () => { histView.typeKey = typeSel.value; renderHistory(); };
+  fySel.onchange   = () => { histView.fy = fySel.value; renderHistory(); };
+}
+
 function renderHistory(){
   const host = document.getElementById('historyHost');
   const list = histTypeList();
   const typeSel = document.getElementById('historyType');
   const fySel = document.getElementById('historyFy');
+
+  /* 리테일러는 개편된 대시보드로 (관리자는 기존 교차 매트릭스 유지) */
+  if(myProfile?.role !== 'ADMIN'){
+    const l = histTypeList();
+    if(l.length === 0){
+      typeSel.innerHTML = ''; fySel.innerHTML = '';
+      host.innerHTML = '<div class="info-card"><div class="hint">조회할 정산 내역이 없습니다.</div></div>';
+      return;
+    }
+    return renderHistoryRetailer(l);
+  }
 
   if(list.length === 0){
     typeSel.innerHTML = ''; fySel.innerHTML = '';
