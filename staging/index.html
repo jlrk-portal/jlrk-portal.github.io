@@ -3084,6 +3084,7 @@ function renderCampaign(months){
   const have = (months||[]).some(m => m.ym === need);
   const g = campKpi(S.ros);
   const dec = S.ros.filter(r => ['REJECT','REJECT_FINAL'].includes(r.decision));
+  const resub = S.ros.filter(r => r.resubmitted_at);
   const card = (k,label,color) => `
     <div style="flex:1; min-width:150px; background:var(--surface); border:1px solid var(--surface3);
          border-radius:8px; padding:13px 15px; cursor:pointer" data-cf="${k}">
@@ -3105,6 +3106,12 @@ function renderCampaign(months){
         <div style="font-size:11.5px; color:var(--muted,#7a8699);">반송 예정</div>
         <div style="font-size:20px; font-weight:700; margin-top:3px;">${dec.length}건</div>
         <div style="font-size:11.5px; color:var(--muted,#7a8699);">사유 입력 완료 · 미발송</div></div>
+      <div style="flex:1; min-width:150px; border-radius:8px; padding:13px 15px; cursor:pointer;
+           background:${resub.length?'#fff4e5':'var(--surface)'};
+           border:1px solid ${resub.length?'#f0c98a':'var(--surface3)'};" data-cf="RESUB">
+        <div style="font-size:11.5px; color:var(--muted,#7a8699);">리테일러 재제출</div>
+        <div style="font-size:20px; font-weight:700; margin-top:3px; ${resub.length?'color:var(--accent-ar);':''}">${resub.length}건</div>
+        <div style="font-size:11.5px; color:var(--muted,#7a8699);">${resub.length?'재검토 필요':'없음'}</div></div>
     </div>
     <div class="info-card" style="margin-bottom:10px;">
       <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">
@@ -3115,7 +3122,8 @@ function renderCampaign(months){
             <option value="PASS" ${S.filter==='PASS'?'selected':''}>검증 통과</option>
             <option value="DEC">반송 예정</option>
             <option value="PERIOD">기간 외만 걸린 건</option>
-            <option value="BACK">백오더 선청구</option></select></div>
+            <option value="BACK">백오더 선청구</option>
+            <option value="RESUB">리테일러 재제출</option></select></div>
         <div class="field" style="min-width:150px; margin:0;"><label>리테일러</label>
           <select id="campR"><option value="">전체</option>
             ${[...new Set(S.ros.map(r=>r.retailer_id))].map(id=>{
@@ -3147,6 +3155,7 @@ function campList(){
   if(S.filter === 'DEC') rows = rows.filter(r => ['REJECT','REJECT_FINAL'].includes(r.decision));
   else if(S.filter === 'PERIOD') rows = rows.filter(r => r.only_period);
   else if(S.filter === 'BACK') rows = rows.filter(r => (r.orders||[]).length);
+  else if(S.filter === 'RESUB') rows = rows.filter(r => r.resubmitted_at);
   else if(S.filter) rows = rows.filter(r => r.verdict === S.filter);
   if(S.retailer) rows = rows.filter(r => r.retailer_id === S.retailer);
   rows = rows.slice(0, 200);
@@ -3161,7 +3170,8 @@ function campList(){
         <div style="flex:1; min-width:0;"><b>${r.ro_no}</b>
           <span class="hint" style="margin-left:6px;">${rt?.code||''} ${r.workshop||''} · ${r.model||''}</span>${d}
           ${(r.orders||[]).length?'<span class="badge badge-warn" style="margin-left:6px;">백오더</span>':''}
-          ${r.only_period?'<span class="badge badge-off" style="margin-left:6px;">기간만</span>':''}</div>
+          ${r.only_period?'<span class="badge badge-off" style="margin-left:6px;">기간만</span>':''}
+          ${r.resubmitted_at?'<span class="badge badge-ar" style="margin-left:6px;">재제출</span>':''}</div>
         <span class="hint">부품 ${r.parts}건</span>
         <span class="hint">입고 ${r.in_date||'—'}</span>
         <b style="min-width:110px; text-align:right;">${fmtWon(r.claim_jlrk)}</b>
@@ -7980,8 +7990,11 @@ async function attachRetailerTypes(claims){
 /* ── 리테일러 화면 : 캠페인 반송 건 (금액 수정 재청구 · 증빙 첨부) ───────── */
 async function renderCampaignRetailerCards(listEl){
   const { data: ros } = await sb.from('campaign_ro')
-    .select('*, rounds(id, period_label, settlement_types(name))')
+    .select('*, rounds(id, period_label, type_id, settlement_types(name))')
     .in('decision', ['REJECT','REJECT_FINAL']).order('decided_at', { ascending:false });
+  // settlement_types 는 리테일러 RLS 로 막혀 있어 공개 뷰에서 이름을 보충한다
+  const { data: tpub } = await sb.from('settlement_types_public').select('id, name');
+  const tname = new Map((tpub||[]).map(t => [t.id, t.name]));
   if(!ros || !ros.length) return 0;
 
   const byRound = new Map();
@@ -7999,7 +8012,7 @@ async function renderCampaignRetailerCards(listEl){
     card.className = 'claim-card';
     card.innerHTML = `
       <div class="claim-head">
-        <div><div class="claim-name">${rd?.settlement_types?.name||'캠페인'} · ${rd?.period_label||''} — 청구 반송</div>
+        <div><div class="claim-name">${rd?.settlement_types?.name || tname.get(rd?.type_id) || '캠페인 부품할인'} · ${rd?.period_label||''} — 청구 반송</div>
           <div class="claim-sub">수정 후 재청구 ${rev.length}건 · 지원 불가 ${fin.length}건
             ${due?` · <b style="color:${left<=0?'var(--danger,#c0392b)':'var(--accent-ar)'};">재청구 기한 ${due}${left!=null?` (${left<=0?'기한 경과':`D-${left}`})`:''}</b>`:''}</div></div>
         <span class="badge ${open?'badge-ar':'badge-ap'}">${open?`수정 대기 ${open}건`:'재제출 완료'}</span>
