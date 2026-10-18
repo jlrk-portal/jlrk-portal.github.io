@@ -3026,6 +3026,23 @@ function oneDmsPreviewHtml(p){
    RO 단위(campaign_ro)로 보여주고, 매니저가 건별로 판정한 뒤
    리테일러당 1통으로 묶어 반송한다.
    ================================================================ */
+const CAMP_AUTO = {
+  '캠페인 기간 외 입고':
+    '캠페인 기간 이전 입고 건으로 캠페인 대상 차량이 아닙니다. '
+  + 'JLRK 사전 승인을 받은 경우 이메일 승인본을 첨부해 주세요.',
+  '캠페인DC 미마감':
+    '코리아청구(캠페인DC) 계정으로 마감되지 않았습니다. 마감 처리 후 재청구해 주세요.',
+  '할인율 불일치':
+    '차량등록일 기준 할인율과 다릅니다. 2021-01-01 이전 30% / 이후 20% 기준으로 수정해 주세요.',
+  '소비자가 마스터 불일치':
+    '청구하신 소비자가가 해당 월 부품가격과 다릅니다. 확인 후 수정해 주세요.',
+  '부품 마스터에 없는 품번':
+    'JLR 순정부품 여부를 확인할 수 없는 품번입니다. 순정부품만 캠페인 대상입니다.',
+  'RO 부품 소비자가':
+    '할인 대상 부품 정가 합계가 100만원 미만이라 캠페인 대상이 아닙니다.',
+};
+const CAMP_REJECT_DAYS = 2;   // 반송 후 재청구 기한
+
 const CAMP_DEC = { NONE:'미처리', APPROVED:'승인', EXCEPTION:'예외승인', REJECT:'일반반송', REJECT_FINAL:'완전반송' };
 let campState = null;
 
@@ -3096,7 +3113,9 @@ function renderCampaign(months){
             <option value="FAIL" ${S.filter==='FAIL'?'selected':''}>확인 필요</option>
             <option value="WARN" ${S.filter==='WARN'?'selected':''}>확인 권고</option>
             <option value="PASS" ${S.filter==='PASS'?'selected':''}>검증 통과</option>
-            <option value="DEC">반송 예정</option></select></div>
+            <option value="DEC">반송 예정</option>
+            <option value="PERIOD">기간 외만 걸린 건</option>
+            <option value="BACK">백오더 선청구</option></select></div>
         <div class="field" style="min-width:150px; margin:0;"><label>리테일러</label>
           <select id="campR"><option value="">전체</option>
             ${[...new Set(S.ros.map(r=>r.retailer_id))].map(id=>{
@@ -3126,6 +3145,8 @@ function campList(){
   const S = campState;
   let rows = S.ros;
   if(S.filter === 'DEC') rows = rows.filter(r => ['REJECT','REJECT_FINAL'].includes(r.decision));
+  else if(S.filter === 'PERIOD') rows = rows.filter(r => r.only_period);
+  else if(S.filter === 'BACK') rows = rows.filter(r => (r.orders||[]).length);
   else if(S.filter) rows = rows.filter(r => r.verdict === S.filter);
   if(S.retailer) rows = rows.filter(r => r.retailer_id === S.retailer);
   rows = rows.slice(0, 200);
@@ -3138,7 +3159,9 @@ function campList(){
       <div style="display:flex; align-items:center; gap:12px; padding:11px 14px; cursor:pointer;" data-ro="${r.id}">
         <span style="width:14px; color:var(--muted,#7a8699);" id="cv-${r.id}">＋</span>
         <div style="flex:1; min-width:0;"><b>${r.ro_no}</b>
-          <span class="hint" style="margin-left:6px;">${rt?.code||''} ${r.workshop||''} · ${r.model||''}</span>${d}</div>
+          <span class="hint" style="margin-left:6px;">${rt?.code||''} ${r.workshop||''} · ${r.model||''}</span>${d}
+          ${(r.orders||[]).length?'<span class="badge badge-warn" style="margin-left:6px;">백오더</span>':''}
+          ${r.only_period?'<span class="badge badge-off" style="margin-left:6px;">기간만</span>':''}</div>
         <span class="hint">부품 ${r.parts}건</span>
         <span class="hint">입고 ${r.in_date||'—'}</span>
         <b style="min-width:110px; text-align:right;">${fmtWon(r.claim_jlrk)}</b>
@@ -3184,8 +3207,18 @@ function campDetail(r){
         <th>청구계정</th><th style="text-align:center;">유형</th><th>품목코드</th><th>품목명</th>
         <th style="text-align:right;">소매가합</th><th style="text-align:center;">분할율</th>
         <th style="text-align:right;">금액</th></tr></thead><tbody>${cl}</tbody></table></div></details>
+    ${((r.orders||[]).length || (r.memos||[]).length) ? `
+    <div style="margin-top:8px; padding:10px 12px; background:#fff8e1; border:1px solid #f0e0b0; border-radius:6px;">
+      <div style="font-weight:600; font-size:12.5px;">리테일러가 적어 보낸 내용</div>
+      ${(r.orders||[]).length?`<div class="hint" style="margin-top:4px;">· <b>부품 오더(백오더 선청구)</b> : ${(r.orders||[]).join(' / ')}
+         <br>&nbsp;&nbsp;캠페인·Grace 기간 내 수리를 못 마쳐 선청구한 건입니다. 마감 자료에 없을 수 있어 <b>예외승인 대상</b>입니다.</div>`:''}
+      ${(r.memos||[]).length?`<div class="hint" style="margin-top:4px;">· <b>정산제외 메모</b> : ${(r.memos||[]).join(' / ')}</div>`:''}
+    </div>` : ''}
+    ${r.evidence_path?`<div class="hint" style="margin-top:8px;">첨부된 증빙 :
+      <a class="file-link" onclick="campEvidence('${r.evidence_path}')">이메일 승인본 내려받기</a></div>`:''}
     <div style="margin-top:10px; padding:11px 12px; background:var(--surface2); border-radius:6px;">
-      <div class="field" style="margin:0 0 8px;"><label>코멘트 (리테일러에게 그대로 보입니다)</label>
+      <div class="field" style="margin:0 0 8px;"><label>코멘트 (리테일러에게 그대로 보입니다)
+        <a class="file-link camp-auto" style="margin-left:8px;">사유 자동 입력</a></label>
         <input class="camp-note" value="${(r.note||'').replace(/"/g,'&quot;')}" placeholder="예) 캠페인 이전 입고건이나 엔진 교환 재입고로 예외 승인"></div>
       <div style="display:flex; gap:8px; flex-wrap:wrap;">
         <button class="btn btn-sm btn-ghost camp-act" data-d="EXCEPTION">예외 승인</button>
@@ -3197,14 +3230,38 @@ function campDetail(r){
     </div>`;
 }
 
+async function campEvidence(path){
+  const { data, error } = await sb.storage.from('claims').createSignedUrl(path, 120);
+  if(error){ alert('내려받기 실패: ' + error.message); return; }
+  window.open(data.signedUrl, '_blank');
+}
+
+function campAutoNote(r){
+  const fl = (r.checks||[]).filter(c => (c.lvl||'ok') === 'ng').map(c => c.name);
+  const out = [];
+  for(const [k, v] of Object.entries(CAMP_AUTO))
+    if(fl.some(f => f.includes(k.replace('RO 부품 소비자가','할인 대상 부품 정가'))) ||
+       (k === '캠페인 기간 외 입고' && fl.some(f => f.includes('캠페인 기간'))))
+      out.push(v);
+  return out.join('\n');
+}
+
 function campBind(bd, id){
+  const r = campState.ros.find(x => x.id === id);
+  const auto = bd.querySelector('.camp-auto');
+  if(auto) auto.addEventListener('click', () => {
+    const t = campAutoNote(r) || '마감 자료와 차이가 있어 확인이 필요합니다.';
+    bd.querySelector('.camp-note').value = t;
+  });
   bd.querySelectorAll('.camp-act').forEach(b => b.addEventListener('click', async () => {
     const note = bd.querySelector('.camp-note').value.trim();
     const d = b.dataset.d;
     if(d.startsWith('REJECT') && !note){ alert('반송은 사유(코멘트)를 입력해야 합니다.'); return; }
     const { data: { user } } = await sb.auth.getUser();
+    const due = d === 'REJECT'
+      ? new Date(Date.now() + CAMP_REJECT_DAYS*864e5).toISOString().slice(0,10) : null;
     const { error } = await sb.from('campaign_ro')
-      .update({ decision:d, note:note||null, decided_by:user?.id||null,
+      .update({ decision:d, note:note||null, decided_by:user?.id||null, reject_due:due,
                 decided_at: d==='NONE'? null : new Date().toISOString() }).eq('id', id);
     if(error){ alert('저장 실패: '+error.message); return; }
     // 해당 RO 의 라인에도 반영
@@ -3259,7 +3316,10 @@ async function campSendRejections(){
       ${tbl(rev, '① 수정 후 재청구 — 포털에서 금액을 고쳐 다시 제출해주세요')}
       ${tbl(fin, '② 지원 대상 아님 — 수정 불가')}
       <p style="margin-top:16px;">포털 <b>내 청구</b> 화면에서 사유를 확인하실 수 있습니다.
-      ①번 건은 <b>엑셀 재업로드 없이</b> 화면에서 금액만 수정해 재제출하시면 됩니다.</p>`);
+      ①번 건은 <b>엑셀 재업로드 없이</b> 화면에서 금액만 수정해 재제출하시면 됩니다.
+      JLRK 사전 승인을 받으신 건은 <b>이메일 승인본(PDF)</b> 을 같은 화면에서 첨부해 주세요.</p>
+      <p style="color:#c0392b;"><b>재청구 기한 : 반송일로부터 ${CAMP_REJECT_DAYS}일 이내</b>
+      (${new Date(Date.now()+CAMP_REJECT_DAYS*864e5).toISOString().slice(0,10)} 까지)</p>`);
     await sendEmail(splitEmails(rt?.email || ''), `[JLRK 정산] ${S.round.period_label} 청구 반송 안내 (${rs.length}건)`, html,
                     { kind:'CAMPAIGN_REJECT', round_id:S.round.id, retailer:rt?.code });
   }
