@@ -91,3 +91,9 @@ create policy campaign_rej_admin on campaign_rejections
 drop policy if exists campaign_rej_read on campaign_rejections;
 create policy campaign_rej_read on campaign_rejections
   for select to authenticated using (is_admin() or retailer_id = my_retailer());
+
+-- (2026-10-18 추가) 리테일러 재청구 — 반송(REVISE) 건의 재제출 표시·증빙 업데이트 허용
+drop policy if exists campaign_ro_resubmit on campaign_ro;
+create policy campaign_ro_resubmit on campaign_ro for update to authenticated
+  using (retailer_id = my_retailer() and decision = 'REJECT')
+  with check (retailer_id = my_retailer() and decision = 'REJECT');
