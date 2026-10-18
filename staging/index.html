@@ -3068,7 +3068,8 @@ async function renderCampaignRoundDetail(round, type){
     sb.from('part_price_months').select('*')
   ]);
   const retById = new Map((rets||[]).map(r => [r.id, r]));
-  campState = { round, type, cfg, ros: ros||[], retById, sel:new Set(), filter:'FAIL', retailer:'' };
+  campState = { round, type, cfg, ros: ros||[], retById, sel:new Set(), filter:'FAIL',
+                retailer:'', reason:'', months: months||[] };
   renderCampaign(months||[]);
 }
 
@@ -3137,16 +3138,65 @@ function renderCampaign(months){
       <div class="hint" style="margin-top:6px;">건별로 사유를 입력해 쌓아두고, 마지막에 <b>[반송 발송]</b> 을 누르면
         리테일러당 <b>메일 1통</b>으로 묶여 발송 대기함에 올라갑니다. 그 전에는 아무 알림도 나가지 않습니다.</div>
     </div>
+    <div id="campReason"></div>
     <div id="campList"></div>`;
 
   host.querySelectorAll('[data-cf]').forEach(el => el.addEventListener('click', () => {
     S.filter = el.dataset.cf; renderCampaign(months);
   }));
-  document.getElementById('campF').onchange = e => { S.filter = e.target.value; renderCampaign(months); };
+  document.getElementById('campF').onchange = e => { S.filter = e.target.value; S.reason=''; renderCampaign(months); };
   document.getElementById('campR').onchange = e => { S.retailer = e.target.value; renderCampaign(months); };
   document.getElementById('campSend').onclick = () => campSendRejections();
   document.getElementById('campXlsx').onclick = () => campExport();
+  campReasons();
   campList();
+}
+
+// 사유별 요약 — 416건을 하나씩 보는 게 아니라 같은 성격끼리 묶어 처리한다.
+// 「캠페인 기간 외 입고」 처럼 조치가 똑같은 묶음은 한 번에 코멘트를 넣고 반송할 수 있다.
+function campReasons(){
+  const S = campState, box = document.getElementById('campReason');
+  if(!box) return;
+  let pool = S.ros.filter(r => r.verdict === 'FAIL');
+  if(S.retailer) pool = pool.filter(r => r.retailer_id === S.retailer);
+  if(!pool.length){ box.innerHTML = ''; return; }
+  const g = new Map();
+  pool.forEach(r => {
+    const k = r.reason || '기타';
+    const v = g.get(k) || [0,0,0];
+    v[0]++; v[1] += Number(r.claim_jlrk||0);
+    if(r.decision !== 'NONE') v[2]++;
+    g.set(k, v);
+  });
+  const list = [...g.entries()].sort((a,b) => b[1][0]-a[1][0]);
+  const max = list[0][1][0];
+  box.innerHTML = `<div class="info-card" style="margin-bottom:10px; padding:12px 14px;">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+      <b style="font-size:13px;">확인 필요 ${pool.length}건 — 사유별</b>
+      <span class="hint">같은 사유는 조치가 같습니다. 묶어서 보고 한 번에 처리하세요.</span></div>
+    <div style="display:grid; grid-template-columns:1fr; gap:4px;">
+      ${list.map(([k,v]) => `
+        <div style="display:flex; align-items:center; gap:10px; cursor:pointer; padding:4px 6px; border-radius:4px;
+             background:${S.reason===k?'var(--surface2)':'transparent'};" data-rs="${k.replace(/"/g,'&quot;')}">
+          <span style="width:220px; flex:none; font-size:12.5px;">${k}</span>
+          <span style="flex:1; height:8px; background:var(--surface3); border-radius:4px; overflow:hidden;">
+            <span style="display:block; height:100%; width:${Math.round(v[0]/max*100)}%;
+                  background:${S.reason===k?'var(--accent-ar)':'#c0392b'}; opacity:.75;"></span></span>
+          <span style="width:52px; text-align:right; font-weight:600; font-size:12.5px;">${v[0]}건</span>
+          <span style="width:110px; text-align:right; font-size:12.5px; color:var(--muted,#7a8699);">${fmtWon(v[1])}</span>
+          <span style="width:64px; text-align:right; font-size:11.5px; color:${v[2]?'var(--accent)':'var(--muted,#7a8699)'};">
+            ${v[2]?`처리 ${v[2]}`:'미처리'}</span>
+        </div>`).join('')}
+    </div>
+    ${S.reason?`<div style="margin-top:8px;"><a class="file-link" id="campRsClear">사유 필터 해제 (${S.reason})</a></div>`:''}
+  </div>`;
+  box.querySelectorAll('[data-rs]').forEach(el => el.addEventListener('click', () => {
+    S.reason = (S.reason === el.dataset.rs) ? '' : el.dataset.rs;
+    S.filter = 'FAIL';
+    renderCampaign(S.months||[]);
+  }));
+  const cl = document.getElementById('campRsClear');
+  if(cl) cl.onclick = () => { S.reason=''; renderCampaign(S.months||[]); };
 }
 
 function campList(){
@@ -3158,6 +3208,8 @@ function campList(){
   else if(S.filter === 'RESUB') rows = rows.filter(r => r.resubmitted_at);
   else if(S.filter) rows = rows.filter(r => r.verdict === S.filter);
   if(S.retailer) rows = rows.filter(r => r.retailer_id === S.retailer);
+  if(S.reason)   rows = rows.filter(r => (r.reason||'기타') === S.reason);
+  const total = rows.length;
   rows = rows.slice(0, 200);
   const V = { FAIL:['확인 필요','badge-ar'], WARN:['확인 권고','badge-warn'], PASS:['검증 통과','badge-ap'] };
   document.getElementById('campList').innerHTML = rows.map(r => {
@@ -3178,7 +3230,8 @@ function campList(){
         <span class="badge ${V[r.verdict][1]}">${V[r.verdict][0]}</span>
       </div>
       <div id="bd-${r.id}" style="display:none; padding:0 14px 14px;"></div>
-    </div>`; }).join('') || '<div class="info-card"><div class="hint">해당 조건의 건이 없습니다.</div></div>';
+    </div>`; }).join('') + (total > 200 ? `<div class="info-card"><div class="hint">상위 200건만 표시했습니다 (조건에 맞는 건 ${total}건). 사유·리테일러로 좁혀 보세요.</div></div>` : '')
+    || '<div class="info-card"><div class="hint">해당 조건의 건이 없습니다.</div></div>';
 
   document.querySelectorAll('[data-ro]').forEach(el => el.addEventListener('click', async () => {
     const id = el.dataset.ro, bd = document.getElementById('bd-'+id), cv = document.getElementById('cv-'+id);

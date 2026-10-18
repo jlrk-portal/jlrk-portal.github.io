@@ -4,3 +4,6 @@
 --   청구↔마감 차이를 한 줄에서 봐야 한다. part_rows 가 그 표다.
 alter table campaign_ro add column if not exists part_rows jsonb;
 alter table campaign_ro add column if not exists labour_lines int not null default 0;
+-- 대표 사유 — 수백 건을 같은 성격끼리 묶어 일괄 처리하기 위한 분류
+alter table campaign_ro add column if not exists reason text;
+create index if not exists campaign_ro_reason_idx on campaign_ro (round_id, reason);
