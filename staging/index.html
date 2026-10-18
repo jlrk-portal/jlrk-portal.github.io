@@ -3047,7 +3047,7 @@ async function renderCampaignRoundDetail(round, type){
 
   const [{ data: ros }, { data: rets }, { data: months }] = await Promise.all([
     sb.from('campaign_ro').select('*').eq('round_id', round.id).order('verdict').order('claim_jlrk', { ascending:false }),
-    sb.from('retailers').select('id, code, name'),
+    sb.from('retailers').select('id, code, name, email'),
     sb.from('part_price_months').select('*')
   ]);
   const retById = new Map((rets||[]).map(r => [r.id, r]));
