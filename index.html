@@ -6698,6 +6698,150 @@ async function pndUpload(round, file, hintEl){
   return { n: rows.length, claimed: tot, approved: ok, workshops: agg.size };
 }
 
+/* ── 확정 현황 · 기한 · 일괄 확정 · 세금계산서 ──────────────────────
+   흐름 :  공지(PUBLISHED) → 리테일러 확정 → [확정 마감] → CONFIRMED
+           → 리테일러가 세금계산서 업로드 → 관리자에게 알림
+   기한이 지나도 서버가 저절로 닫지는 않는다(스케줄러 없음). 기한 뒤에는
+   리테일러 쪽이 잠기고, 관리자가 [일괄 확정] 한 번으로 닫는다. */
+function pndConfirmPanel(round, claims, rets){
+  const byRt = new Map();
+  claims.forEach(c => {
+    if(!byRt.has(c.retailer_id)) byRt.set(c.retailer_id, { n:0, ok:0, amt:0, at:null });
+    const g = byRt.get(c.retailer_id);
+    g.n++; g.amt += Number(c.approved_amount || 0);
+    if(c.confirmed_at){ g.ok++; if(!g.at || c.confirmed_at < g.at) g.at = c.confirmed_at; }
+  });
+  const rows = [...byRt.entries()].map(([id, g]) => ({
+    id, name: (rets.get(id)?.code || '') + ' ' + (rets.get(id)?.name || ''), ...g,
+    done: g.n > 0 && g.ok === g.n,
+  })).sort((a,b) => a.name.localeCompare(b.name));
+  const done = rows.filter(r => r.done).length;
+  const due = round.confirm_due_at ? new Date(round.confirm_due_at) : null;
+  const over = due && due < new Date();
+  const dueStr = due ? due.toLocaleString('ko-KR') : '미설정';
+  const published = ['PUBLISHED','CONFIRMED','INVOICED'].includes(round.status);
+
+  return `<div style="border:1px solid var(--surface3); border-radius:6px; overflow:hidden; margin-bottom:12px;">
+    <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+         padding:9px 12px; background:var(--surface2); border-bottom:1px solid var(--surface3);">
+      <span style="font-weight:600;">리테일러 확정 현황
+        <span class="${done === rows.length ? '' : 'hint'}" style="margin-left:6px;">${done} / ${rows.length}개사</span></span>
+      <span class="hint" style="margin-left:auto;">확정 기한 <b>${dueStr}</b>
+        ${over ? '<span class="badge badge-ar" style="margin-left:6px;">기한 경과</span>' : ''}</span>
+    </div>
+    <div style="overflow-x:auto;"><table style="min-width:620px;"><thead><tr>
+      <th>리테일러</th><th style="text-align:center;">지점</th>
+      <th style="text-align:right;">정산 금액</th><th style="text-align:center;">확정</th><th>확정 일시</th>
+    </tr></thead><tbody>
+      ${rows.map(r => `<tr>
+        <td>${r.name}</td>
+        <td style="text-align:center;">${r.ok}/${r.n}</td>
+        <td style="text-align:right;">${fmtWon(r.amt)}</td>
+        <td style="text-align:center;">${r.done
+          ? '<span class="badge badge-ap">확정</span>'
+          : '<span class="badge badge-warn">대기</span>'}</td>
+        <td class="muted">${r.at ? new Date(r.at).toLocaleString('ko-KR') : '—'}</td></tr>`).join('')}
+    </tbody></table></div>
+    ${published ? `<div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; padding:10px 12px;
+         border-top:1px solid var(--surface3);">
+      <div class="field" style="margin:0;"><label style="font-size:11px;">정산 확정 기한</label>
+        <input type="datetime-local" id="pndDue" value="${round.confirm_due_at
+          ? new Date(new Date(round.confirm_due_at).getTime() - new Date().getTimezoneOffset()*60000)
+              .toISOString().slice(0,16) : ''}"></div>
+      <button class="btn btn-sm btn-ghost" id="pndDueSave">기한 저장·안내</button>
+      <button class="btn btn-sm btn-ghost" id="pndForce" ${done === rows.length ? 'disabled' : ''}>미확정 일괄 확정</button>
+      ${round.status === 'PUBLISHED'
+        ? '<button class="btn btn-sm" id="pndClose" style="margin-left:auto;">확정 마감 · 세금계산서 요청</button>'
+        : '<span class="badge badge-ap" style="margin-left:auto;">세금계산서 요청됨</span>'}
+    </div>` : ''}
+  </div>`;
+}
+
+function pndBindConfirm(round, type, claims, rets, host){
+  const save = document.getElementById('pndDueSave');
+  if(save) save.onclick = async () => {
+    const v = document.getElementById('pndDue').value;
+    if(!v){ alert('기한을 선택해주세요.'); return; }
+    const iso = new Date(v).toISOString();
+    const { error } = await sb.from('rounds').update({ confirm_due_at: iso }).eq('id', round.id);
+    if(error){ alert('저장 실패: ' + error.message); return; }
+    if(confirm('기한을 저장했습니다. 리테일러에게 안내 메일을 발송 대기함에 넣을까요?')){
+      const ids = [...new Set(claims.map(c => c.retailer_id))];
+      const { data: rr } = await sb.from('retailers').select('id, code, name, email').in('id', ids);
+      for(const rt of (rr||[])){
+        const to = splitEmails(rt.email).filter(e => !/placeholder@example\.com/i.test(e));
+        if(!to.length) continue;
+        await sendEmail(to, `[JLRK 정산] ${type.name} · ${round.period_label} 정산 확정 기한 안내`,
+          emailShell('정산 확정 기한 안내', `
+            <p>${rt.name} 담당자님,</p>
+            <p>${type.name} (${round.period_label}) 검토 결과에 대한 <b>정산 확정 기한</b>을 안내드립니다.</p>
+            <table style="${EMAIL_STYLE}border-collapse:collapse;">
+              <tr><td style="padding:4px 12px 4px 0;color:#666;">확정 기한</td>
+                  <td><b style="color:#c0392b;">${new Date(iso).toLocaleString('ko-KR')}</b></td></tr>
+            </table>
+            <p style="margin-top:16px;">기한까지 포털에서 [정산 확정] 을 눌러주십시오.
+              <b>기한이 지나면 확정하신 것으로 보고 자동으로 마감됩니다.</b></p>
+            <p>이견이 있으시면 기한 전에 [이의 제출] 로 알려주시기 바랍니다.</p>`),
+          { kind:'PND_DUE', retailer: rt.code, period: round.period_label });
+      }
+      alert('안내 메일을 발송 대기함에 넣었습니다. 메일 발송 대기함에서 보내주세요.');
+    }
+    await renderRoundDetail();
+  };
+
+  const force = document.getElementById('pndForce');
+  if(force) force.onclick = async () => {
+    const pending = claims.filter(c => !c.confirmed_at);
+    if(!pending.length) return;
+    if(!confirm(`아직 확정하지 않은 ${pending.length}건을 일괄 확정 처리할까요?\n\n`
+              + '기한 내 회신이 없는 경우 확정으로 간주하는 처리입니다. 되돌릴 수 없습니다.')) return;
+    force.disabled = true; force.textContent = '처리 중...';
+    const { error } = await sb.from('claims')
+      .update({ confirmed_at: new Date().toISOString() }).in('id', pending.map(c => c.id));
+    if(error){ alert('처리 실패: ' + error.message); force.disabled = false; return; }
+    await logAudit('PND_FORCE_CONFIRM','ROUND',round.id,
+      { label:`${round.period_label} · 일괄확정 ${pending.length}건` });
+    await renderRoundDetail();
+  };
+
+  const close = document.getElementById('pndClose');
+  if(close) close.onclick = async () => {
+    const left = claims.filter(c => !c.confirmed_at).length;
+    const issue = prompt('세금계산서 발행일을 입력해주세요 (YYYY-MM-DD).\n'
+      + '리테일러는 이 날짜로 계산서를 발행합니다.', new Date().toISOString().slice(0,10));
+    if(!issue || !/^\d{4}-\d{2}-\d{2}$/.test(issue)){ if(issue !== null) alert('날짜 형식이 올바르지 않습니다.'); return; }
+    if(!confirm(`확정을 마감하고 세금계산서 제출을 요청할까요?${left ? `\n\n미확정 ${left}건은 확정 처리됩니다.` : ''}`)) return;
+    close.disabled = true; close.textContent = '처리 중...';
+    try{
+      if(left){
+        const { error } = await sb.from('claims').update({ confirmed_at: new Date().toISOString() })
+          .in('id', claims.filter(c => !c.confirmed_at).map(c => c.id));
+        if(error) throw error;
+      }
+      // 계산서 업로드는 '전 지점 승인' 을 전제로 열린다
+      const { error: aErr } = await sb.from('claims')
+        .update({ status:'APPROVED', reviewed_at: new Date().toISOString() })
+        .in('id', claims.map(c => c.id));
+      if(aErr) throw aErr;
+      const { error: rErr } = await sb.from('rounds')
+        .update({ status:'CONFIRMED', invoice_issue_date: issue }).eq('id', round.id);
+      if(rErr) throw rErr;
+      // notifyRoundConfirmed 는 {retailer_id, supply_amount} 묶음을 받는다
+      const sums = new Map();
+      claims.forEach(c => sums.set(c.retailer_id,
+        (sums.get(c.retailer_id) || 0) + Number(c.approved_amount || 0)));
+      await notifyRoundConfirmed({ ...round, invoice_issue_date: issue }, type,
+        [...sums.entries()].map(([retailer_id, supply_amount]) => ({ retailer_id, supply_amount })));
+      await logAudit('PND_CLOSE','ROUND',round.id,
+        { label:`${round.period_label} · 확정마감, 계산서 요청`, forced: left });
+      await renderRoundDetail();
+    }catch(e){
+      alert('처리 실패: ' + (e.message || e));
+      close.disabled = false; close.textContent = '확정 마감 · 세금계산서 요청';
+    }
+  };
+}
+
 async function renderPndRoundDetail(round, type){
   document.getElementById('claimsTable').style.display = 'none';
   document.getElementById('rd_title').textContent = `${type.name} · ${round.period_label}`;
@@ -6708,10 +6852,13 @@ async function renderPndRoundDetail(round, type){
   const host = document.getElementById('reviewSection');
   host.innerHTML = '<div class="info-card"><div class="hint">검토 결과를 불러오는 중...</div></div>';
 
-  const [lines, { data: wss }] = await Promise.all([
+  const [lines, { data: wss }, { data: pclaims }, { data: prets }] = await Promise.all([
     pndLoad(round.id, null),
-    sb.from('workshops').select('id, code, name, retailers(code, name)')
+    sb.from('workshops').select('id, code, name, retailers(code, name)'),
+    sb.from('claims').select('id, retailer_id, approved_amount, confirmed_at, status').eq('round_id', round.id),
+    sb.from('retailers').select('id, code, name')
   ]);
+  const retMap = new Map((prets||[]).map(r => [r.id, r]));
   const upBox = (label) => `
     <div class="info-card" style="margin-bottom:12px;">
       <div class="field" style="margin:0; max-width:620px;">
@@ -6739,6 +6886,7 @@ async function renderPndRoundDetail(round, type){
   const s = pndSum(lines);
 
   host.innerHTML = pndCards(s)
+    + ((pclaims||[]).length ? pndConfirmPanel(round, pclaims, retMap) : '')
     + pndByWorkshop(lines, wsName)
     + pndFieldTable(lines)
     + pndNgTable(lines, wsName)
@@ -6753,6 +6901,7 @@ async function renderPndRoundDetail(round, type){
              메일은 발송 대기함에 쌓이고, 발송 버튼을 눌러야 나갑니다.</span>
          </div></div>`;
 
+  pndBindConfirm(round, type, pclaims||[], retMap, host);
   document.getElementById('pndXlsx').onclick = () => pndExport(lines, wsName, round);
   const rl = document.getElementById('pndReload');
   if(rl) rl.onclick = () => {
@@ -6915,6 +7064,55 @@ function pndExport(lines, wsName, round, who){
   });
 }
 
+/* 확정 마감(CONFIRMED) 이후 세금계산서 제출 — invoices 테이블·관리자 알림은 기존 흐름 그대로 */
+async function pndInvoiceBlock(host, round, supplyAmount){
+  if(!host) return;
+  if(!['CONFIRMED','INVOICED'].includes(round.status)) return;
+  const { data: inv } = await sb.from('invoices').select('*')
+    .eq('round_id', round.id).eq('retailer_id', myRetailer?.id).maybeSingle();
+  const editable = !inv && round.status === 'CONFIRMED'
+    && (!round.invoice_due_at || new Date(round.invoice_due_at) > new Date());
+  const vat = Math.round(Number(supplyAmount || 0) * 0.1);
+  host.innerHTML = `
+    <div style="border:1px solid var(--surface3); border-radius:6px; overflow:hidden; margin-top:12px;">
+      <div style="padding:9px 12px; background:var(--surface2); border-bottom:1px solid var(--surface3); font-weight:600;">
+        세금계산서 제출
+        ${inv ? '<span class="badge badge-ap" style="margin-left:6px;">제출완료</span>'
+              : '<span class="badge badge-warn" style="margin-left:6px;">미제출</span>'}</div>
+      <div style="padding:11px 12px;">
+        ${round.invoice_issue_date ? `<div class="hint" style="color:var(--accent-ar); margin-bottom:8px;">
+           발행일자는 반드시 <b>${round.invoice_issue_date}</b> 로 지정해 주십시오.</div>` : ''}
+        ${editable ? `
+          <table><thead><tr><th>공급가액</th><th>부가세</th><th>계산서 파일 (PDF·이미지)</th><th></th></tr></thead>
+          <tbody><tr>
+            <td>${fmtWon(supplyAmount)}</td>
+            <td><input type="text" inputmode="numeric" class="row-amt-input inv-vat-input"
+                 style="width:110px;" value="${vat.toLocaleString('ko-KR')}"></td>
+            <td><input type="file" class="inv-file-input" accept=".pdf,.jpg,.jpeg,.png"></td>
+            <td><button class="btn btn-sm inv-submit-btn">제출</button></td>
+          </tr></tbody></table>`
+        : `<table><thead><tr><th>공급가액</th><th>부가세</th><th>합계</th><th>파일</th><th>제출일시</th></tr></thead>
+           <tbody><tr>
+             <td>${fmtWon(inv ? inv.supply_amount : supplyAmount)}</td>
+             <td>${inv && inv.vat != null ? fmtWon(inv.vat) : '—'}</td>
+             <td><b>${inv && inv.total_amount != null ? fmtWon(inv.total_amount) : '—'}</b></td>
+             <td>${inv && inv.file_path ? `<span class="file-link" data-path="${inv.file_path}">내려받기</span>` : '—'}</td>
+             <td class="muted">${inv && inv.submitted_at ? new Date(inv.submitted_at).toLocaleString('ko-KR') : '—'}</td>
+           </tr></tbody></table>
+           ${!inv ? '<div class="hint" style="margin-top:6px;">제출 기한이 지났습니다. JLR Korea 담당자에게 문의해 주십시오.</div>' : ''}`}
+      </div></div>`;
+  host.querySelectorAll('.row-amt-input').forEach(formatAmountInput);
+  host.querySelectorAll('.file-link').forEach(el =>
+    el.addEventListener('click', () => downloadFile(el.dataset.path)));
+  const btn = host.querySelector('.inv-submit-btn');
+  if(btn) btn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    btn.disabled = true; btn.textContent = '제출 중...';
+    await submitInvoice(round, supplyAmount, host.querySelector('tbody tr'));
+    btn.disabled = false; btn.textContent = '제출';
+  });
+}
+
 /* ---------- 리테일러 화면 — One DMS 카드와 같은 규격 ---------- */
 async function renderPndRetailerCard(listEl, round, items){
   const uid = 'pd' + String(items[0].id).slice(0, 8);
@@ -6990,7 +7188,9 @@ async function renderPndRetailerCard(listEl, round, items){
     + pndFieldTable(lines)
     + pndNgTable(lines, wsName)
     + `<div class="hint">· 정산 금액은 공급가 기준이며 부가세는 별도입니다.
-         <br>· 제외된 건에 이견이 있으시면 <b>[이의 제출]</b> 로 알려주십시오.</div>`;
+         <br>· 제외된 건에 이견이 있으시면 <b>[이의 제출]</b> 로 알려주십시오.</div>`
+    + '<div class="pd-invoice"></div>';
+  await pndInvoiceBlock(card.querySelector('.pd-invoice'), round, s.approved);
 
   card.querySelector('.pd-xlsx').addEventListener('click', e => {
     e.stopPropagation(); pndExport(lines, wsName, round, myRetailer?.name);
