@@ -1,93 +1,3 @@
-function pndExport(lines, wsName, round, who){
-  const s = pndSum(lines);
-  const F = PND_FIELDS;
-  const columns = [
-    { key:'no',     label:'No',            w:7,  type:'num', align:'center' },
-    { key:'ws',     label:'지점',          w:12 },
-    { key:'date',   label:'탁송일자',      w:11, align:'center' },
-    { key:'leg',    label:'픽업/딜리버리', w:11, align:'center' },
-    { key:'svc',    label:'서비스 유형',   w:26 },
-    { key:'pcoc',   label:'PC/OC 여부',    w:16 },
-    { key:'ctype',  label:'청구유형',      w:10, align:'center' },
-    { key:'brand',  label:'Brand',         w:11, align:'center' },
-    { key:'orderer',label:'주문자명',      w:11 },
-    { key:'tel',    label:'주문자 연락처', w:15 },
-    { key:'cust',   label:'고객명',        w:11 },
-    { key:'carno',  label:'차량번호',      w:12 },
-    { key:'model',  label:'차량모델',      w:24 },
-    { key:'rono',   label:'RO#/예약#',     w:16 },
-    { key:'vin',    label:'차대번호',      w:19 },
-    { key:'origin', label:'출발지',        w:24 },
-    { key:'dest',   label:'도착지',        w:24 },
-    { key:'dist',   label:'주행거리',      w:10, type:'num' },
-    { key:'jlrk',   label:'JLRK청구',      w:12, type:'num' },
-    { key:'own',    label:'리테일러부담',  w:13, type:'num' },
-    { key:'total',  label:'청구 금액',     w:12, type:'num' },
-    { key:'fuel',   label:'주유비',        w:10 },
-    ...F.map(f => ({ key:'chk_'+f, label:f, w:11, align:'center' })),
-    { key:'verdict',label:'데이터 검증',   w:11, align:'center' },
-    { key:'note',   label:'JLRK Comment',  w:34 },
-    { key:'memo',   label:'특이사항',      w:20 },
-    { key:'etc',    label:'비고',          w:16 },
-    { key:'dmsbk',  label:'DMS예약번호',   w:16 },
-    { key:'dmsuse', label:'DMS사용목적',   w:18 },
-  ];
-  const rows = lines.map(l => {
-    const c = l.checks || {}, x = l.extra || {};
-    const red = Object.keys(c).filter(f => c[f] === 'X').map(f => 'chk_'+f);
-    const fieldCol = { '고객명':'cust', '차량번호':'carno', '차량모델':'model',
-                       'RO/예약번호':'rono', '차대번호':'vin',
-                       '주문자명':'orderer', '주문자연락처':'tel' };
-    Object.keys(c).forEach(f => { if(c[f] === 'X' && fieldCol[f]) red.push(fieldCol[f]); });
-    if(l.verdict === 'X') red.push('verdict', 'note');
-    return {
-      no: l.src_row, ws: wsName(l), date: l.svc_date || '', leg: l.leg || '',
-      svc: l.svc_type || '', pcoc: x['PC/OC 여부'] || '', ctype: l.charge_type || '',
-      brand: l.brand || '', orderer: l.orderer || '', tel: l.orderer_tel || '',
-      cust: l.customer || '', carno: l.car_no || '', model: l.car_model || '',
-      rono: l.ro_no || '', vin: l.vin || '', origin: l.origin || '', dest: l.dest || '',
-      dist: Number(l.distance || 0), jlrk: Number(l.claim_jlrk || 0),
-      own: Number(l.retailer_own || 0), total: Number(l.total_amt || 0),
-      fuel: x['주유비'] || '',
-      ...Object.fromEntries(F.map(f => ['chk_'+f, c[f] || ''])),
-      verdict: l.verdict, note: l.note || '', memo: x['특이사항'] || '', etc: x['비고'] || '',
-      dmsbk: x['DMS예약번호'] || '', dmsuse: x['DMS사용목적'] || '',
-      __red: red,
-    };
-  });
-  const vat = Math.round(s.approved * 0.1);
-  xlsxHouse({
-    filename: `Pick up & Delivery 정산내역_${sanitizeFilename(round.period_label)}`
-            + `${who ? '_' + sanitizeFilename(who) : ''}.xlsx`,
-    sheetName: '정산내역',
-    title: `Pick up & Delivery 정산 내역 — ${round.period_label}${who ? ' · ' + who : ''}`,
-    subtitle: 'JLR Korea 검토 완료 · 금액은 공급가 기준(부가세 별도) · 빨간 글씨는 오류로 판정된 값',
-    summary: [
-      { label:'검토 대상',  value:`${s.n.toLocaleString()}건` },
-      { label:'원 청구',    value:s.claimed },
-      { label:'검증 제외',  value:s.cut, color:XS.DANGER },
-      { label:'공급가액',   value:s.approved, color:XS.OK },
-      { label:'부가세(10%)',value:vat },
-      { label:'합계',       value:s.approved + vat, color:XS.OK },
-    ],
-    steps: [
-      '■ 금액 산출',
-      `   ① 청구 ${s.n.toLocaleString()}건 중 JLR Korea 가 7개 항목과 청구유형을 건별로 대조`,
-      `   ② 오류 ${s.ng}건 (${fmtWon(s.cut)}) 을 정산에서 제외`,
-      `   ③ 나머지 ${(s.n - s.ng).toLocaleString()}건 = 공급가액 ${fmtWon(s.approved)}`,
-      ...(s.skipped ? [`   ※ JLRK 부담이 없는 Retailer 100% 건 ${s.skipped.toLocaleString()}건은 검토 대상에서 제외 (청구액 0원)`] : []),
-    ],
-    columns, rows,
-    totals: { no:'합계', jlrk:s.claimed + 0, own: lines.reduce((a,l)=>a+Number(l.retailer_own||0),0),
-              total: lines.reduce((a,l)=>a+Number(l.total_amt||0),0) },
-    notes: [
-      '· 「데이터 검증」 X 인 건이 정산에서 제외된 건입니다. 사유는 JLRK Comment 를 보십시오.',
-      '· 7개 검토 항목은 리테일러가 제출한 값과 JLR Korea 확인값을 대조한 결과입니다 (O 적합 / X 오류).',
-      '· 이견이 있으시면 정산포털에서 [이의 제출] 로 알려주십시오.',
-    ],
-  });
-}
-
 <!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -6700,18 +6610,104 @@ async function pndPublish(round, type, lines, wmap){
   }
 }
 
-function pndExport(lines, wsName, round){
-  const head = ['지점','탁송일','구분','서비스유형','청구유형','브랜드','고객명','차량번호','차량모델',
-                'RO/예약번호','차대번호','출발지','도착지','주행거리','JLRK청구',
-                ...PND_FIELDS, '전체판정','사유'];
-  const body = lines.map(l => [wsName(l), l.svc_date||'', l.leg||'', l.svc_type||'', l.charge_type||'',
-    l.brand||'', l.customer||'', l.car_no||'', l.car_model||'', l.ro_no||'', l.vin||'',
-    l.origin||'', l.dest||'', Number(l.distance||0), Number(l.claim_jlrk||0),
-    ...PND_FIELDS.map(f => (l.checks||{})[f] || ''), l.verdict, l.note||'']);
-  const ws = XLSX.utils.aoa_to_sheet([head, ...body]);
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, '검토결과');
-  XLSX.writeFile(wb, `P&D 검토결과_${sanitizeFilename(round.period_label)}.xlsx`);
+function pndExport(lines, wsName, round, who){
+  const s = pndSum(lines);
+  const F = PND_FIELDS;
+  const columns = [
+    { key:'no',     label:'No',            w:7,  type:'num', align:'center' },
+    { key:'ws',     label:'지점',          w:12 },
+    { key:'date',   label:'탁송일자',      w:11, align:'center' },
+    { key:'leg',    label:'픽업/딜리버리', w:11, align:'center' },
+    { key:'svc',    label:'서비스 유형',   w:26 },
+    { key:'pcoc',   label:'PC/OC 여부',    w:16 },
+    { key:'ctype',  label:'청구유형',      w:10, align:'center' },
+    { key:'brand',  label:'Brand',         w:11, align:'center' },
+    { key:'orderer',label:'주문자명',      w:11 },
+    { key:'tel',    label:'주문자 연락처', w:15 },
+    { key:'cust',   label:'고객명',        w:11 },
+    { key:'carno',  label:'차량번호',      w:12 },
+    { key:'model',  label:'차량모델',      w:24 },
+    { key:'rono',   label:'RO#/예약#',     w:16 },
+    { key:'vin',    label:'차대번호',      w:19 },
+    { key:'origin', label:'출발지',        w:24 },
+    { key:'dest',   label:'도착지',        w:24 },
+    { key:'dist',   label:'주행거리',      w:10, type:'num' },
+    { key:'jlrk',   label:'JLRK청구',      w:12, type:'num' },
+    { key:'own',    label:'리테일러부담',  w:13, type:'num' },
+    { key:'total',  label:'청구 금액',     w:12, type:'num' },
+    { key:'fuel',   label:'주유비',        w:10 },
+  ].concat(F.map(f => ({ key:'chk_'+f, label:f, w:11, align:'center' }))).concat([
+    { key:'verdict',label:'데이터 검증',   w:11, align:'center' },
+    { key:'note',   label:'JLRK Comment',  w:34 },
+    { key:'memo',   label:'특이사항',      w:20 },
+    { key:'etc',    label:'비고',          w:16 },
+    { key:'dmsbk',  label:'DMS예약번호',   w:16 },
+    { key:'dmsuse', label:'DMS사용목적',   w:18 },
+  ]);
+  // 항목 O/X 와, 그 항목에 해당하는 값 칸을 같이 빨갛게 한다
+  const FIELD_COL = { '고객명':'cust', '차량번호':'carno', '차량모델':'model',
+                      'RO/예약번호':'rono', '차대번호':'vin',
+                      '주문자명':'orderer', '주문자연락처':'tel' };
+  const rows = lines.map(l => {
+    const c = l.checks || {}, x = l.extra || {};
+    const red = [];
+    Object.keys(c).forEach(f => {
+      if(c[f] !== 'X') return;
+      red.push('chk_' + f);
+      if(FIELD_COL[f]) red.push(FIELD_COL[f]);
+    });
+    if(l.verdict === 'X') red.push('verdict', 'note');
+    const r = {
+      no: l.src_row, ws: wsName(l), date: l.svc_date || '', leg: l.leg || '',
+      svc: l.svc_type || '', pcoc: x['PC/OC 여부'] || '', ctype: l.charge_type || '',
+      brand: l.brand || '', orderer: l.orderer || '', tel: l.orderer_tel || '',
+      cust: l.customer || '', carno: l.car_no || '', model: l.car_model || '',
+      rono: l.ro_no || '', vin: l.vin || '', origin: l.origin || '', dest: l.dest || '',
+      dist: Number(l.distance || 0), jlrk: Number(l.claim_jlrk || 0),
+      own: Number(l.retailer_own || 0), total: Number(l.total_amt || 0),
+      fuel: x['주유비'] || '', verdict: l.verdict, note: l.note || '',
+      memo: x['특이사항'] || '', etc: x['비고'] || '',
+      dmsbk: x['DMS예약번호'] || '', dmsuse: x['DMS사용목적'] || '',
+      __red: red,
+    };
+    F.forEach(f => { r['chk_' + f] = c[f] || ''; });
+    return r;
+  });
+  const vat = Math.round(s.approved * 0.1);
+  const steps = [
+    '■ 금액 산출',
+    '   ① 청구 ' + s.n.toLocaleString() + '건을 JLR Korea 가 7개 항목과 청구유형으로 건별 대조',
+    '   ② 오류 ' + s.ng + '건 (' + fmtWon(s.cut) + ') 을 정산에서 제외',
+    '   ③ 나머지 ' + (s.n - s.ng).toLocaleString() + '건 = 공급가액 ' + fmtWon(s.approved),
+  ];
+  if(s.skipped) steps.push('   ※ JLRK 부담이 없는 Retailer 100% 건 ' + s.skipped.toLocaleString()
+    + '건은 검토 대상에서 제외 (청구액 0원이라 정산에 영향 없음)');
+  xlsxHouse({
+    filename: 'Pick up & Delivery 정산내역_' + sanitizeFilename(round.period_label)
+            + (who ? '_' + sanitizeFilename(who) : '') + '.xlsx',
+    sheetName: '정산내역',
+    title: 'Pick up & Delivery 정산 내역 — ' + round.period_label + (who ? ' · ' + who : ''),
+    subtitle: 'JLR Korea 검토 완료 · 금액은 공급가 기준(부가세 별도) · 빨간 글씨가 오류로 판정된 값',
+    summary: [
+      { label:'검토 대상',   value: s.n.toLocaleString() + '건' },
+      { label:'원 청구',     value: s.claimed },
+      { label:'검증 제외',   value: s.cut, color: XS.DANGER },
+      { label:'공급가액',    value: s.approved, color: XS.OK },
+      { label:'부가세 (10%)',value: vat },
+      { label:'합계',        value: s.approved + vat, color: XS.OK },
+    ],
+    steps: steps,
+    columns: columns,
+    rows: rows,
+    totals: { no:'합계', jlrk: s.claimed,
+              own: lines.reduce((a,l) => a + Number(l.retailer_own||0), 0),
+              total: lines.reduce((a,l) => a + Number(l.total_amt||0), 0) },
+    notes: [
+      '· 「데이터 검증」 이 X 인 건이 정산에서 제외된 건입니다. 사유는 JLRK Comment 를 보십시오.',
+      '· 7개 검토 항목은 리테일러 제출값과 JLR Korea 확인값을 대조한 결과입니다 (O 적합 / X 오류).',
+      '· 이견이 있으시면 정산포털에서 [이의 제출] 로 알려주십시오.',
+    ],
+  });
 }
 
 /* ---------- 리테일러 화면 — One DMS 카드와 같은 규격 ---------- */
