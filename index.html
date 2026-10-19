@@ -925,7 +925,9 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<!-- SheetJS 0.18.5 커뮤니티판은 셀 서식을 못 쓴다. 같은 버전·같은 API 에
+     서식만 더한 포크로 바꿨다 — 기존 XLSX.* 코드는 그대로 동작한다. (2026-10-19) -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script>
@@ -1443,17 +1445,16 @@ async function checkEmailStatus(){
   const el = document.getElementById('rd_email_hint');
   if(!el) return;
   try{
-    const { error } = await sb.functions.invoke('send-email', { body: { ping: true } });
-    // 함수가 배포돼 있으면 파라미터 부족(400) 응답이 오고, 미배포면 404/네트워크 오류
-    if(error && /not found|404|failed to fetch|networkerror/i.test(error.message || '')){
-      el.textContent = '※ 이메일 알림 미연결 — Edge Function(send-email) 배포 전입니다. 개설 후 리테일러에 별도 안내해주세요.';
-      el.style.color = 'var(--accent-ar)';
-    } else {
-      el.textContent = '✓ 이메일 알림 연결됨 — 개설 시 대상 리테일러에게 청구 요청 메일이 자동 발송됩니다.';
-      el.style.color = 'var(--accent)';
-    }
+    // 메일은 전부 email_outbox 에 쌓였다가 사람이 [발송] 을 눌러야 나간다.
+    // 그러니 점검할 대상은 send-email 함수가 아니라 대기함 테이블이다.
+    const { error } = await sb.from('email_outbox').select('id', { count:'exact', head:true });
+    if(error) throw error;
+    el.innerHTML = '✓ 개설하면 청구 요청 메일이 <b>발송 대기함</b>에 쌓입니다 — '
+                 + '대기함에서 [발송] 을 눌러야 리테일러에게 실제로 나갑니다.';
+    el.style.color = 'var(--accent)';
   } catch(e){
-    el.textContent = '※ 이메일 알림 상태를 확인할 수 없습니다.';
+    el.textContent = '※ 발송 대기함을 확인할 수 없습니다. 개설 후 메일 발송 대기함을 직접 확인해주세요.';
+    el.style.color = 'var(--accent-ar)';
   }
 }
 
@@ -3044,6 +3045,466 @@ function oneDmsPreviewHtml(p){
     <div class="hint" style="margin-top:6px;">공급가 ${won(p.grand.amount)} + VAT ${won(p.grand.vat)} = <b>${won(p.grand.total)}</b> · JG:LR = 10:90 고정 · 라이선스 종류·단가는 리테일러 화면·다운로드에 표시되지 않습니다.</div>`;
 }
 
+
+/* ================================================================
+   캠페인 부품할인 정산 — 자동 검증 · 예외승인 · 반송 (2026-10-17)
+   preset = 'CAMPAIGN_PARTS_DC'
+   리테일러 청구서를 마감 Turn Over + 월별 부품가격과 대조한 결과를
+   RO 단위(campaign_ro)로 보여주고, 매니저가 건별로 판정한 뒤
+   리테일러당 1통으로 묶어 반송한다.
+   ================================================================ */
+const CAMP_AUTO = {
+  '캠페인 기간 외 입고':
+    '캠페인 기간 이전 입고 건으로 캠페인 대상 차량이 아닙니다. '
+  + 'JLRK 사전 승인을 받은 경우 이메일 승인본을 첨부해 주세요.',
+  '캠페인DC 미마감':
+    '코리아청구(캠페인DC) 계정으로 마감되지 않았습니다. 마감 처리 후 재청구해 주세요.',
+  '할인율 불일치':
+    '차량등록일 기준 할인율과 다릅니다. 2021-01-01 이전 30% / 이후 20% 기준으로 수정해 주세요.',
+  '소비자가 마스터 불일치':
+    '청구하신 소비자가가 해당 월 부품가격과 다릅니다. 확인 후 수정해 주세요.',
+  '부품 마스터에 없는 품번':
+    'JLR 순정부품 여부를 확인할 수 없는 품번입니다. 순정부품만 캠페인 대상입니다.',
+  'RO 부품 소비자가':
+    '할인 대상 부품 정가 합계가 100만원 미만이라 캠페인 대상이 아닙니다.',
+};
+const CAMP_REJECT_DAYS = 2;   // 반송 후 재청구 기한
+
+const CAMP_DEC = { NONE:'미처리', APPROVED:'승인', EXCEPTION:'예외승인', REJECT:'일반반송', REJECT_FINAL:'완전반송' };
+let campState = null;
+
+async function renderCampaignRoundDetail(round, type){
+  document.getElementById('claimsTable').style.display = 'none';
+  document.getElementById('rd_title').textContent = `${type.name} · ${round.period_label}`;
+  const cfg = round.source_summary || {};
+  document.getElementById('rd_status').innerHTML =
+    `<span class="badge badge-ap">${ROUND_STATUS_LABEL[round.status]||round.status}</span>`;
+  document.getElementById('rd_meta').textContent =
+    `부품할인 캠페인 · ${cfg.start||''}~${cfg.end||''} · 등록일 ${cfg.reg_cut||''} 이전 ${(cfg.rate_before*100)||30}% / 이후 ${(cfg.rate_after*100)||20}%`;
+  document.getElementById('rd_due').textContent = cfg.grace ? `Grace ~${cfg.grace}` : '';
+  ['rd_actions','reviewSection','invoiceSection','voucherSection'].forEach(id => {
+    const el = document.getElementById(id); if(el) el.innerHTML = '';
+  });
+
+  const host = document.getElementById('reviewSection');
+  host.innerHTML = '<div class="info-card"><div class="hint">검증 결과를 불러오는 중...</div></div>';
+
+  const [{ data: ros }, { data: rets }, { data: months }] = await Promise.all([
+    sb.from('campaign_ro').select('*').eq('round_id', round.id).order('verdict').order('claim_jlrk', { ascending:false }),
+    sb.from('retailers').select('id, code, name, email'),
+    sb.from('part_price_months').select('*')
+  ]);
+  const retById = new Map((rets||[]).map(r => [r.id, r]));
+  campState = { round, type, cfg, ros: ros||[], retById, sel:new Set(), filter:'FAIL',
+                retailer:'', reason:'', months: months||[] };
+  renderCampaign(months||[]);
+}
+
+function campKpi(ros){
+  const g = { FAIL:[0,0], WARN:[0,0], PASS:[0,0] };
+  ros.forEach(r => { const k=g[r.verdict]||g.PASS; k[0]++; k[1]+=Number(r.claim_jlrk||0); });
+  return g;
+}
+
+function renderCampaign(months){
+  const S = campState, host = document.getElementById('reviewSection');
+  const need = S.cfg.price_ym;
+  const have = (months||[]).some(m => m.ym === need);
+  const g = campKpi(S.ros);
+  const dec = S.ros.filter(r => ['REJECT','REJECT_FINAL'].includes(r.decision));
+  const resub = S.ros.filter(r => r.resubmitted_at);
+  const card = (k,label,color) => `
+    <div style="flex:1; min-width:150px; background:var(--surface); border:1px solid var(--surface3);
+         border-radius:8px; padding:13px 15px; cursor:pointer" data-cf="${k}">
+      <div style="font-size:11.5px; color:var(--muted,#7a8699);">${label}</div>
+      <div style="font-size:20px; font-weight:700; margin-top:3px; ${color}">${g[k][0]}건</div>
+      <div style="font-size:11.5px; color:var(--muted,#7a8699);">${fmtWon(g[k][1])}</div></div>`;
+
+  host.innerHTML = `
+    ${have ? '' : `<div class="info-card" style="border-color:#c0392b; background:#fdecea; margin-bottom:10px;">
+      <b style="color:#c0392b;">⚠ ${need} 부품가격 파일이 없습니다.</b>
+      <div class="hint" style="margin-top:4px;">소비자가 검증을 건너뛴 상태입니다. 월별 가격 파일을 올리면 자동으로 다시 검증합니다.
+      현재 적재된 월 : ${(months||[]).map(m=>m.ym).join(' · ')||'없음'}</div></div>`}
+    <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px;" id="campKpi">
+      ${card('FAIL','확인 필요','color:var(--danger,#c0392b);')}
+      ${card('WARN','확인 권고','color:var(--accent-ar);')}
+      ${card('PASS','검증 통과','color:var(--accent);')}
+      <div style="flex:1; min-width:150px; background:var(--surface); border:1px solid var(--surface3);
+           border-radius:8px; padding:13px 15px;">
+        <div style="font-size:11.5px; color:var(--muted,#7a8699);">반송 예정</div>
+        <div style="font-size:20px; font-weight:700; margin-top:3px;">${dec.length}건</div>
+        <div style="font-size:11.5px; color:var(--muted,#7a8699);">사유 입력 완료 · 미발송</div></div>
+      <div style="flex:1; min-width:150px; border-radius:8px; padding:13px 15px; cursor:pointer;
+           background:${resub.length?'#fff4e5':'var(--surface)'};
+           border:1px solid ${resub.length?'#f0c98a':'var(--surface3)'};" data-cf="RESUB">
+        <div style="font-size:11.5px; color:var(--muted,#7a8699);">리테일러 재제출</div>
+        <div style="font-size:20px; font-weight:700; margin-top:3px; ${resub.length?'color:var(--accent-ar);':''}">${resub.length}건</div>
+        <div style="font-size:11.5px; color:var(--muted,#7a8699);">${resub.length?'재검토 필요':'없음'}</div></div>
+    </div>
+    <div class="info-card" style="margin-bottom:10px;">
+      <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">
+        <div class="field" style="min-width:150px; margin:0;"><label>판정</label>
+          <select id="campF"><option value="">전체</option>
+            <option value="FAIL" ${S.filter==='FAIL'?'selected':''}>확인 필요</option>
+            <option value="WARN" ${S.filter==='WARN'?'selected':''}>확인 권고</option>
+            <option value="PASS" ${S.filter==='PASS'?'selected':''}>검증 통과</option>
+            <option value="DEC">반송 예정</option>
+            <option value="PERIOD">기간 외만 걸린 건</option>
+            <option value="BACK">백오더 선청구</option>
+            <option value="RESUB">리테일러 재제출</option></select></div>
+        <div class="field" style="min-width:150px; margin:0;"><label>리테일러</label>
+          <select id="campR"><option value="">전체</option>
+            ${[...new Set(S.ros.map(r=>r.retailer_id))].map(id=>{
+              const rt=S.retById.get(id); return `<option value="${id}" ${S.retailer===id?'selected':''}>${rt?.code||''} ${rt?.name||''}</option>`;}).join('')}
+          </select></div>
+        <div style="margin-left:auto; display:flex; gap:8px;">
+          <button class="btn btn-sm btn-ghost" id="campXlsx">엑셀 내려받기</button>
+          <button class="btn btn-sm" id="campSend" ${dec.length?'':'disabled'}>반송 발송 (${dec.length}건)</button>
+        </div>
+      </div>
+      <div class="hint" style="margin-top:6px;">건별로 사유를 입력해 쌓아두고, 마지막에 <b>[반송 발송]</b> 을 누르면
+        리테일러당 <b>메일 1통</b>으로 묶여 발송 대기함에 올라갑니다. 그 전에는 아무 알림도 나가지 않습니다.</div>
+    </div>
+    <div id="campReason"></div>
+    <div id="campList"></div>`;
+
+  host.querySelectorAll('[data-cf]').forEach(el => el.addEventListener('click', () => {
+    S.filter = el.dataset.cf; renderCampaign(months);
+  }));
+  document.getElementById('campF').onchange = e => { S.filter = e.target.value; S.reason=''; renderCampaign(months); };
+  document.getElementById('campR').onchange = e => { S.retailer = e.target.value; renderCampaign(months); };
+  document.getElementById('campSend').onclick = () => campSendRejections();
+  document.getElementById('campXlsx').onclick = () => campExport();
+  campReasons();
+  campList();
+}
+
+// 사유별 요약 — 416건을 하나씩 보는 게 아니라 같은 성격끼리 묶어 처리한다.
+// 「캠페인 기간 외 입고」 처럼 조치가 똑같은 묶음은 한 번에 코멘트를 넣고 반송할 수 있다.
+function campReasons(){
+  const S = campState, box = document.getElementById('campReason');
+  if(!box) return;
+  let pool = S.ros.filter(r => r.verdict === 'FAIL');
+  if(S.retailer) pool = pool.filter(r => r.retailer_id === S.retailer);
+  if(!pool.length){ box.innerHTML = ''; return; }
+  const g = new Map();
+  pool.forEach(r => {
+    const k = r.reason || '기타';
+    const v = g.get(k) || [0,0,0];
+    v[0]++; v[1] += Number(r.claim_jlrk||0);
+    if(r.decision !== 'NONE') v[2]++;
+    g.set(k, v);
+  });
+  const list = [...g.entries()].sort((a,b) => b[1][0]-a[1][0]);
+  const max = list[0][1][0];
+  box.innerHTML = `<div class="info-card" style="margin-bottom:10px; padding:12px 14px;">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+      <b style="font-size:13px;">확인 필요 ${pool.length}건 — 사유별</b>
+      <span class="hint">같은 사유는 조치가 같습니다. 묶어서 보고 한 번에 처리하세요.</span></div>
+    <div style="display:grid; grid-template-columns:1fr; gap:4px;">
+      ${list.map(([k,v]) => `
+        <div style="display:flex; align-items:center; gap:10px; cursor:pointer; padding:4px 6px; border-radius:4px;
+             background:${S.reason===k?'var(--surface2)':'transparent'};" data-rs="${k.replace(/"/g,'&quot;')}">
+          <span style="width:220px; flex:none; font-size:12.5px;">${k}</span>
+          <span style="flex:1; height:8px; background:var(--surface3); border-radius:4px; overflow:hidden;">
+            <span style="display:block; height:100%; width:${Math.round(v[0]/max*100)}%;
+                  background:${S.reason===k?'var(--accent-ar)':'#c0392b'}; opacity:.75;"></span></span>
+          <span style="width:52px; text-align:right; font-weight:600; font-size:12.5px;">${v[0]}건</span>
+          <span style="width:110px; text-align:right; font-size:12.5px; color:var(--muted,#7a8699);">${fmtWon(v[1])}</span>
+          <span style="width:64px; text-align:right; font-size:11.5px; color:${v[2]?'var(--accent)':'var(--muted,#7a8699)'};">
+            ${v[2]?`처리 ${v[2]}`:'미처리'}</span>
+        </div>`).join('')}
+    </div>
+    ${S.reason?`<div style="margin-top:8px;"><a class="file-link" id="campRsClear">사유 필터 해제 (${S.reason})</a></div>`:''}
+  </div>`;
+  box.querySelectorAll('[data-rs]').forEach(el => el.addEventListener('click', () => {
+    S.reason = (S.reason === el.dataset.rs) ? '' : el.dataset.rs;
+    S.filter = 'FAIL';
+    renderCampaign(S.months||[]);
+  }));
+  const cl = document.getElementById('campRsClear');
+  if(cl) cl.onclick = () => { S.reason=''; renderCampaign(S.months||[]); };
+}
+
+function campList(){
+  const S = campState;
+  let rows = S.ros;
+  if(S.filter === 'DEC') rows = rows.filter(r => ['REJECT','REJECT_FINAL'].includes(r.decision));
+  else if(S.filter === 'PERIOD') rows = rows.filter(r => r.only_period);
+  else if(S.filter === 'BACK') rows = rows.filter(r => (r.orders||[]).length);
+  else if(S.filter === 'RESUB') rows = rows.filter(r => r.resubmitted_at);
+  else if(S.filter) rows = rows.filter(r => r.verdict === S.filter);
+  if(S.retailer) rows = rows.filter(r => r.retailer_id === S.retailer);
+  if(S.reason)   rows = rows.filter(r => (r.reason||'기타') === S.reason);
+  const total = rows.length;
+  rows = rows.slice(0, 200);
+  const V = { FAIL:['확인 필요','badge-ar'], WARN:['확인 권고','badge-warn'], PASS:['검증 통과','badge-ap'] };
+  document.getElementById('campList').innerHTML = rows.map(r => {
+    const rt = S.retById.get(r.retailer_id);
+    const d = r.decision !== 'NONE'
+      ? `<span class="badge ${r.decision.startsWith('REJECT')?'badge-ar':'badge-ap'}" style="margin-left:6px;">${CAMP_DEC[r.decision]}</span>` : '';
+    return `<div class="info-card" style="margin-bottom:8px; padding:0;">
+      <div style="display:flex; align-items:center; gap:12px; padding:11px 14px; cursor:pointer;" data-ro="${r.id}">
+        <span style="width:14px; color:var(--muted,#7a8699);" id="cv-${r.id}">＋</span>
+        <div style="flex:1; min-width:0;"><b>${r.ro_no}</b>
+          <span class="hint" style="margin-left:6px;">${rt?.code||''} ${r.workshop||''} · ${r.model||''}</span>${d}
+          ${(r.orders||[]).length?'<span class="badge badge-warn" style="margin-left:6px;">백오더</span>':''}
+          ${r.only_period?'<span class="badge badge-off" style="margin-left:6px;">기간만</span>':''}
+          ${r.resubmitted_at?'<span class="badge badge-ar" style="margin-left:6px;">재제출</span>':''}</div>
+        <span class="hint">부품 ${r.parts}건</span>
+        <span class="hint">입고 ${r.in_date||'—'}</span>
+        <b style="min-width:110px; text-align:right;">${fmtWon(r.claim_jlrk)}</b>
+        <span class="badge ${V[r.verdict][1]}">${V[r.verdict][0]}</span>
+      </div>
+      <div id="bd-${r.id}" style="display:none; padding:0 14px 14px;"></div>
+    </div>`; }).join('') + (total > 200 ? `<div class="info-card"><div class="hint">상위 200건만 표시했습니다 (조건에 맞는 건 ${total}건). 사유·리테일러로 좁혀 보세요.</div></div>` : '')
+    || '<div class="info-card"><div class="hint">해당 조건의 건이 없습니다.</div></div>';
+
+  document.querySelectorAll('[data-ro]').forEach(el => el.addEventListener('click', async () => {
+    const id = el.dataset.ro, bd = document.getElementById('bd-'+id), cv = document.getElementById('cv-'+id);
+    if(bd.style.display === 'block'){ bd.style.display='none'; cv.textContent='＋'; return; }
+    bd.style.display='block'; cv.textContent='－';
+    if(!bd.dataset.loaded){ bd.innerHTML = campDetail(S.ros.find(x=>x.id===id)); bd.dataset.loaded='1'; campBind(bd, id); }
+  }));
+}
+
+// 부품 단위 대조표 — 검토자가 한 RO 에서 봐야 하는 건 공임 70줄이 아니라
+// '어느 품번이 얼마나 어긋났는가' 와 '계정별 분할율이 70/15/15 인가' 두 가지다.
+function campPartTable(r){
+  const rows = r.part_rows || [];
+  if(!rows.length) return '';
+  const bad  = rows.filter(p => (p.flags||[]).length || Math.abs(Number(p.gap)||0) > 0.5);
+  const good = rows.filter(p => !((p.flags||[]).length || Math.abs(Number(p.gap)||0) > 0.5));
+  const exp  = r.reg_date ? (r.reg_date < '2021-01-01' ? 30 : 20) : null;
+  const pct  = v => (v===null||v===undefined) ? '<span style="color:#c0392b;">—</span>' : Number(v).toFixed(0);
+  const splitCell = p => {
+    const okGen = exp===null || p.gen===null||p.gen===undefined ? null : Math.abs(p.gen-(100-exp))<0.5;
+    const okDc  = exp===null || p.dc ===null||p.dc ===undefined ? null : Math.abs(p.dc*2-exp)<0.5;
+    const okInt = (p.int_===null||p.int_===undefined||p.dc===null||p.dc===undefined) ? null : Math.abs(p.int_-p.dc)<0.5;
+    const w = (v,ok) => `<span style="${ok===false?'color:#c0392b; font-weight:700;':''}">${pct(v)}</span>`;
+    return `${w(p.gen,okGen)} / ${w(p.dc,okDc)} / ${w(p.int_,okInt)}`;
+  };
+  const line = p => {
+    const g = Number(p.gap)||0, over = g > 0.5, under = g < -0.5;
+    const col = over ? '#c0392b' : (under ? 'var(--accent-ar)' : 'var(--muted,#7a8699)');
+    const sideTag = p.side_ok === 'claim'
+      ? '<span class="badge badge-ap" style="margin-left:6px;">리테일러 청구가 맞음</span>'
+      : (p.side_ok === 'close' ? '<span class="badge badge-ar" style="margin-left:6px;">청구 단가 오류</span>' : '');
+    const notes = [p.why, ...(p.flags||[]).filter(f => !f.startsWith('과청구') && !f.startsWith('과소청구'))].filter(Boolean);
+    return `<tr>
+      <td style="white-space:nowrap;"><b>${p.code||''}</b>${sideTag}
+        <div class="hint" style="max-width:260px; overflow:hidden; text-overflow:ellipsis;">${p.name||''}</div>
+        ${notes.length?`<div class="hint" style="color:${col};">${notes.join(' · ')}</div>`:''}</td>
+      <td style="text-align:center;">${p.qty ?? ''}</td>
+      <td style="text-align:right;">${fmtWon(p.base_claim)}</td>
+      <td style="text-align:right;">${fmtWon(p.base_close)}</td>
+      <td style="text-align:right; color:var(--muted,#7a8699);">${p.base_pm!=null?fmtWon(p.base_pm):'—'}</td>
+      <td style="text-align:center; white-space:nowrap;">${splitCell(p)}</td>
+      <td style="text-align:right;">${fmtWon(p.claim)}</td>
+      <td style="text-align:right;">${p.close!=null?fmtWon(p.close):'—'}</td>
+      <td style="text-align:right; font-weight:700; color:${col};">${g?(g>0?'+':'')+fmtWon(g):'0원'}</td></tr>`;
+  };
+  const head = `<thead><tr>
+      <th>품번 · 품목명</th><th style="text-align:center;">수량</th>
+      <th style="text-align:right;">기준금액 청구</th><th style="text-align:right;">기준금액 마감</th>
+      <th style="text-align:right;">${(campState.cfg.price_ym||'')} 공시가</th>
+      <th style="text-align:center;">분할율 일반/DC/내부</th>
+      <th style="text-align:right;">JLRK 청구</th><th style="text-align:right;">JLRK 마감</th>
+      <th style="text-align:right;">차이</th></tr></thead>`;
+  const sum = (k,a) => a.reduce((t,p)=>t+(Number(p[k])||0),0);
+  const foot = `<tfoot><tr style="background:var(--surface2); font-weight:700;">
+      <td>합계 ${rows.length}개 품번</td><td></td>
+      <td style="text-align:right;">${fmtWon(sum('base_claim',rows))}</td>
+      <td style="text-align:right;">${fmtWon(sum('base_close',rows))}</td><td></td><td></td>
+      <td style="text-align:right;">${fmtWon(sum('claim',rows))}</td>
+      <td style="text-align:right;">${fmtWon(sum('close',rows))}</td>
+      <td style="text-align:right; color:${sum('gap',rows)>0.5?'#c0392b':'inherit'};">${fmtWon(sum('gap',rows))}</td></tr></tfoot>`;
+  const exh = exp!==null ? `기준 분할율 <b>${100-exp} / ${exp/2} / ${exp/2}</b>` : '등록일 없음 — 기준 분할율 판정 불가';
+  return `
+    <div style="border:1px solid var(--surface3); border-radius:6px; overflow:hidden; margin-top:8px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;
+           padding:9px 12px; background:var(--surface2); border-bottom:1px solid var(--surface3);">
+        <span style="font-weight:600;">부품 대조 ${rows.length}개
+          ${bad.length?`<span style="color:#c0392b;">· 차이 ${bad.length}개</span>`:'<span style="color:var(--accent);">· 전부 일치</span>'}</span>
+        <span class="hint">${exh} · 공임 ${r.labour_lines||0}줄 제외</span>
+      </div>
+      <div style="overflow-x:auto;"><table style="min-width:900px;">${head}
+        <tbody>${bad.map(line).join('')}</tbody>
+        ${good.length?`<tbody id="pg-${r.id}" style="display:none;">${good.map(line).join('')}</tbody>`:''}
+        ${foot}</table></div>
+      ${good.length?`<div style="padding:7px 12px; border-top:1px solid var(--surface3);">
+        <a class="file-link" onclick="campTogglePg('${r.id}', this)">일치 ${good.length}개 펼치기</a></div>`:''}
+    </div>`;
+}
+function campTogglePg(id, el){
+  const b = document.getElementById('pg-'+id); if(!b) return;
+  const open = b.style.display !== 'none';
+  b.style.display = open ? 'none' : '';
+  el.textContent = (open ? '일치 ' : '일치 ') + b.children.length + (open ? '개 펼치기' : '개 접기');
+}
+function campDetail(r){
+  const LV = { ok:['검증 통과','var(--accent)'], wn:['확인 권고','var(--accent-ar)'], ng:['확인 필요','var(--danger,#c0392b)'] };
+  const chk = (r.checks||[]).map(c => {
+    const lv = c.lvl || (c.ok ? 'ok' : 'ng');
+    return `<tr><td>${c.name}${c.note?`<div class="hint">${c.note}</div>`:''}</td>
+      <td style="text-align:right;">${c.claim}</td><td style="text-align:right;">${c.close}</td>
+      <td style="text-align:right; font-weight:700; color:${LV[lv][1]};">${LV[lv][0]}</td></tr>`; }).join('');
+  const ok = r.verdict !== 'FAIL';
+  return `
+    <div style="border:1px solid var(--surface3); border-radius:6px; overflow:hidden; margin-top:4px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; padding:10px 12px;
+           background:var(--surface2); border-bottom:1px solid var(--surface3); font-weight:600;">
+        <span>Turn Over 대조 — ${campState.cfg.name||''} · 입고 ${r.in_date||'—'}</span>
+        <span class="badge ${ok?'badge-ap':'badge-ar'}">자동 검토 · ${ok?'검증 통과':'확인 필요'}</span></div>
+      <table><thead><tr><th>항목</th><th style="text-align:right;">청구 금액</th>
+        <th style="text-align:right;">마감 (Turn Over)</th><th style="text-align:right;">결과</th></tr></thead>
+        <tbody>${chk}</tbody></table>
+      <div style="display:flex; justify-content:space-between; padding:11px 13px; background:#15202b; color:#fff;">
+        <span>실 지급 금액 (JLRK)</span><b style="font-size:16px;">${fmtWon(r.to_jlrk)}</b></div>
+    </div>
+    ${campPartTable(r)}
+    ${((r.orders||[]).length || (r.memos||[]).length) ? `
+    <div style="margin-top:8px; padding:10px 12px; background:#fff8e1; border:1px solid #f0e0b0; border-radius:6px;">
+      <div style="font-weight:600; font-size:12.5px;">리테일러가 적어 보낸 내용</div>
+      ${(r.orders||[]).length?`<div class="hint" style="margin-top:4px;">· <b>부품 오더(백오더 선청구)</b> : ${(r.orders||[]).join(' / ')}
+         <br>&nbsp;&nbsp;캠페인·Grace 기간 내 수리를 못 마쳐 선청구한 건입니다. 마감 자료에 없을 수 있어 <b>예외승인 대상</b>입니다.</div>`:''}
+      ${(r.memos||[]).length?`<div class="hint" style="margin-top:4px;">· <b>정산제외 메모</b> : ${(r.memos||[]).join(' / ')}</div>`:''}
+    </div>` : ''}
+    ${r.evidence_path?`<div class="hint" style="margin-top:8px;">첨부된 증빙 :
+      <a class="file-link" onclick="campEvidence('${r.evidence_path}')">이메일 승인본 내려받기</a></div>`:''}
+    <div style="margin-top:10px; padding:11px 12px; background:var(--surface2); border-radius:6px;">
+      <div class="field" style="margin:0 0 8px;"><label>코멘트 (리테일러에게 그대로 보입니다)
+        <a class="file-link camp-auto" style="margin-left:8px;">사유 자동 입력</a></label>
+        <input class="camp-note" value="${(r.note||'').replace(/"/g,'&quot;')}" placeholder="예) 캠페인 이전 입고건이나 엔진 교환 재입고로 예외 승인"></div>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <button class="btn btn-sm btn-ghost camp-act" data-d="EXCEPTION">예외 승인</button>
+        <button class="btn btn-sm btn-ghost camp-act" data-d="REJECT">일반 반송 (금액 수정 요청)</button>
+        <button class="btn btn-sm btn-ghost camp-act" data-d="REJECT_FINAL" style="color:var(--danger,#c0392b); border-color:var(--danger,#c0392b);">완전 반송 (지원 불가)</button>
+        <button class="btn btn-sm btn-ghost camp-act" data-d="NONE" style="margin-left:auto;">처리 취소</button>
+      </div>
+      <div class="hint" style="margin-top:6px;">여기서는 저장만 됩니다. 메일은 위 <b>[반송 발송]</b> 을 눌러야 나갑니다.</div>
+    </div>`;
+}
+
+async function campEvidence(path){
+  const { data, error } = await sb.storage.from('claims').createSignedUrl(path, 120);
+  if(error){ alert('내려받기 실패: ' + error.message); return; }
+  window.open(data.signedUrl, '_blank');
+}
+
+function campAutoNote(r){
+  const fl = (r.checks||[]).filter(c => (c.lvl||'ok') === 'ng').map(c => c.name);
+  const out = [];
+  for(const [k, v] of Object.entries(CAMP_AUTO))
+    if(fl.some(f => f.includes(k.replace('RO 부품 소비자가','할인 대상 부품 정가'))) ||
+       (k === '캠페인 기간 외 입고' && fl.some(f => f.includes('캠페인 기간'))))
+      out.push(v);
+  return out.join('\n');
+}
+
+function campBind(bd, id){
+  const r = campState.ros.find(x => x.id === id);
+  const auto = bd.querySelector('.camp-auto');
+  if(auto) auto.addEventListener('click', () => {
+    const t = campAutoNote(r) || '마감 자료와 차이가 있어 확인이 필요합니다.';
+    bd.querySelector('.camp-note').value = t;
+  });
+  bd.querySelectorAll('.camp-act').forEach(b => b.addEventListener('click', async () => {
+    const note = bd.querySelector('.camp-note').value.trim();
+    const d = b.dataset.d;
+    if(d.startsWith('REJECT') && !note){ alert('반송은 사유(코멘트)를 입력해야 합니다.'); return; }
+    const { data: { user } } = await sb.auth.getUser();
+    const due = d === 'REJECT'
+      ? new Date(Date.now() + CAMP_REJECT_DAYS*864e5).toISOString().slice(0,10) : null;
+    const { error } = await sb.from('campaign_ro')
+      .update({ decision:d, note:note||null, decided_by:user?.id||null, reject_due:due,
+                decided_at: d==='NONE'? null : new Date().toISOString() }).eq('id', id);
+    if(error){ alert('저장 실패: '+error.message); return; }
+    // 해당 RO 의 라인에도 반영
+    const r = campState.ros.find(x=>x.id===id);
+    await sb.from('campaign_lines').update({ decision:d, note:note||null })
+      .eq('round_id', campState.round.id).eq('ro_no', r.ro_no).eq('vin', r.vin);
+    r.decision = d; r.note = note;
+    await logAudit('CAMPAIGN_DECISION','ROUND',campState.round.id,{ro:r.ro_no, decision:d, note});
+    renderCampaign([]);
+    loadRounds && null;
+  }));
+}
+
+async function campSendRejections(){
+  const S = campState;
+  const tgt = S.ros.filter(r => ['REJECT','REJECT_FINAL'].includes(r.decision));
+  if(!tgt.length) return;
+  const byRet = new Map();
+  tgt.forEach(r => { if(!byRet.has(r.retailer_id)) byRet.set(r.retailer_id, []); byRet.get(r.retailer_id).push(r); });
+  const lines = [...byRet.entries()].map(([id, rs]) => {
+    const rt = S.retById.get(id);
+    return `· ${rt?.code||''} ${rt?.name||''} — ${rs.length}건 (${fmtWon(rs.reduce((a,b)=>a+Number(b.claim_jlrk||0),0))})`;
+  });
+  if(!confirm(`반송 안내 메일을 리테일러별 1통으로 만듭니다.\n\n${lines.join('\n')}\n\n` +
+              `메일은 바로 나가지 않고 「메일 발송 대기함」에 올라갑니다. 계속할까요?`)) return;
+  const btn = document.getElementById('campSend'); btn.disabled = true; btn.textContent = '처리 중...';
+  const { data: { user } } = await sb.auth.getUser();
+  for(const [id, rs] of byRet){
+    const rt = S.retById.get(id);
+    const rev = rs.filter(r => r.decision === 'REJECT');
+    const fin = rs.filter(r => r.decision === 'REJECT_FINAL');
+    const amt = rs.reduce((a,b)=>a+Number(b.claim_jlrk||0),0);
+    for(const [kind, arr] of [['REVISE', rev], ['FINAL', fin]]){
+      if(!arr.length) continue;
+      await sb.from('campaign_rejections').insert({
+        round_id:S.round.id, retailer_id:id, kind,
+        line_count:arr.length, amount:arr.reduce((a,b)=>a+Number(b.claim_jlrk||0),0),
+        memo:arr.map(r=>`${r.ro_no} — ${r.note||''}`).join('\n'),
+        sent_at:new Date().toISOString(), sent_by:user?.id||null });
+    }
+    const tbl = (arr, t) => arr.length ? `<h3 style="font-size:14px;margin:18px 0 6px;">${t} (${arr.length}건)</h3>
+      <table style="${EMAIL_STYLE}border-collapse:collapse;width:100%;">
+        <tr style="background:#f1f3f5;"><th align="left" style="padding:6px 8px;">RO</th>
+          <th align="right" style="padding:6px 8px;">청구금액</th><th align="left" style="padding:6px 8px;">사유</th></tr>
+        ${arr.map(r=>`<tr><td style="padding:6px 8px;border-top:1px solid #eee;">${r.ro_no}</td>
+          <td align="right" style="padding:6px 8px;border-top:1px solid #eee;">${fmtWon(r.claim_jlrk)}</td>
+          <td style="padding:6px 8px;border-top:1px solid #eee;">${(r.note||'').replace(/</g,'&lt;')}</td></tr>`).join('')}
+      </table>` : '';
+    const html = emailShell(`${S.type.name} · ${S.round.period_label} 청구 반송 안내`, `
+      <p>${rt?.name||''} 담당자님,</p>
+      <p>제출해주신 ${S.type.name} 청구 내역을 마감 자료와 대조한 결과, 아래 건에 대해 반송 처리하였습니다.</p>
+      ${tbl(rev, '① 수정 후 재청구 — 포털에서 금액을 고쳐 다시 제출해주세요')}
+      ${tbl(fin, '② 지원 대상 아님 — 수정 불가')}
+      <p style="margin-top:16px;">포털 <b>내 청구</b> 화면에서 사유를 확인하실 수 있습니다.
+      ①번 건은 <b>엑셀 재업로드 없이</b> 화면에서 금액만 수정해 재제출하시면 됩니다.
+      JLRK 사전 승인을 받으신 건은 <b>이메일 승인본(PDF)</b> 을 같은 화면에서 첨부해 주세요.</p>
+      <p style="color:#c0392b;"><b>재청구 기한 : 반송일로부터 ${CAMP_REJECT_DAYS}일 이내</b>
+      (${new Date(Date.now()+CAMP_REJECT_DAYS*864e5).toISOString().slice(0,10)} 까지)</p>`);
+    await sendEmail(splitEmails(rt?.email || ''), `[JLRK 정산] ${S.round.period_label} 청구 반송 안내 (${rs.length}건)`, html,
+                    { kind:'CAMPAIGN_REJECT', round_id:S.round.id, retailer:rt?.code });
+  }
+  await logAudit('CAMPAIGN_REJECT','ROUND',S.round.id,{retailers:byRet.size, lines:tgt.length});
+  alert(`반송 처리 완료 — 리테일러 ${byRet.size}곳 앞으로 메일 ${byRet.size}통이 「메일 발송 대기함」에 올라갔습니다.\n` +
+        `대기함에서 내용을 확인하고 [발송] 을 눌러주세요.`);
+  renderCampaignRoundDetail(S.round, S.type);
+  refreshOutboxBadge();
+}
+
+function campExport(){
+  const S = campState;
+  const aoa = [[`${S.type.name} — ${S.round.period_label} 검증 결과`], [],
+    ['RO','리테일러','지점','차대번호','입고일','등록일','부품수','청구 JLRK','마감 JLRK','판정','처리','코멘트']];
+  S.ros.forEach(r => {
+    const rt = S.retById.get(r.retailer_id);
+    aoa.push([r.ro_no, rt?.code||'', r.workshop||'', r.vin||'', r.in_date||'', r.reg_date||'',
+              r.parts, Number(r.claim_jlrk||0), Number(r.to_jlrk||0),
+              {FAIL:'확인 필요',WARN:'확인 권고',PASS:'검증 통과'}[r.verdict], CAMP_DEC[r.decision], r.note||'']);
+  });
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, '검증결과');
+  const out = XLSX.write(wb, { bookType:'xlsx', type:'array' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([out], { type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+  a.download = `캠페인검증_${sanitizeFilename(S.round.period_label)}.xlsx`;
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
 async function renderOneDmsRoundDetail(round, type){
   document.getElementById('claimsTable').style.display = 'none';
   document.getElementById('rd_title').textContent = `${type.name} · ${round.period_label}`;
@@ -3375,6 +3836,10 @@ async function generateOneDmsVoucher(round, type, claims){
   }
 }
 
+// 스토리지 버킷 업로드 상한 (Supabase settlements 버킷 설정값). 바꾸려면 버킷 설정도 같이 바꿀 것.
+const UPLOAD_LIMIT = 20 * 1024 * 1024;
+const UPLOAD_WARN  = 16 * 1024 * 1024;
+
 const OD_REASONS = ['직전 분기 이전 퇴사','미사용 계정','중복 계정','담당자 아님','지점이 다름','기타'];
 
 /* ---------- 리테일러 화면: One DMS 청구내역 확인 카드 (라이선스 종류 비공개)
@@ -3496,11 +3961,16 @@ async function renderOneDmsRetailerCard(listEl, round, items){
         <td style="text-align:right;">${u.months_active||0}</td>
       </tr>${disp[u.login] ? `<tr class="od-rsn"><td colspan="${(branches.length?8:7)+months.length+(canConfirm?1:0)}"
          style="background:var(--surface2); padding:8px 12px;">
-         <span class="hint" style="margin-right:6px;">사유</span>
-         <select class="od-rsn-sel" data-login="${u.login||''}" style="padding:4px 8px;">
-           ${OD_REASONS.map(r=>`<option ${disp[u.login]===r?'selected':''}>${r}</option>`).join('')}
-         </select>
-         <span class="hint" style="margin-left:10px;">${u.name||''} · ${u.months_active||0}개월</span></td></tr>` : ''}`).join('')
+         <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+           <span class="hint">사유</span>
+           <select class="od-rsn-sel" data-login="${u.login||''}" style="padding:4px 8px;">
+             ${OD_REASONS.map(r=>`<option ${disp[u.login].r===r?'selected':''}>${r}</option>`).join('')}
+           </select>
+           <input class="od-rsn-memo" data-login="${u.login||''}" style="flex:1; min-width:260px; padding:4px 8px;"
+                  placeholder="비고 (선택) — 자세한 사정을 적어주시면 확인이 빨라집니다"
+                  value="${(disp[u.login].m||'').replace(/"/g,'&quot;')}">
+           <span class="hint">${u.name||''} · ${u.months_active||0}개월</span>
+         </div></td></tr>` : ''}`).join('')
       || `<tr><td colspan="${(branches.length?8:7)+months.length+(canConfirm?1:0)}" class="hint">조건에 맞는 인원이 없습니다.</td></tr>`;
     card.querySelector('.od-cnt').textContent = rows.length;
     card.querySelector('.od-of').textContent = rows.length === users.length ? '' : `(전체 ${users.length}명 중)`;
@@ -3515,17 +3985,24 @@ async function renderOneDmsRetailerCard(listEl, round, items){
   card.addEventListener('change', (e) => {
     const t = e.target;
     if(t.classList.contains('od-chk')){
-      if(t.checked) disp[t.dataset.login] = OD_REASONS[0]; else delete disp[t.dataset.login];
+      if(t.checked) disp[t.dataset.login] = { r: OD_REASONS[0], m: '' };
+      else delete disp[t.dataset.login];
       draw();
     }
-    if(t.classList.contains('od-rsn-sel')) disp[t.dataset.login] = t.value;
+    if(t.classList.contains('od-rsn-sel')) disp[t.dataset.login].r = t.value;
     if(t.classList.contains('od-all')){
       card.querySelectorAll('.od-chk').forEach(ch => {
-        if(t.checked) disp[ch.dataset.login] = disp[ch.dataset.login] || OD_REASONS[0];
+        if(t.checked) disp[ch.dataset.login] = disp[ch.dataset.login] || { r: OD_REASONS[0], m: '' };
         else delete disp[ch.dataset.login];
       });
       draw();
     }
+  });
+
+  // 비고는 타이핑 중에 저장만 하고 다시 그리지 않는다 (그리면 포커스가 날아간다)
+  card.addEventListener('input', (e) => {
+    const t = e.target;
+    if(t.classList.contains('od-rsn-memo') && disp[t.dataset.login]) disp[t.dataset.login].m = t.value;
   });
 
   const db = card.querySelector('.od-dispute-btn');
@@ -3537,9 +4014,11 @@ async function renderOneDmsRetailerCard(listEl, round, items){
       const byLogin = new Map(users.map(u => [u.login, u]));
       const months_off = picked.reduce((a,[lg]) => a + (byLogin.get(lg)?.months_active || 0), 0);
       const cut = Math.round(months_off * Number(d.rate || 0));
-      const lines = picked.map(([lg,rsn]) => {
+      const lines = picked.map(([lg,v]) => {
         const u = byLogin.get(lg) || {};
-        return `${u.name||lg} (${lg}) — ${rsn}${u.retire?` · 퇴사 ${u.retire}`:''} · ${u.months_active||0}개월`;
+        const memo = (v.m || '').trim();
+        return `${u.name||lg} (${lg}) — ${v.r}${u.retire?` · 퇴사 ${u.retire}`:''} · ${u.months_active||0}개월`
+             + (memo ? `\n    비고: ${memo}` : '');
       });
       if(!confirm(`${picked.length}명에 대해 이의를 제출합니다.\n조정 요청 금액 ${won(cut)} (공급가 기준)\n\n` + lines.join('\n'))) return;
       db.disabled = true; db.textContent = '제출 중...';
@@ -3549,7 +4028,7 @@ async function renderOneDmsRetailerCard(listEl, round, items){
         reason: `[One DMS 대상 인원 이의 ${picked.length}건 · 조정 요청 ${won(cut)}]\n` + lines.join('\n')
       });
       if(error){ alert('제출 실패: ' + error.message); db.disabled = false; syncDispute(); return; }
-      alert('이의를 제출했습니다. JLR Korea 가 웅진에 확인 후 회신드립니다.');
+      alert('이의를 제출했습니다. JLR Korea 가 확인 후 회신드립니다.');
       await loadRetailerClaims();
     });
   }
@@ -3579,34 +4058,76 @@ async function renderOneDmsRetailerCard(listEl, round, items){
 function downloadOneDmsRetailerXlsx(claim, round){
   const d = claim.detail || {};
   const months = d.month_labels || [];
-  const header = ['이름','로그인 아이디','역할','첫 로그인 일자','재직상태','퇴직일', ...months, '사용 개월수'];
-  const dataRows = (d.users||[]).map(u => [
-    u.name||'', u.login||'', u.role||'', u.first||'', u.status||'', u.retire||'',
-    ...((u.flags||[]).map(f => f ? 'O' : '')), u.months_active||0
-  ]);
-  const pad = months.map(()=>'');
-  const aoa = [
-    [`${round.settlement_types?.name||'One DMS License Fee'} — ${round.period_label}`],
-    [`대상 인원 ${d.user_count||(d.users||[]).length}명 · ${d.user_months||0} 유저-month · 집계월 ${months.join(' / ')}`],
-    [],
-    header,
-    ...dataRows,
-    [],
-    ['합계 (유저-month)','','','','','', ...pad, d.user_months||0],
-    ['공급가액', d.amount||0],
-    ['부가세 (10%)', d.vat||0],
-    ['합계 (VAT 포함)', (d.amount||0)+(d.vat||0)]
+  const users = (d.users || []).slice()
+    .sort((x,y) => (x.status !== '재직') - (y.status !== '재직')
+                || String(x.name||'').localeCompare(String(y.name||'')));
+  const adjs = d.adjustments || [];
+  const adjSum = adjs.reduce((t,x) => t + Number(x.amount||0), 0);
+  const base = Number(d.amount || 0);
+  const net  = base + adjSum;
+  const vat  = Math.round(net * 0.1);
+  const rate = Number(d.rate || 0);
+  const who  = myRetailer?.name || '';
+  // 공급업체명은 리테일러 발송본에 넣지 않는다
+  const clean = t => String(t || '').replace(/웅진\s?/g, '');
+
+  const columns = [
+    { key:'name',  label:'이름',        w:11 },
+    { key:'login', label:'로그인 ID',   w:26 },
+    { key:'role',  label:'역할',        w:20 },
+    { key:'first', label:'최초 등록',   w:12, align:'center' },
+    { key:'stat',  label:'재직',        w:8,  align:'center' },
+    { key:'quit',  label:'퇴사일',      w:12, align:'center' },
+    ...months.map((m,i) => ({ key:'m'+i, label:m, w:9, align:'center' })),
+    { key:'mon',   label:'과금',        w:7,  type:'num', align:'center' },
+    { key:'amt',   label:'금액 (참고)', w:13, type:'num' },
   ];
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, '청구내역');
-  const fname = `${sanitizeFilename(round.settlement_types?.name||'One DMS')}_${sanitizeFilename(round.period_label)}.xlsx`;
-  const out = XLSX.write(wb, { bookType:'xlsx', type:'array' });
-  const blob = new Blob([out], { type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a'); a.href = url; a.download = fname;
-  document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+  const rows = users.map(u => ({
+    name:u.name||'', login:u.login||'', role:u.role||'', first:u.first||'',
+    stat:u.status||'', quit:u.retire||'—',
+    ...Object.fromEntries(months.map((_,i) => ['m'+i, (u.flags||[])[i] ? 'O' : '·'])),
+    mon: Number(u.months_active||0), amt: Math.round(Number(u.months_active||0) * rate),
+    __red: u.retire ? ['stat','quit'] : [],
+  }));
+  const steps = [
+    '■ 이 금액이 나온 과정',
+    '   ① 사용자별로 각 달에 라이선스가 활성이었는지 확인했습니다.  O = 그 달에 활성',
+    `   ② 활성이었던 달을 모두 더합니다.  →  ${d.user_months||0} user·월  (사용자 ${users.length}명)`,
+    `   ③ 단가를 곱합니다.  ${d.user_months||0} × ${rate.toLocaleString('ko-KR',{maximumFractionDigits:4})}원 = ${fmtWon(base)}`
+      + '   ← 원 단위 반올림은 여기서 한 번만',
+  ];
+  adjs.forEach(x => steps.push(
+    `   ④ 정정 : ${x.label||'조정'}  ${Number(x.amount)<0?'−':'+'}${fmtWon(Math.abs(x.amount))}   (${clean(x.note)})`));
+  if(adjs.length) steps.push(`   ⑤ 당분기 공급가  ${fmtWon(base)} ${adjSum<0?'−':'+'} ${fmtWon(Math.abs(adjSum))} = ${fmtWon(net)}`);
+  steps.push(`   ${adjs.length?'⑥':'④'} 부가세 10% 별도  ${fmtWon(vat)}  →  합계 ${fmtWon(net+vat)}`);
+
+  const mids = users.filter(u => u.retire).length;
+  xlsxHouse({
+    filename: `One DMS 라이선스 정산_${sanitizeFilename(round.period_label)}`
+            + `${who ? '_' + sanitizeFilename(who) : ''}.xlsx`,
+    sheetName: '라이선스 청구내역',
+    title: `One DMS 라이선스 정산 내역 — ${round.period_label}${who ? ' · ' + who : ''}`,
+    subtitle: `집계월 ${months.join(' / ')}   ·   공급가 기준, 부가세 별도`,
+    summary: [
+      { label:'청구 대상 사용자', value:`${users.length}명` },
+      { label:'과금 합계', value:`${d.user_months||0} user·월` },
+      { label:'공급가액', value:net },
+      { label:'부가세 (10%)', value:vat },
+      { label:'합계 (VAT 포함)', value:net+vat, color:XS.OK },
+    ],
+    steps,
+    columns, rows,
+    totals: { name:'합계', mon: d.user_months||0, amt: base },
+    notes: [
+      `· 「금액 (참고)」 는 1인당 환산액이라 반올림 때문에 합이 ${fmtWon(base)} 과 몇 원 다를 수 있습니다.`,
+      '  실제 청구액은 user·월 합계에 단가를 한 번 곱해 계산합니다.',
+      ...(mids ? [`· 분기 중 퇴사·휴직 ${mids}명이 포함되어 있습니다. 계약상 분기 중 퇴사자도 그 분기 비용은 전액 과금됩니다.`,
+                  '  다만 분기 마지막날 18:00 이전에 퇴사 처리가 완료되어야 다음 분기에 과금되지 않습니다.'] : []),
+      '· 이의가 있으시면 정산포털에서 해당 인원을 체크하고 사유·비고를 적어 [이의 제출] 을 눌러주십시오.',
+    ],
+  });
 }
+
 
 /* ================================================================
    Engine Oil 3V — 바우처 3종 생성 (3단계)
@@ -4787,7 +5308,7 @@ async function renderAdminUploadSection(round, type, claims){
         const detail = { ...(cur.detail || {}) };
         if(file){
           hint.textContent = `파일 업로드 중... (${saved+1})`;
-          const path = `${tr.dataset.retailerId}/${round.id}/admin-${Date.now()}-${sanitizeFilename(file.name)}`;
+          const path = `${tr.dataset.retailerId}/${round.id}/admin-${Date.now()}-${storageSafeName(file.name)}`;
           const { error: upErr } = await sb.storage.from('settlements').upload(path, file, { upsert:true });
           if(upErr){ failed++; console.warn('산정파일 업로드 실패', upErr.message); continue; }
           detail.admin_file_path = path;
@@ -4912,7 +5433,7 @@ async function renderAdminUploadRetailerCard(listEl, round, items){
       reviseBtn.disabled = true;
       let filePath = claim.file_path || null;
       if(file){
-        const path = `${myProfile.retailer_id}/${round.id}/revised-${Date.now()}-${sanitizeFilename(file.name)}`;
+        const path = `${myProfile.retailer_id}/${round.id}/revised-${Date.now()}-${storageSafeName(file.name)}`;
         const { error: upErr } = await sb.storage.from('settlements').upload(path, file, { upsert:true });
         if(upErr){ alert('파일 업로드 실패: ' + upErr.message); reviseBtn.disabled = false; return; }
         filePath = path;
@@ -5759,6 +6280,743 @@ function appendDueEditor(actions, round, type){
   });
 }
 
+/* ================================================================
+   내려받는 엑셀의 하우스 서식
+     매니저 지시(2026-10-19): 앞으로 포털에서 나가는 모든 파일은 이 꼴로.
+     제목 → 부제 → 요약칸 → (산출 과정) → 표 → 합계.
+     숫자는 천 단위 구분, 머리글은 차콜 바탕에 흰 글씨, 합계는 회색 바탕.
+   ================================================================ */
+const XS = {
+  INK:'FF1A1A1A', MUTED:'FF6E7375', CHAR:'FF3D4448', PANEL:'FFF4F5F5',
+  LINE:'FFE3E5E6', WARN:'FFFDF3EC', DANGER:'FFC0392B', OK:'FF2F7D52',
+  KO:'맑은 고딕',
+};
+const xsBorder = () => ({ top:{style:'thin',color:{rgb:XS.LINE}}, bottom:{style:'thin',color:{rgb:XS.LINE}},
+                          left:{style:'thin',color:{rgb:XS.LINE}}, right:{style:'thin',color:{rgb:XS.LINE}} });
+const xsCell = (v, st) => ({ v: (v === null || v === undefined) ? '' : v,
+                             t: typeof v === 'number' ? 'n' : 's', s: st });
+
+/* columns: [{key, label, w, type:'num'|'date'|'text', align}] */
+function xlsxHouse({ filename, sheetName, title, subtitle, summary, steps, columns, rows, totals, notes }){
+  const aoa = [];        // 값
+  const sty = [];        // 같은 좌표의 서식
+  const push = (vals, styles) => { aoa.push(vals); sty.push(styles || []); };
+  const W = columns.length;
+  const blank = () => new Array(W).fill('');
+
+  push([title, ...new Array(W-1).fill('')],
+       [{ font:{ name:XS.KO, sz:14, bold:true, color:{rgb:XS.INK} } }]);
+  if(subtitle) push([subtitle, ...new Array(W-1).fill('')],
+       [{ font:{ name:XS.KO, sz:9, color:{rgb:XS.MUTED} } }]);
+  push(blank());
+
+  if(summary && summary.length){
+    push(summary.map(x => x.label).concat(new Array(Math.max(0, W-summary.length)).fill('')),
+         summary.map(() => ({ font:{ name:XS.KO, sz:9.5, bold:true, color:{rgb:'FFFFFFFF'} },
+                              fill:{ fgColor:{rgb:XS.CHAR} }, alignment:{horizontal:'center'}, border:xsBorder() })));
+    push(summary.map(x => x.value).concat(new Array(Math.max(0, W-summary.length)).fill('')),
+         summary.map(x => ({ font:{ name:XS.KO, sz:12, bold:true,
+                                    color:{rgb: x.color || XS.INK} },
+                             alignment:{horizontal:'center'}, border:xsBorder(),
+                             numFmt: typeof x.value === 'number' ? '#,##0' : undefined })));
+    push(blank());
+  }
+  (steps || []).forEach(t => push([t, ...new Array(W-1).fill('')],
+    [{ font:{ name:XS.KO, sz:9.5, color: t.startsWith('■') ? {rgb:XS.INK} : {rgb:XS.MUTED},
+              bold: t.startsWith('■') } }]));
+  if(steps && steps.length) push(blank());
+
+  const headRow = aoa.length;
+  push(columns.map(c => c.label),
+       columns.map(() => ({ font:{ name:XS.KO, sz:9.5, bold:true, color:{rgb:'FFFFFFFF'} },
+                            fill:{ fgColor:{rgb:XS.CHAR} }, alignment:{horizontal:'center', wrapText:true},
+                            border:xsBorder() })));
+  // 칸마다 서식 객체를 만들면 파일이 몇 배로 불어난다. 같은 모양은 하나를 돌려쓰고,
+  // 행이 아주 많으면(전사 다운로드 등) 테두리를 빼 가볍게 만든다. 2026-10-19 실측.
+  const LIGHT = rows.length > 4000;
+  const plain = {};
+  const styleFor = (c, red) => {
+    const key = c.key + '|' + (c.align || '') + '|' + (c.type || '') + '|' + (red ? 1 : 0);
+    if(plain[key]) return plain[key];
+    return plain[key] = {
+      font:{ name:XS.KO, sz:9.5, color:{ rgb: red ? XS.DANGER : XS.INK }, bold: !!red },
+      alignment:{ horizontal: c.align || (c.type === 'num' ? 'right' : 'left'), vertical:'center' },
+      numFmt: c.type === 'num' ? '#,##0' : undefined,
+      border: LIGHT ? undefined : xsBorder() };
+  };
+  rows.forEach(r => {
+    const red = r.__red || [];
+    push(columns.map(c => r[c.key] === undefined || r[c.key] === null ? '' : r[c.key]),
+         columns.map(c => styleFor(c, red.includes(c.key))));
+  });
+  if(totals){
+    push(columns.map(c => totals[c.key] === undefined ? '' : totals[c.key]),
+         columns.map(c => ({ font:{ name:XS.KO, sz:9.5, bold:true, color:{rgb:XS.INK} },
+                             fill:{ fgColor:{rgb:XS.PANEL} },
+                             alignment:{ horizontal: c.align || (c.type === 'num' ? 'right' : 'left') },
+                             numFmt: c.type === 'num' ? '#,##0' : undefined,
+                             border: xsBorder() })));
+  }
+  if(notes && notes.length){
+    push(blank());
+    notes.forEach(t => push([t, ...new Array(W-1).fill('')],
+      [{ font:{ name:XS.KO, sz:9, color:{rgb:XS.MUTED} } }]));
+  }
+
+  // AOA → 시트 (서식을 같이 입힌다)
+  const ws = {};
+  const range = { s:{r:0,c:0}, e:{r:aoa.length-1, c:W-1} };
+  aoa.forEach((row, R) => row.forEach((v, C) => {
+    const st = (sty[R] || [])[C];
+    const cell = xsCell(v, st);
+    if(st && st.numFmt && typeof v === 'number') cell.z = st.numFmt;
+    if(cell.v === '' && !st) return;
+    ws[XLSX.utils.encode_cell({r:R, c:C})] = cell;
+  }));
+  ws['!ref'] = XLSX.utils.encode_range(range);
+  ws['!cols'] = columns.map(c => ({ wch: c.w || 14 }));
+  ws['!rows'] = aoa.map((_, R) => R === 0 ? { hpt: 22 } : (R === headRow ? { hpt: 20 } : {}));
+  ws['!autofilter'] = { ref: XLSX.utils.encode_range(
+      { s:{r:headRow,c:0}, e:{r: headRow + rows.length, c: W-1} }) };
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, sheetName || 'Sheet1');
+  XLSX.writeFile(wb, filename);
+}
+
+/* ================================================================
+   Pick up & Delivery — 건별 검토 결과
+     매니저가 차란차 전체 리스트에 7개 항목(주문자명·연락처·고객명·차량번호·
+     차량모델·RO/예약번호·차대번호) O/X 와 전체판정·사유를 적은 것을 그대로 담아,
+     리테일러가 "원 청구 얼마 / 뭐가 걸렸나 / 그래서 정산 얼마" 를 보게 한다.
+   ================================================================ */
+const PND_FIELDS = ['주문자명','주문자연락처','고객명','차량번호','차량모델','RO/예약번호','차대번호'];
+
+async function pndLoad(roundId, retailerId){
+  const out = [];
+  for(let from = 0; ; from += 1000){
+    // ⚠ range() 로 쪽을 나눠 받을 땐 정렬 키가 '유일' 해야 한다.
+    //   verdict+svc_date 처럼 중복되는 키로만 정렬하면 쪽 경계에서 같은 행이
+    //   두 번 오거나 빠진다 (실측: 합계가 26,000원 어긋남). id 로 못을 박는다.
+    let q = sb.from('pnd_lines').select('*').eq('round_id', roundId)
+             .order('verdict').order('svc_date').order('id').range(from, from + 999);
+    if(retailerId) q = q.eq('retailer_id', retailerId);
+    const { data, error } = await q;
+    if(error) throw error;
+    out.push(...(data || []));
+    if(!data || data.length < 1000) break;
+  }
+  return out;
+}
+
+/* JLRK 부담이 0원인 건은 Retailer 100% 부담이라 정합성을 볼 이유가 없다.
+   (N634 등 캠페인·기타 Retailer100% 유형) — 검토 대상에서 빼고 건수만 따로 알린다.
+   2026-10-19 매니저 지시. 금액에는 영향이 없다(어차피 0원). */
+const pndBillable = l => Number(l.claim_jlrk || 0) > 0;
+
+function pndSum(lines){
+  const s = { n: 0, claimed: 0, approved: 0, ng: 0, cut: 0, skipped: 0 };
+  lines.forEach(l => {
+    const a = Number(l.claim_jlrk || 0);
+    if(!pndBillable(l)){ s.skipped++; return; }
+    s.n++; s.claimed += a;
+    if(l.verdict === 'O') s.approved += a; else { s.ng++; s.cut += a; }
+  });
+  return s;
+}
+
+function pndCards(s){
+  const box = (label, val, sub, color) => `
+    <div style="flex:1; min-width:150px; background:var(--surface); border:1px solid var(--surface3);
+         border-radius:8px; padding:13px 15px;">
+      <div style="font-size:11.5px; color:var(--muted,#7a8699);">${label}</div>
+      <div style="font-size:20px; font-weight:700; margin-top:3px; ${color||''}">${val}</div>
+      <div style="font-size:11.5px; color:var(--muted,#7a8699);">${sub}</div></div>`;
+  return `<div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px;">
+    ${box('리테일러 원 청구', fmtWon(s.claimed), `${s.n.toLocaleString()}건`)}
+    ${box('검증 제외', fmtWon(s.cut), `${s.ng}건`, 'color:var(--danger,#c0392b);')}
+    ${box('이번 정산 금액', fmtWon(s.approved), `${(s.n - s.ng).toLocaleString()}건 · 공급가`, 'color:var(--accent);')}
+  </div>
+  ${s.skipped ? `<div class="hint" style="margin:-4px 0 12px;">
+      JLRK 부담이 없는 Retailer 100% 건 <b>${s.skipped.toLocaleString()}건</b>은 정합성 검토 대상에서 제외했습니다
+      (N634 등 캠페인·기타). 청구액이 0원이라 정산 금액에는 영향이 없습니다.</div>` : ''}`;
+}
+
+/* 항목별 적합 여부 — 7개 항목 각각 몇 건이 걸렸는지 */
+function pndFieldTable(all){
+  const lines = all.filter(pndBillable);
+  const cnt = {}; PND_FIELDS.forEach(f => cnt[f] = 0);
+  lines.forEach(l => PND_FIELDS.forEach(f => { if((l.checks||{})[f] === 'X') cnt[f]++; }));
+  const typeNg = lines.filter(l => l.verdict === 'X'
+    && !PND_FIELDS.some(f => (l.checks||{})[f] === 'X')).length;
+  const row = (name, n, sub) => `<tr>
+      <td>${name}${sub?`<div class="hint">${sub}</div>`:''}</td>
+      <td style="text-align:right; ${n?'color:var(--danger,#c0392b); font-weight:700;':''}">${n || '—'}</td>
+      <td style="text-align:center;">${n
+        ? '<span class="badge badge-ar">오류</span>'
+        : '<span class="badge badge-ap">적합</span>'}</td></tr>`;
+  return `<div style="border:1px solid var(--surface3); border-radius:6px; overflow:hidden; margin-bottom:12px;">
+    <div style="padding:9px 12px; background:var(--surface2); border-bottom:1px solid var(--surface3); font-weight:600;">
+      검토 항목별 결과 <span class="hint" style="margin-left:6px;">검토 대상 ${lines.length.toLocaleString()}건</span></div>
+    <div style="overflow-x:auto;"><table style="min-width:420px;"><thead><tr>
+      <th>검토 항목</th><th style="text-align:right;">오류</th><th style="text-align:center;">결과</th></tr></thead><tbody>
+      ${PND_FIELDS.map(f => row(f, cnt[f])).join('')}
+      ${row('청구유형 적정성', typeNg, 'JLRK 부담 비율이 맞게 마감되었는지')}
+    </tbody></table></div></div>`;
+}
+
+/* 지점별 */
+function pndByWorkshop(all, wsName){
+  const lines = all.filter(pndBillable);
+  const g = new Map();
+  lines.forEach(l => {
+    const k = l.workshop_id || l.branch_label;
+    if(!g.has(k)) g.set(k, { label: wsName(l), n:0, claimed:0, approved:0, ng:0 });
+    const x = g.get(k); const a = Number(l.claim_jlrk||0);
+    x.n++; x.claimed += a;
+    if(l.verdict === 'O') x.approved += a; else x.ng++;
+  });
+  const rows = [...g.values()].sort((a,b) => a.label.localeCompare(b.label));
+  const t = rows.reduce((s,r) => ({n:s.n+r.n, claimed:s.claimed+r.claimed,
+                                   approved:s.approved+r.approved, ng:s.ng+r.ng}),
+                        {n:0,claimed:0,approved:0,ng:0});
+  return `<div style="border:1px solid var(--surface3); border-radius:6px; overflow:hidden; margin-bottom:12px;">
+    <div style="padding:9px 12px; background:var(--surface2); border-bottom:1px solid var(--surface3); font-weight:600;">지점별</div>
+    <div style="overflow-x:auto;"><table style="min-width:620px;"><thead><tr>
+      <th>지점</th><th style="text-align:right;">건수</th><th style="text-align:right;">원 청구</th>
+      <th style="text-align:right;">제외</th><th style="text-align:right;">정산 금액</th></tr></thead><tbody>
+      ${rows.map(r => `<tr><td>${r.label}</td>
+        <td style="text-align:right;">${r.n.toLocaleString()}</td>
+        <td style="text-align:right;">${fmtWon(r.claimed)}</td>
+        <td style="text-align:right; ${r.ng?'color:var(--danger,#c0392b);':''}">${r.ng ? r.ng+'건 · '+fmtWon(r.claimed-r.approved) : '—'}</td>
+        <td style="text-align:right; font-weight:600;">${fmtWon(r.approved)}</td></tr>`).join('')}
+      </tbody><tfoot><tr style="background:var(--surface2); font-weight:700;">
+        <td>합계</td><td style="text-align:right;">${t.n.toLocaleString()}</td>
+        <td style="text-align:right;">${fmtWon(t.claimed)}</td>
+        <td style="text-align:right; color:var(--danger,#c0392b);">${t.ng}건 · ${fmtWon(t.claimed-t.approved)}</td>
+        <td style="text-align:right;">${fmtWon(t.approved)}</td></tr></tfoot></table></div></div>`;
+}
+
+/* 제외된 건 상세 — 어느 항목이 걸렸는지 그 줄에서 보이게 */
+function pndNgTable(all, wsName){
+  const ng = all.filter(l => pndBillable(l) && l.verdict === 'X');
+  if(!ng.length) return `<div class="info-card" style="margin-bottom:12px;">
+    <b style="color:var(--accent);">✓ 제외된 건이 없습니다.</b>
+    <div class="hint" style="margin-top:4px;">청구하신 전 건이 검토를 통과했습니다.</div></div>`;
+  const RED = 'color:var(--danger,#c0392b); font-weight:700;';
+  // 항목명 → 그 항목에 리테일러가 적어 보낸 값
+  const valOf = (l, f) => ({
+    '주문자명': l.orderer, '주문자연락처': l.orderer_tel, '고객명': l.customer,
+    '차량번호': l.car_no, '차량모델': l.car_model, 'RO/예약번호': l.ro_no, '차대번호': l.vin
+  })[f] || '';
+  const esc = v => String(v ?? '').replace(/[<>]/g, '');
+  return `<div style="border:1px solid #f0c98a; border-radius:6px; overflow:hidden; margin-bottom:12px;">
+    <div style="padding:9px 12px; background:#fff4e5; border-bottom:1px solid #f0c98a; font-weight:600;">
+      정산에서 제외된 건 ${ng.length}건 · ${fmtWon(ng.reduce((a,l)=>a+Number(l.claim_jlrk||0),0))}
+      <span class="hint" style="margin-left:6px;">빨간 글씨가 잘못 적힌 값입니다</span></div>
+    <div style="overflow-x:auto; max-height:480px; overflow-y:auto;"><table style="min-width:1140px;"><thead><tr>
+      <th>지점</th><th>탁송일</th><th>구분</th><th>고객</th><th>차량번호</th><th>차량모델</th>
+      <th>RO/예약</th><th>차대번호</th><th>청구유형 (마감)</th>
+      <th style="text-align:right;">금액</th><th>오류 항목</th><th>사유</th>
+    </tr></thead><tbody>
+    ${ng.map(l => {
+      const c = l.checks || {};
+      const bad = PND_FIELDS.filter(f => c[f] === 'X');
+      const cell = (f, v, extra) => `<td style="${c[f]==='X'?RED:(extra||'')}">${esc(v)}</td>`;
+      return `<tr>
+        <td style="white-space:nowrap;">${esc(wsName(l))}</td>
+        <td class="muted" style="white-space:nowrap;">${esc(l.svc_date)}</td>
+        <td>${esc(l.leg)}</td>
+        ${cell('고객명', l.customer)}
+        ${cell('차량번호', l.car_no)}
+        ${cell('차량모델', l.car_model)}
+        ${cell('RO/예약번호', l.ro_no, 'color:var(--muted,#7a8699);')}
+        ${cell('차대번호', l.vin, 'color:var(--muted,#7a8699);')}
+        <td style="${bad.length ? 'color:var(--muted,#7a8699);' : RED}">${esc(l.svc_type)}</td>
+        <td style="text-align:right; font-weight:600;">${fmtWon(l.claim_jlrk)}</td>
+        <td style="white-space:nowrap;">${bad.length
+          ? bad.map(b => `<span class="badge badge-ar" style="margin:1px;">${b}</span>`).join('')
+          : '<span class="badge badge-warn">청구유형</span>'}</td>
+        <td style="max-width:300px; ${RED}">${esc(l.note)}</td></tr>`;
+    }).join('')}</tbody></table></div></div>`;
+}
+
+/* ── P&D 원본(차란차 전체리스트 + 매니저 검토본) 업로드 ──────────────
+   매니저가 엑셀에 적은 7개 항목 O/X·전체판정·코멘트를 그대로 읽어 적재한다.
+   컬럼 위치가 아니라 '머리글 이름' 으로 찾는다 — 열이 밀려도 깨지지 않게. */
+const PND_WS = {
+  'AJU한남 AS':'AJ-HN','AJU인천남동 AS':'AJ-ICND','AJU성산 AS':'AJ-SS',
+  'CHL대치 AS':'CH-DC','CHL성수 AS':'CH-SS','CHL수원 AS':'CH-SW','CHL천안 AS':'CH-SW',
+  'EN대구 AS':'EN-DG','HS부산센텀 AS':'HS-BC','HS울산 AS':'HS-US','HY부산 AS':'HY',
+  'JL대전 AS':'JL','KCC분당 AS':'KCC-BD','KCC강동 AS':'KCC-GD','KCC일산 AS':'KCC-IS',
+  'KCC제주자일 AS':'KCC-JJ','KCC서초양재 AS':'KCC-SC','KCC성남 AS':'KCC-SN',
+  'KCC원주 AS':'KCC-WJ','WB광주 AS':'WB-GJ','WB전주 AS':'WB-JJ',
+};
+
+function pndParse(buf){
+  const wb = XLSX.read(buf, { type:'array', cellDates:true });
+  const sh = wb.SheetNames.find(n => /전체리스트|JLRK/i.test(n)) || wb.SheetNames[0];
+  const rows = XLSX.utils.sheet_to_json(wb.Sheets[sh], { header:1, defval:'', raw:false });
+  // 머리글 행 찾기 — '지점' 과 '탁송일자' 가 같이 있는 줄
+  let h = -1;
+  for(let i = 0; i < Math.min(rows.length, 12); i++){
+    const n = rows[i].map(normalizeLabel);
+    if(n.includes('지점') && n.some(x => x.startsWith('탁송일'))){ h = i; break; }
+  }
+  if(h === -1) throw new Error("머리글(지점·탁송일자)을 찾지 못했습니다. 원본 시트인지 확인해주세요.");
+  const H = rows[h].map(normalizeLabel);
+  //  같은 이름이 두 번 나오는 묶음(리테일러 제출 7개 / JLRK 확인 7개) — 앞/뒤를 나눠 잡는다
+  const at = (name, nth) => { let k = -1;
+    for(let i = 0; i < H.length; i++) if(H[i] === normalizeLabel(name)){ k++; if(k === nth) return i; }
+    return -1; };
+  const one = (...names) => { for(const nm of names){ const i = at(nm, 0); if(i !== -1) return i; } return -1; };
+  const CHK = [['주문자명','주문자명'], ['주문자연락처','주문자 연락처'], ['고객명','고객명'],
+               ['차량번호','차량 번호'], ['차량모델','차량 모델'],
+               ['RO/예약번호','RO# / 예약#'], ['차대번호','차대번호']];
+  const col = {
+    no: one('No'), date: one('탁송일자'), ws: one('지점'),
+    verdict: one('데이터 검증'), note: one('JLRK Comment'),
+    svc: one('서비스 유형'), leg: one('픽업&딜리버리'),
+    ctype: one('청구유형_JLRK용'), brand: one('Brand_JLRK용'), pcoc: one('PC/OC 여부'),
+    origin: one('출발지'), dest: one('도착지'), dist: one('주행거리'),
+    jlrk: one('JLRK청구'), own: one('리테일러부담'), total: one('청구 금액'),
+    fuel: one('주유비'), memo: one('특이사항'), etc: one('비고'),
+    dmsbk: one('DMS예약번호'), dmsuse: one('DMS사용목적'),
+  };
+  // 제출값(1번째) / 검증 O·X(2번째)
+  const sub = {}, chk = {};
+  CHK.forEach(([key, label]) => {
+    sub[key] = at(label, 0) !== -1 ? at(label, 0) : at(key, 0);
+    const second = at(label, 1) !== -1 ? at(label, 1) : at(key, 1);
+    chk[key] = second !== -1 ? second : at(key, 1);
+  });
+  const missing = Object.entries({ 지점:col.ws, '데이터 검증':col.verdict, JLRK청구:col.jlrk })
+    .filter(([, v]) => v === -1).map(([k]) => k);
+  if(missing.length) throw new Error('필수 열을 찾지 못했습니다: ' + missing.join(', '));
+
+  const S = v => String(v ?? '').trim();
+  const N = v => { const n = Number(S(v).replace(/,/g, '')); return isNaN(n) ? 0 : n; };
+  const D = v => { const t = S(v); if(!t) return null;
+    const m = t.match(/(\d{4})[-./](\d{1,2})[-./](\d{1,2})/);
+    return m ? `${m[1]}-${String(m[2]).padStart(2,'0')}-${String(m[3]).padStart(2,'0')}` : null; };
+
+  const out = [], unmatched = new Map();
+  for(let i = h + 1; i < rows.length; i++){
+    const r = rows[i];
+    const label = S(r[col.ws]);
+    if(!label) continue;
+    const code = PND_WS[label];
+    if(!code){ unmatched.set(label, (unmatched.get(label)||0) + 1); continue; }
+    const checks = {};
+    CHK.forEach(([key]) => { checks[key] = S(r[chk[key]]).toUpperCase() === 'X' ? 'X' : 'O'; });
+    out.push({
+      code, src_row: i + 1, branch_label: label,
+      svc_date: D(r[col.date]), leg: S(r[col.leg]), svc_type: S(r[col.svc]),
+      charge_type: S(r[col.ctype]), brand: S(r[col.brand]),
+      orderer: S(r[sub['주문자명']]), orderer_tel: S(r[sub['주문자연락처']]),
+      customer: S(r[sub['고객명']]), car_no: S(r[sub['차량번호']]),
+      car_model: S(r[sub['차량모델']]), ro_no: S(r[sub['RO/예약번호']]), vin: S(r[sub['차대번호']]),
+      origin: S(r[col.origin]), dest: S(r[col.dest]), distance: N(r[col.dist]),
+      claim_jlrk: N(r[col.jlrk]), retailer_own: N(r[col.own]), total_amt: N(r[col.total]),
+      checks, verdict: S(r[col.verdict]).toUpperCase() === 'X' ? 'X' : 'O',
+      note: S(r[col.note]),
+      extra: { 'PC/OC 여부':S(r[col.pcoc]), '주유비':S(r[col.fuel]), '특이사항':S(r[col.memo]),
+               '비고':S(r[col.etc]), 'DMS예약번호':S(r[col.dmsbk]), 'DMS사용목적':S(r[col.dmsuse]) },
+    });
+  }
+  return { rows: out, unmatched };
+}
+
+async function pndUpload(round, file, hintEl){
+  const say = t => { if(hintEl) hintEl.textContent = t; };
+  say('파일을 읽는 중...');
+  const { rows, unmatched } = pndParse(await file.arrayBuffer());
+  if(!rows.length) throw new Error('데이터 행을 찾지 못했습니다.');
+  if(unmatched.size){
+    const list = [...unmatched.entries()].map(([k,v]) => `${k} (${v}건)`).join(', ');
+    if(!confirm(`포털 지점과 매칭되지 않는 표기가 있습니다:\n${list}\n\n`
+              + `이 건들은 제외하고 ${rows.length.toLocaleString()}건만 올립니다. 계속할까요?`)) return null;
+  }
+  const { data: wss, error: wErr } = await sb.from('workshops').select('id, code, retailer_id');
+  if(wErr) throw wErr;
+  const wmap = new Map((wss||[]).map(w => [w.code, w]));
+  const bad = [...new Set(rows.map(r => r.code))].filter(c => !wmap.has(c));
+  if(bad.length) throw new Error('포털에 없는 지점 코드: ' + bad.join(', '));
+
+  say('기존 내역을 지우는 중...');
+  const { error: dErr } = await sb.from('pnd_lines').delete().eq('round_id', round.id);
+  if(dErr) throw dErr;
+
+  const CH = 500;
+  for(let i = 0; i < rows.length; i += CH){
+    say(`적재 중... ${Math.min(i+CH, rows.length).toLocaleString()} / ${rows.length.toLocaleString()}`);
+    const chunk = rows.slice(i, i + CH).map(r => {
+      const w = wmap.get(r.code);
+      const { code, ...rest } = r;
+      return { ...rest, round_id: round.id, retailer_id: w.retailer_id, workshop_id: w.id };
+    });
+    const { error } = await sb.from('pnd_lines').insert(chunk);
+    if(error) throw error;
+  }
+
+  // 지점별 청구행 — 청구액은 원 청구, 확정액은 검증 통과분
+  say('지점별 청구행을 만드는 중...');
+  const agg = new Map();
+  rows.forEach(r => {
+    const w = wmap.get(r.code);
+    const k = w.id;
+    if(!agg.has(k)) agg.set(k, { w, n:0, claimed:0, approved:0, ng:0 });
+    const a = agg.get(k), amt = Number(r.claim_jlrk||0);
+    a.n++; a.claimed += amt;
+    if(r.verdict === 'O') a.approved += amt; else a.ng++;
+  });
+  await sb.from('claims').delete().eq('round_id', round.id);
+  const claims = [...agg.values()].map(a => ({
+    round_id: round.id, retailer_id: a.w.retailer_id, workshop_id: a.w.id,
+    status: 'SUBMITTED', claimed_amount: Math.round(a.claimed), approved_amount: Math.round(a.approved),
+    submitted_at: new Date().toISOString(),
+    detail: { preset:'PND_REVIEW', lines:a.n, ng:a.ng,
+              claimed:Math.round(a.claimed), approved:Math.round(a.approved),
+              cut:Math.round(a.claimed - a.approved) },
+  }));
+  const { error: cErr } = await sb.from('claims').insert(claims);
+  if(cErr) throw cErr;
+
+  const tot = rows.reduce((s,r) => s + Number(r.claim_jlrk||0), 0);
+  const ok  = rows.filter(r => r.verdict === 'O').reduce((s,r) => s + Number(r.claim_jlrk||0), 0);
+  await sb.from('rounds').update({ source_summary: {
+    preset:'PND_REVIEW', rows: rows.length, loaded_at: new Date().toISOString(),
+    claimed: Math.round(tot), approved: Math.round(ok), file: file.name } }).eq('id', round.id);
+  await logAudit('PND_UPLOAD','ROUND',round.id,
+    { label:`${round.period_label} · ${rows.length}행`, claimed: Math.round(tot) });
+  return { n: rows.length, claimed: tot, approved: ok, workshops: agg.size };
+}
+
+async function renderPndRoundDetail(round, type){
+  document.getElementById('claimsTable').style.display = 'none';
+  document.getElementById('rd_title').textContent = `${type.name} · ${round.period_label}`;
+  document.getElementById('rd_status').innerHTML =
+    `<span class="badge ${round.status==='DRAFT'?'badge-off':'badge-ap'}">${ROUND_STATUS_LABEL[round.status]||round.status}</span>`;
+  document.getElementById('rd_meta').textContent = 'AP · 지점단위 · 건별 검토 결과';
+  document.getElementById('rd_due').textContent = '—';
+  const host = document.getElementById('reviewSection');
+  host.innerHTML = '<div class="info-card"><div class="hint">검토 결과를 불러오는 중...</div></div>';
+
+  const [lines, { data: wss }] = await Promise.all([
+    pndLoad(round.id, null),
+    sb.from('workshops').select('id, code, name, retailers(code, name)')
+  ]);
+  const upBox = (label) => `
+    <div class="info-card" style="margin-bottom:12px;">
+      <div class="field" style="margin:0; max-width:620px;">
+        <label>${label}</label>
+        <input type="file" id="pndFile" accept=".xlsx,.xls">
+        <div class="hint pnd-up-hint" style="margin-top:6px;">차란차 전체리스트에 검토 결과(7개 항목 O/X · 데이터 검증 · JLRK Comment)를
+          적은 원본을 그대로 올리세요. 열 위치가 달라도 머리글 이름으로 찾습니다.</div>
+      </div></div>`;
+  if(!lines.length){
+    host.innerHTML = upBox('검토본 업로드');
+    document.getElementById('pndFile').onchange = async (e) => {
+      const f = e.target.files[0]; if(!f) return;
+      const hint = host.querySelector('.pnd-up-hint');
+      try{
+        const r = await pndUpload(round, f, hint);
+        if(r){ alert(`${r.n.toLocaleString()}건 적재 완료\n원 청구 ${fmtWon(r.claimed)} · 정산 ${fmtWon(r.approved)}`);
+               await renderRoundDetail(); }
+      }catch(err){ hint.innerHTML = `<span style="color:var(--danger);">${err.message}</span>`; }
+    };
+    return;
+  }
+  const wmap = new Map((wss||[]).map(w => [w.id, w]));
+  const wsName = l => { const w = wmap.get(l.workshop_id);
+    return w ? `${w.retailers?.code||''} ${w.name}` : (l.branch_label||'—'); };
+  const s = pndSum(lines);
+
+  host.innerHTML = pndCards(s)
+    + pndByWorkshop(lines, wsName)
+    + pndFieldTable(lines)
+    + pndNgTable(lines, wsName)
+    + `<div class="info-card">
+         <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+           <button class="btn btn-sm btn-ghost" id="pndXlsx">엑셀 내려받기</button>
+           ${round.status === 'DRAFT' ? '<button class="btn btn-sm btn-ghost" id="pndReload">검토본 다시 올리기</button>' : ''}
+           ${round.status === 'DRAFT'
+             ? `<button class="btn btn-sm" id="pndPublish">리테일러에 검토 결과 공지</button>`
+             : `<span class="badge badge-ap">공지됨</span>`}
+           <span class="hint" style="margin-left:auto;">공지하면 각 리테일러가 자기 지점 건만 봅니다.
+             메일은 발송 대기함에 쌓이고, 발송 버튼을 눌러야 나갑니다.</span>
+         </div></div>`;
+
+  document.getElementById('pndXlsx').onclick = () => pndExport(lines, wsName, round);
+  const rl = document.getElementById('pndReload');
+  if(rl) rl.onclick = () => {
+    host.insertAdjacentHTML('afterbegin', upBox('검토본 다시 올리기 — 기존 내역을 지우고 새로 적재합니다'));
+    document.getElementById('pndFile').onchange = async (e) => {
+      const f = e.target.files[0]; if(!f) return;
+      const hint = host.querySelector('.pnd-up-hint');
+      try{
+        const r = await pndUpload(round, f, hint);
+        if(r){ alert(`${r.n.toLocaleString()}건 적재 완료\n원 청구 ${fmtWon(r.claimed)} · 정산 ${fmtWon(r.approved)}`);
+               await renderRoundDetail(); }
+      }catch(err){ hint.innerHTML = `<span style="color:var(--danger);">${err.message}</span>`; }
+    };
+  };
+  const pb = document.getElementById('pndPublish');
+  if(pb) pb.onclick = () => pndPublish(round, type, lines, wmap);
+}
+
+async function pndPublish(round, type, lines, wmap){
+  if(!confirm(`${round.period_label} Pick up & Delivery 검토 결과를 리테일러에 공지할까요?\n\n`
+            + `공지하면 각 리테일러가 자기 건을 볼 수 있습니다.\n메일은 발송 대기함에만 쌓입니다.`)) return;
+  const btn = document.getElementById('pndPublish');
+  btn.disabled = true; btn.textContent = '공지 처리 중...';
+  try{
+    const { error } = await sb.from('rounds').update({ status:'CONFIRMED' }).eq('id', round.id);
+    if(error) throw error;
+    const byRt = new Map();
+    lines.forEach(l => {
+      if(!byRt.has(l.retailer_id)) byRt.set(l.retailer_id, []);
+      byRt.get(l.retailer_id).push(l);
+    });
+    const { data: rts } = await sb.from('retailers').select('id, code, name, email')
+      .in('id', [...byRt.keys()]);
+    for(const rt of (rts||[])){
+      const s = pndSum(byRt.get(rt.id) || []);
+      const to = splitEmails(rt.email).filter(e => !/placeholder@example\.com/i.test(e));
+      if(!to.length) continue;
+      await sendEmail(to, `[JLRK 정산] ${type.name} · ${round.period_label} 검토 결과 안내`,
+        emailShell('Pick up & Delivery 검토 결과', `
+          <p>${rt.name} 담당자님,</p>
+          <p>${round.period_label} Pick up &amp; Delivery 청구 건에 대한 JLR Korea 검토가 완료되었습니다.</p>
+          <table style="${EMAIL_STYLE}border-collapse:collapse;">
+            <tr><td style="padding:4px 12px 4px 0;color:#666;">원 청구 금액</td><td><b>${fmtWon(s.claimed)}</b> (${s.n.toLocaleString()}건)</td></tr>
+            <tr><td style="padding:4px 12px 4px 0;color:#666;">검증 제외</td><td><b style="color:#c0392b;">${fmtWon(s.cut)}</b> (${s.ng}건)</td></tr>
+            <tr><td style="padding:4px 12px 4px 0;color:#666;">정산 금액</td><td><b>${fmtWon(s.approved)}</b> (공급가)</td></tr>
+          </table>
+          <p style="margin-top:16px;">제외된 건의 사유와 항목별 검토 결과는 정산포털에서 확인하실 수 있습니다.</p>`),
+        { kind:'PND_PUBLISH', retailer: rt.code, period: round.period_label });
+    }
+    await logAudit('PND_PUBLISH','ROUND',round.id,
+      {label:`${type.name} · ${round.period_label}`, retailers:(rts||[]).length});
+    await renderRoundDetail();
+  }catch(e){
+    alert('공지 실패: ' + (e.message || e));
+    btn.disabled = false; btn.textContent = '리테일러에 검토 결과 공지';
+  }
+}
+
+function pndExport(lines, wsName, round, who){
+  const s = pndSum(lines);
+  const F = PND_FIELDS;
+  const columns = [
+    { key:'no',     label:'No',            w:7,  type:'num', align:'center' },
+    { key:'ws',     label:'지점',          w:12 },
+    { key:'date',   label:'탁송일자',      w:11, align:'center' },
+    { key:'leg',    label:'픽업/딜리버리', w:11, align:'center' },
+    { key:'svc',    label:'서비스 유형',   w:26 },
+    { key:'pcoc',   label:'PC/OC 여부',    w:16 },
+    { key:'ctype',  label:'청구유형',      w:10, align:'center' },
+    { key:'brand',  label:'Brand',         w:11, align:'center' },
+    { key:'orderer',label:'주문자명',      w:11 },
+    { key:'tel',    label:'주문자 연락처', w:15 },
+    { key:'cust',   label:'고객명',        w:11 },
+    { key:'carno',  label:'차량번호',      w:12 },
+    { key:'model',  label:'차량모델',      w:24 },
+    { key:'rono',   label:'RO#/예약#',     w:16 },
+    { key:'vin',    label:'차대번호',      w:19 },
+    { key:'origin', label:'출발지',        w:24 },
+    { key:'dest',   label:'도착지',        w:24 },
+    { key:'dist',   label:'주행거리',      w:10, type:'num' },
+    { key:'jlrk',   label:'JLRK청구',      w:12, type:'num' },
+    { key:'own',    label:'리테일러부담',  w:13, type:'num' },
+    { key:'total',  label:'청구 금액',     w:12, type:'num' },
+    { key:'fuel',   label:'주유비',        w:10 },
+  ].concat(F.map(f => ({ key:'chk_'+f, label:f, w:11, align:'center' }))).concat([
+    { key:'verdict',label:'데이터 검증',   w:11, align:'center' },
+    { key:'note',   label:'JLRK Comment',  w:34 },
+    { key:'memo',   label:'특이사항',      w:20 },
+    { key:'etc',    label:'비고',          w:16 },
+    { key:'dmsbk',  label:'DMS예약번호',   w:16 },
+    { key:'dmsuse', label:'DMS사용목적',   w:18 },
+  ]);
+  // 항목 O/X 와, 그 항목에 해당하는 값 칸을 같이 빨갛게 한다
+  const FIELD_COL = { '고객명':'cust', '차량번호':'carno', '차량모델':'model',
+                      'RO/예약번호':'rono', '차대번호':'vin',
+                      '주문자명':'orderer', '주문자연락처':'tel' };
+  const rows = lines.map(l => {
+    const c = l.checks || {}, x = l.extra || {};
+    const red = [];
+    Object.keys(c).forEach(f => {
+      if(c[f] !== 'X') return;
+      red.push('chk_' + f);
+      if(FIELD_COL[f]) red.push(FIELD_COL[f]);
+    });
+    if(l.verdict === 'X'){
+      red.push('verdict', 'note');
+      // 항목 오류가 아닌 X = 청구유형(마감 유형) 이 잘못된 건 → 서비스 유형 칸을 짚어준다
+      if(!red.length || !Object.keys(c).some(f => c[f] === 'X')) red.push('svc', 'ctype');
+    }
+    const r = {
+      no: l.src_row, ws: wsName(l), date: l.svc_date || '', leg: l.leg || '',
+      svc: l.svc_type || '', pcoc: x['PC/OC 여부'] || '', ctype: l.charge_type || '',
+      brand: l.brand || '', orderer: l.orderer || '', tel: l.orderer_tel || '',
+      cust: l.customer || '', carno: l.car_no || '', model: l.car_model || '',
+      rono: l.ro_no || '', vin: l.vin || '', origin: l.origin || '', dest: l.dest || '',
+      dist: Number(l.distance || 0), jlrk: Number(l.claim_jlrk || 0),
+      own: Number(l.retailer_own || 0), total: Number(l.total_amt || 0),
+      fuel: x['주유비'] || '', verdict: l.verdict, note: l.note || '',
+      memo: x['특이사항'] || '', etc: x['비고'] || '',
+      dmsbk: x['DMS예약번호'] || '', dmsuse: x['DMS사용목적'] || '',
+      __red: red,
+    };
+    F.forEach(f => { r['chk_' + f] = c[f] || ''; });
+    return r;
+  });
+  const vat = Math.round(s.approved * 0.1);
+  const steps = [
+    '■ 금액 산출',
+    '   ① 청구 ' + s.n.toLocaleString() + '건을 JLR Korea 가 7개 항목과 청구유형으로 건별 대조',
+    '   ② 오류 ' + s.ng + '건 (' + fmtWon(s.cut) + ') 을 정산에서 제외',
+    '   ③ 나머지 ' + (s.n - s.ng).toLocaleString() + '건 = 공급가액 ' + fmtWon(s.approved),
+  ];
+  if(s.skipped) steps.push('   ※ JLRK 부담이 없는 Retailer 100% 건 ' + s.skipped.toLocaleString()
+    + '건은 검토 대상에서 제외 (청구액 0원이라 정산에 영향 없음)');
+  xlsxHouse({
+    filename: 'Pick up & Delivery 정산내역_' + sanitizeFilename(round.period_label)
+            + (who ? '_' + sanitizeFilename(who) : '') + '.xlsx',
+    sheetName: '정산내역',
+    title: 'Pick up & Delivery 정산 내역 — ' + round.period_label + (who ? ' · ' + who : ''),
+    subtitle: 'JLR Korea 검토 완료 · 금액은 공급가 기준(부가세 별도) · 빨간 글씨가 오류로 판정된 값',
+    summary: [
+      { label:'검토 대상',   value: s.n.toLocaleString() + '건' },
+      { label:'원 청구',     value: s.claimed },
+      { label:'검증 제외',   value: s.cut, color: XS.DANGER },
+      { label:'공급가액',    value: s.approved, color: XS.OK },
+      { label:'부가세 (10%)',value: vat },
+      { label:'합계',        value: s.approved + vat, color: XS.OK },
+    ],
+    steps: steps,
+    columns: columns,
+    rows: rows,
+    totals: { no:'합계', jlrk: s.claimed,
+              own: lines.reduce((a,l) => a + Number(l.retailer_own||0), 0),
+              total: lines.reduce((a,l) => a + Number(l.total_amt||0), 0) },
+    notes: [
+      '· 「데이터 검증」 이 X 인 건이 정산에서 제외된 건입니다. 사유는 JLRK Comment 를 보십시오.',
+      '· 7개 검토 항목은 리테일러 제출값과 JLR Korea 확인값을 대조한 결과입니다 (O 적합 / X 오류).',
+      '· 이견이 있으시면 정산포털에서 [이의 제출] 로 알려주십시오.',
+    ],
+  });
+}
+
+/* ---------- 리테일러 화면 — One DMS 카드와 같은 규격 ---------- */
+async function renderPndRetailerCard(listEl, round, items){
+  const uid = 'pd' + String(items[0].id).slice(0, 8);
+  const confirmed = items.every(c => c.confirmed_at);
+  const canConfirm = ['CONFIRMED','PUBLISHED','INVOICED'].includes(round.status) && !confirmed;
+  const days = items[0].submitted_at ? (Date.now() - new Date(items[0].submitted_at)) / 864e5 : 999;
+  const isNew = !confirmed && days <= 7;
+
+  const card = document.createElement('div');
+  card.className = 'claim-card';
+  card.innerHTML = `
+    <div class="claim-head" style="cursor:pointer;" data-pd-toggle="${uid}">
+      <div>
+        <div class="claim-name">
+          <span style="display:inline-block; width:18px; color:var(--muted,#7a8699);" id="${uid}-caret">＋</span>
+          ${round.settlement_types?.name||'Pick up & Delivery'} · ${round.period_label}
+          ${isNew ? '<span class="badge badge-ar" style="margin-left:8px;">NEW</span>' : ''}
+        </div>
+        <div class="claim-sub" style="margin-left:18px;">JLR Korea 검토 완료 · <span class="pd-cnt">—</span>
+          · <span class="badge badge-ap">${ROUND_STATUS_LABEL[round.status]||round.status}</span></div>
+      </div>
+      ${confirmed ? '<span class="badge badge-ap">확정완료</span>' : '<span class="badge badge-off">확인 대기</span>'}
+    </div>
+    <div class="pd-bar" style="display:flex; align-items:center; gap:18px; flex-wrap:wrap; margin:10px 0 0;
+                padding:10px 12px; background:var(--surface2); border-radius:6px;">
+      <div class="hint">불러오는 중...</div>
+    </div>
+    <div id="${uid}-body" style="display:none;"></div>`;
+  listEl.appendChild(card);
+
+  card.querySelector('[data-pd-toggle]').addEventListener('click', () => {
+    const b = document.getElementById(uid + '-body');
+    const car = document.getElementById(uid + '-caret');
+    const open = b.style.display !== 'none';
+    b.style.display = open ? 'none' : 'block';
+    car.textContent = open ? '＋' : '－';
+  });
+
+  let lines = [];
+  try{
+    lines = await pndLoad(round.id, myRetailer?.id);
+  }catch(e){
+    card.querySelector('.pd-bar').innerHTML =
+      `<div class="hint" style="color:var(--danger);">검토 결과를 불러오지 못했습니다: ${e.message}</div>`;
+    return;
+  }
+  const { data: wss } = await sb.from('workshops').select('id, code, name').eq('retailer_id', myRetailer?.id);
+  const wmap = new Map((wss||[]).map(w => [w.id, w]));
+  const wsName = l => (wmap.get(l.workshop_id)?.name) || l.branch_label || '—';
+  const s = pndSum(lines);
+  const vat = Math.round(s.approved * 0.1);
+
+  card.querySelector('.pd-cnt').textContent = `검토 ${s.n.toLocaleString()}건 · 제외 ${s.ng}건`;
+  card.querySelector('.pd-bar').innerHTML = `
+    <div><div class="hint">원 청구</div><div style="font-weight:600;">${fmtWon(s.claimed)}</div></div>
+    <div><div class="hint">검증 제외</div>
+      <div style="font-weight:600; color:var(--danger,#c0392b);">${s.cut ? '−'+fmtWon(s.cut) : fmtWon(0)}</div></div>
+    <div><div class="hint">공급가액</div><div style="font-weight:600;">${fmtWon(s.approved)}</div></div>
+    <div><div class="hint">부가세 (10%)</div><div style="font-weight:600;">${fmtWon(vat)}</div></div>
+    <div><div class="hint">합계</div>
+      <div style="font-weight:700; font-size:16px; color:var(--accent);">${fmtWon(s.approved+vat)}</div></div>
+    <div style="margin-left:auto; display:flex; gap:8px;">
+      <button class="btn btn-sm btn-ghost pd-xlsx">엑셀 다운로드</button>
+      ${canConfirm ? '<button class="btn btn-sm btn-ghost pd-dispute">이의 제출</button>' : ''}
+      ${canConfirm ? '<button class="btn btn-sm pd-confirm">정산 확정</button>' : ''}
+    </div>`;
+
+  document.getElementById(uid + '-body').innerHTML =
+      (s.skipped ? `<div class="hint" style="margin:10px 0 8px;">
+          JLRK 부담이 없는 Retailer 100% 건 <b>${s.skipped.toLocaleString()}건</b>은 정합성 검토 대상에서 제외했습니다.
+          청구액이 0원이라 정산 금액에는 영향이 없습니다.</div>` : '')
+    + (wmap.size > 1 ? pndByWorkshop(lines, wsName) : '')
+    + pndFieldTable(lines)
+    + pndNgTable(lines, wsName)
+    + `<div class="hint">· 정산 금액은 공급가 기준이며 부가세는 별도입니다.
+         <br>· 제외된 건에 이견이 있으시면 <b>[이의 제출]</b> 로 알려주십시오.</div>`;
+
+  card.querySelector('.pd-xlsx').addEventListener('click', e => {
+    e.stopPropagation(); pndExport(lines, wsName, round, myRetailer?.name);
+  });
+  const db = card.querySelector('.pd-dispute');
+  if(db) db.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const reason = prompt(`제외된 ${s.ng}건에 대한 이의 내용을 적어주세요.\n`
+      + `(해당 건의 지점·탁송일·RO번호를 같이 적어주시면 확인이 빠릅니다)`);
+    if(!reason || !reason.trim()) return;
+    db.disabled = true; db.textContent = '제출 중...';
+    const { error } = await sb.from('disputes').insert({
+      round_id: round.id, retailer_id: myRetailer?.id, status:'RAISED',
+      requested_amount: Math.round(s.claimed),
+      reason: `[Pick up & Delivery 검토 결과 이의 · 제외 ${s.ng}건 ${fmtWon(s.cut)}]\n` + reason.trim()
+    });
+    if(error){ alert('제출 실패: ' + error.message); db.disabled = false; db.textContent = '이의 제출'; return; }
+    alert('이의를 제출했습니다. JLR Korea 가 확인 후 회신드립니다.');
+    await loadRetailerClaims();
+  });
+  const cb = card.querySelector('.pd-confirm');
+  if(cb) cb.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if(!confirm(`정산 금액 ${fmtWon(s.approved+vat)} (VAT 포함) 을(를) 확정할까요?\n확정 후에는 취소할 수 없습니다.`)) return;
+    cb.disabled = true; cb.textContent = '처리 중...';
+    const now = new Date().toISOString();
+    const { error } = await sb.from('claims').update({ confirmed_at: now })
+      .in('id', items.map(c => c.id));
+    if(error){ alert('처리 실패: ' + error.message); cb.disabled = false; cb.textContent = '정산 확정'; return; }
+    await loadRetailerClaims();
+  });
+}
+
 async function renderRoundDetail(){
   const { data: round, error } = await sb.from('rounds').select('*, settlement_types(*)').eq('id', currentRoundId).single();
   if(error || !round){ alert('회차를 불러오지 못했습니다.'); switchView('rounds'); return; }
@@ -5766,6 +7024,11 @@ async function renderRoundDetail(){
 
   // One DMS License Fee (AR · 시스템 산출 · 로우데이터 업로드 → 자동 산출)
   if(type.source_config?.preset === 'ONE_DMS_AR'){ return renderOneDmsRoundDetail(round, type); }
+  if(round.source_summary?.preset === 'CAMPAIGN_PARTS_DC' || type.source_config?.preset === 'CAMPAIGN_PARTS_DC'){
+    return renderCampaignRoundDetail(round, type); }
+  // Pick up & Delivery — 매니저가 건별로 검토한 결과를 리테일러에 그대로 보여준다
+  if(round.source_summary?.preset === 'PND_REVIEW' || type.source_config?.preset === 'PND_REVIEW'){
+    return renderPndRoundDetail(round, type); }
   // Engine Oil (시스템 산출 · 리테일러 확인만) — RS(AP,월) / SI(AP,분기) / SP(AR,월)
   //   ⚠️ AR 분기보다 먼저 봐야 한다. SP 는 direction='AR' 이라 아래 AR 분기에 먼저 걸리면
   //      원본 업로드·미리보기가 없는 일반 수동입력 화면으로 떨어진다.
@@ -6020,7 +7283,13 @@ async function renderRoundDetail(){
       <td>${claimedText}</td>
       <td>${approvedText}</td>
       <td class="muted">${c.submitted_at ? new Date(c.submitted_at).toLocaleString('ko-KR') : '—'}</td>
-      <td>${c.file_path ? `<span class="file-link" data-path="${c.file_path}">다운로드</span>` : '—'}</td>`;
+      <td>${c.file_path ? `<span class="file-link" data-path="${c.file_path}">다운로드</span>` : '—'}
+          ${(c.detail?.evidence_files||[]).length
+            ? `<div class="hint" style="margin-top:4px;">증빙 ${c.detail.evidence_files.length}개<br>`
+              + c.detail.evidence_files.map(f =>
+                  `<span class="file-link" data-path="${f.path}">${String(f.name).replace(/[<>]/g,'')}</span>`
+                ).join('<br>') + '</div>'
+            : ''}</td>`;
     tbody.appendChild(tr);
   });
   tbody.querySelectorAll('.file-link').forEach(el => {
@@ -6895,6 +8164,18 @@ function sanitizeFilename(s){
   return String(s||'').trim().replace(/[\\/:*?"<>|]/g, '_');
 }
 
+/* 스토리지 키 전용 — ASCII 만 남긴다.
+   Supabase Storage 는 한글·공백·괄호가 든 키를 InvalidKey(400) 로 거절한다.
+   원본 파일명은 화면 표시용으로 따로 들고 다닐 것. */
+function storageSafeName(s){
+  const n = String(s || 'file').trim();
+  const dot = n.lastIndexOf('.');
+  const ext = dot > 0 ? n.slice(dot + 1).replace(/[^a-zA-Z0-9]/g, '').slice(0, 8) : '';
+  const base = (dot > 0 ? n.slice(0, dot) : n).replace(/[^a-zA-Z0-9.\-_]/g, '_')
+                 .replace(/_+/g, '_').replace(/^_|_$/g, '').slice(0, 60);
+  return (base || 'file') + (ext ? '.' + ext : '');
+}
+
 
 /* ================================================================
    회차 아카이브
@@ -7692,6 +8973,152 @@ async function attachRetailerTypes(claims){
   (claims||[]).forEach(c => { if(c.rounds) c.rounds.settlement_types = map[c.rounds.type_id] || null; });
 }
 
+
+/* ── 리테일러 화면 : 캠페인 반송 건 (금액 수정 재청구 · 증빙 첨부) ───────── */
+async function renderCampaignRetailerCards(listEl){
+  const { data: ros } = await sb.from('campaign_ro')
+    .select('*, rounds(id, period_label, type_id, settlement_types(name))')
+    .in('decision', ['REJECT','REJECT_FINAL']).order('decided_at', { ascending:false });
+  // settlement_types 는 리테일러 RLS 로 막혀 있어 공개 뷰에서 이름을 보충한다
+  const { data: tpub } = await sb.from('settlement_types_public').select('id, name');
+  const tname = new Map((tpub||[]).map(t => [t.id, t.name]));
+  if(!ros || !ros.length) return 0;
+
+  const byRound = new Map();
+  ros.forEach(r => { const k=r.round_id; if(!byRound.has(k)) byRound.set(k,[]); byRound.get(k).push(r); });
+
+  for(const [rid, list] of byRound){
+    const rd = list[0].rounds;
+    const rev = list.filter(r => r.decision === 'REJECT');
+    const fin = list.filter(r => r.decision === 'REJECT_FINAL');
+    const due = rev.map(r => r.reject_due).filter(Boolean).sort()[0];
+    const left = due ? Math.ceil((new Date(due) - new Date()) / 864e5) : null;
+    const open = rev.filter(r => !r.resubmitted_at).length;
+
+    const card = document.createElement('div');
+    card.className = 'claim-card';
+    card.innerHTML = `
+      <div class="claim-head">
+        <div><div class="claim-name">${rd?.settlement_types?.name || tname.get(rd?.type_id) || '캠페인 부품할인'} · ${rd?.period_label||''} — 청구 반송</div>
+          <div class="claim-sub">수정 후 재청구 ${rev.length}건 · 지원 불가 ${fin.length}건
+            ${due?` · <b style="color:${left<=0?'var(--danger,#c0392b)':'var(--accent-ar)'};">재청구 기한 ${due}${left!=null?` (${left<=0?'기한 경과':`D-${left}`})`:''}</b>`:''}</div></div>
+        <span class="badge ${open?'badge-ar':'badge-ap'}">${open?`수정 대기 ${open}건`:'재제출 완료'}</span>
+      </div>
+      <div class="hint" style="margin:8px 0;">반송 사유를 확인하시고 <b>금액만 고쳐 재제출</b>하시면 됩니다. 엑셀을 다시 올리실 필요는 없습니다.
+        JLRK 사전 승인을 받으신 건은 <b>이메일 승인본(PDF)</b> 을 첨부해 주세요.</div>
+      <div id="cr-${rid}"></div>`;
+    listEl.appendChild(card);
+
+    const host = card.querySelector('#cr-'+rid);
+    for(const r of list){
+      const ro = document.createElement('div');
+      ro.style.cssText = 'border:1px solid var(--surface3); border-radius:6px; margin-bottom:8px; overflow:hidden;';
+      const final = r.decision === 'REJECT_FINAL';
+      ro.innerHTML = `
+        <div style="padding:10px 12px; background:${final?'#fdecea':'var(--surface2)'};">
+          <div><b>${r.ro_no}</b> <span class="hint">${r.workshop||''} · ${r.model||''} · 입고 ${r.in_date||'—'}</span>
+            <span class="badge ${final?'badge-ar':'badge-warn'}" style="margin-left:6px;">${final?'지원 불가':'수정 후 재청구'}</span>
+            ${r.resubmitted_at?'<span class="badge badge-ap" style="margin-left:6px;">재제출됨</span>':''}</div>
+          <div class="hint" style="margin-top:4px; white-space:pre-wrap;"><b>JLRK 사유</b> — ${(r.note||'').replace(/</g,'&lt;')}</div>
+        </div>
+        ${final ? '' : `<div style="padding:10px 12px;" id="cl-${r.id}"><div class="hint">불러오는 중...</div></div>`}`;
+      host.appendChild(ro);
+      if(final) continue;
+
+      const { data: lines } = await sb.from('campaign_lines').select('*')
+        .eq('round_id', rid).eq('ro_no', r.ro_no).eq('vin', r.vin).order('src_row');
+      const box = ro.querySelector('#cl-'+r.id);
+      const done = !!r.resubmitted_at;
+      box.innerHTML = `
+        <div style="overflow-x:auto;"><table style="min-width:680px;">
+          <thead><tr><th>부품번호</th><th>부품명</th><th style="text-align:center;">Qty</th>
+            <th style="text-align:right;">소비자가</th><th style="text-align:right;">판매가</th>
+            <th style="text-align:right;">할인적용</th><th style="text-align:right;">JLRK 지원금</th></tr></thead>
+          <tbody>${(lines||[]).map(l => `
+            <tr data-l="${l.id}">
+              <td>${l.part_no}</td><td>${(l.part_name||'').slice(0,26)}</td>
+              <td style="text-align:center;"><input class="cl-q" style="width:54px; text-align:center;"
+                 value="${l.revised_qty ?? l.qty ?? ''}" ${done?'disabled':''}></td>
+              <td style="text-align:right;"><input class="cl-r" style="width:96px; text-align:right;"
+                 value="${l.revised_retail ?? l.retail ?? ''}" ${done?'disabled':''}></td>
+              <td style="text-align:right;"><input class="cl-s" style="width:96px; text-align:right;"
+                 value="${l.revised_sale ?? l.sale ?? ''}" ${done?'disabled':''}></td>
+              <td style="text-align:right;" class="cl-d">—</td>
+              <td style="text-align:right; font-weight:600;" class="cl-j">—</td></tr>`).join('')}
+          </tbody></table></div>
+        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:10px;">
+          <div class="field" style="margin:0; min-width:260px;"><label>이메일 승인본 (PDF)</label>
+            <input type="file" class="cl-f" accept="application/pdf" ${done?'disabled':''}></div>
+          ${r.evidence_path?'<span class="hint">첨부 완료</span>':''}
+          <div style="margin-left:auto; text-align:right;">
+            <div class="hint">수정 후 JLRK 지원금 합계</div>
+            <b class="cl-tot" style="font-size:16px;">—</b></div>
+          <button class="btn btn-sm cl-send" ${done?'disabled':''}>재제출</button>
+        </div>`;
+
+      const recalc = () => {
+        let tot = 0;
+        box.querySelectorAll('tr[data-l]').forEach(tr => {
+          const q = Number(tr.querySelector('.cl-q').value||0);
+          const rt = Number(tr.querySelector('.cl-r').value||0);
+          const sa = Number(tr.querySelector('.cl-s').value||0);
+          const disc = Math.max(0, (rt - sa) * q), j = Math.round(disc * 0.5);
+          tr.querySelector('.cl-d').textContent = fmtWon(disc);
+          tr.querySelector('.cl-j').textContent = fmtWon(j);
+          tot += j;
+        });
+        box.querySelector('.cl-tot').textContent = fmtWon(tot);
+        return tot;
+      };
+      box.addEventListener('input', recalc); recalc();
+
+      const btn = box.querySelector('.cl-send');
+      if(btn) btn.addEventListener('click', async () => {
+        if(r.reject_due && new Date(r.reject_due) < new Date(new Date().toDateString())){
+          alert('재청구 기한이 지났습니다. JLRK 담당자에게 문의해주세요.'); return; }
+        const tot = recalc();
+        if(!confirm(`${r.ro_no} 을(를) 재제출합니다.\nJLRK 지원금 합계 ${fmtWon(tot)}\n\n계속할까요?`)) return;
+        btn.disabled = true; btn.textContent = '제출 중...';
+        try{
+          const f = box.querySelector('.cl-f').files[0];
+          let path = r.evidence_path;
+          if(f){
+            path = `${myRetailer?.code||'R'}/campaign/${rid}/${r.ro_no}_${Date.now()}.pdf`;
+            const up = await sb.storage.from('settlements').upload(path, f, { upsert:true });
+            if(up.error) throw up.error;
+          }
+          for(const tr of box.querySelectorAll('tr[data-l]')){
+            const q = Number(tr.querySelector('.cl-q').value||0);
+            const rt = Number(tr.querySelector('.cl-r').value||0);
+            const sa = Number(tr.querySelector('.cl-s').value||0);
+            await sb.from('campaign_lines').update({
+              revised_qty:q, revised_retail:rt, revised_sale:sa,
+              revised_at:new Date().toISOString() }).eq('id', tr.dataset.l);
+          }
+          const { error } = await sb.from('campaign_ro')
+            .update({ resubmitted_at:new Date().toISOString(), evidence_path:path }).eq('id', r.id);
+          if(error) throw error;
+          await logAudit('CAMPAIGN_RESUBMIT','ROUND',rid,{ro:r.ro_no, amount:tot});
+          const adm = await getAdminEmails();
+          await sendEmail(adm, `[JLRK 정산] ${rd?.period_label||''} ${myRetailer?.code||''} 캠페인 재청구 (${r.ro_no})`,
+            emailShell('캠페인 반송 건 재청구', `
+              <table style="${EMAIL_STYLE}border-collapse:collapse;">
+                <tr><td style="padding:4px 12px 4px 0;color:#666;">회차</td><td><b>${rd?.period_label||''}</b></td></tr>
+                <tr><td style="padding:4px 12px 4px 0;color:#666;">리테일러</td><td><b>${myRetailer?.code||''}</b></td></tr>
+                <tr><td style="padding:4px 12px 4px 0;color:#666;">RO</td><td><b>${r.ro_no}</b></td></tr>
+                <tr><td style="padding:4px 12px 4px 0;color:#666;">수정 후 지원금</td><td><b>${fmtWon(tot)}</b></td></tr>
+                <tr><td style="padding:4px 12px 4px 0;color:#666;">증빙</td><td>${path?'첨부됨':'없음'}</td></tr>
+              </table><p style="margin-top:16px;">포털 회차 상세에서 재검토해주세요.</p>`),
+            { kind:'CAMPAIGN_RESUBMIT', round_id:rid, ro:r.ro_no });
+          alert('재제출했습니다. JLRK 담당자가 재검토합니다.');
+          loadRetailerClaims();
+        }catch(e){ alert('제출 실패: ' + (e.message||e)); btn.disabled = false; btn.textContent = '재제출'; }
+      });
+    }
+  }
+  return ros.length;
+}
+
 async function loadRetailerClaims(){
   const listEl = document.getElementById('retailerList');
   const emptyEl = document.getElementById('retailerEmpty');
@@ -7704,7 +9131,9 @@ async function loadRetailerClaims(){
   if(error){ console.error(error); return; }
   await attachRetailerTypes(claims);
   const visible = (claims||[]).filter(c => c.rounds && c.rounds.status !== 'DRAFT');
-  if(visible.length === 0){ emptyEl.style.display='block'; return; }
+  // 캠페인 반송 건은 claims 가 아니라 campaign_ro 에 있다 — 먼저 올린다
+  const campN = await renderCampaignRetailerCards(listEl);
+  if(visible.length === 0 && !campN){ emptyEl.style.display='block'; return; }
   emptyEl.style.display='none';
 
   // round_id 별로 그룹핑
@@ -7725,6 +9154,12 @@ async function loadRetailerClaims(){
     // Engine Oil (AP · 시스템 산출) — 확인 전용 카드
     if(isEnginePreset(round.settlement_types)){
       await renderEngineOilRetailerCard(listEl, round, items);
+      continue;
+    }
+    // Pick up & Delivery — 검토 결과 확인 카드
+    if(round.source_summary?.preset === 'PND_REVIEW'
+       || round.settlement_types?.source_config?.preset === 'PND_REVIEW'){
+      await renderPndRetailerCard(listEl, round, items);
       continue;
     }
     // 관리자 선업로드 유형(ASAP Incentive 등) — 확인 / 수정본 회신 카드
@@ -7772,6 +9207,13 @@ async function loadRetailerClaims(){
           <label>② 작성한 청구서 업로드 (전 지점 데이터를 한 파일에 작성)</label>
           <input type="file" class="group-file-input" accept=".xlsx,.xls" ${formPath?'':'disabled'}>
           <div class="hint group-parse-hint">${noticeHtml}</div>
+        </div>
+        <div class="field" style="margin-bottom:14px;">
+          <label>③ 증빙 파일 (선택) — 장착 사진 · 작업지시서 등</label>
+          <input type="file" class="group-evi-input" accept=".jpg,.jpeg,.png,.heic,.pdf,.zip" multiple>
+          <div class="hint group-evi-hint">여러 장 한 번에 고를 수 있습니다. <b>사진은 엑셀에 붙여넣지 말고 여기에 올려주세요</b> —
+            엑셀에 넣으면 파일 하나가 ${UPLOAD_LIMIT/1048576}MB 를 넘어 업로드가 막힙니다.
+            파일 1개당 ${UPLOAD_LIMIT/1048576}MB 까지.</div>
         </div>`;
     }
 
@@ -7899,8 +9341,23 @@ async function loadRetailerClaims(){
         const file = fileInput.files[0];
         if(!file) return;
         try{
+          // 스토리지 업로드 상한(20MB). 제출 버튼까지 간 뒤 영문 에러로 막히면
+          // 리테일러가 작성한 내용을 날린 것처럼 느낀다 — 고르는 순간 잡는다.
+          if(file.size > UPLOAD_LIMIT){
+            fileInput.value = '';
+            hintEl.innerHTML = `<span style="color:var(--danger);">✕ 파일이 너무 큽니다 — `
+              + `${(file.size/1048576).toFixed(1)}MB (업로드 한도 ${UPLOAD_LIMIT/1048576}MB)</span>`
+              + `<div style="margin-top:6px;">증빙사진을 엑셀에 붙여넣으면 금방 한도를 넘습니다. 아래 방법 중 하나로 줄여주세요.`
+              + `<br>· 엑셀에서 사진 하나를 클릭 → [그림 서식] → <b>그림 압축</b> → 해상도를 '웹(150ppi)' 으로, `
+              + `'이 그림에만 적용' 체크 해제 후 저장`
+              + `<br>· 또는 사진을 엑셀에서 빼고, 아래 <b>증빙 파일</b> 란에 따로 올려주세요.</div>`;
+            return;
+          }
           hintEl.textContent = '파일을 확인하는 중...';
           const buf = await file.arrayBuffer();
+          if(file.size > UPLOAD_WARN){
+            console.info('[업로드] 한도에 근접:', (file.size/1048576).toFixed(1), 'MB');
+          }
 
           // ── 1) 지정 양식인지 검증 ──
           const formPath = round.settlement_types?.form_template_path;
@@ -7964,9 +9421,26 @@ async function loadRetailerClaims(){
       });
     }
 
+    const eviInput = card.querySelector('.group-evi-input');
+    const eviHint = card.querySelector('.group-evi-hint');
+    if(eviInput){
+      eviInput.addEventListener('change', () => {
+        const fs = Array.from(eviInput.files || []);
+        if(!fs.length){ eviHint.innerHTML = eviHint.dataset.base || eviHint.innerHTML; return; }
+        if(!eviHint.dataset.base) eviHint.dataset.base = eviHint.innerHTML;
+        const over = fs.filter(f => f.size > UPLOAD_LIMIT);
+        const total = fs.reduce((a,f) => a + f.size, 0);
+        eviHint.innerHTML = over.length
+          ? `<span style="color:var(--danger);">✕ ${over.length}개 파일이 ${UPLOAD_LIMIT/1048576}MB 를 넘습니다 — `
+            + `${over.slice(0,3).map(f=>f.name).join(', ')}${over.length>3?' 외':''}</span>`
+            + `<div style="margin-top:4px;">해당 사진만 줄여서 다시 골라주세요.</div>`
+          : `<span style="color:var(--accent);">✓ ${fs.length}개 선택 · 합계 ${(total/1048576).toFixed(1)}MB</span>`;
+      });
+    }
+
     const submitBtn = card.querySelector('.group-submit-btn');
     if(submitBtn){
-      submitBtn.addEventListener('click', () => submitGroup(card, items, fileInput?.files[0]));
+      submitBtn.addEventListener('click', () => submitGroup(card, items, fileInput?.files[0], eviInput?.files));
     }
 
     card.querySelectorAll('.file-link').forEach(el => {
@@ -8072,7 +9546,7 @@ async function submitInvoice(round, supplyAmount, rowEl){
   await loadRetailerClaims();
 }
 
-async function submitGroup(card, items, file){
+async function submitGroup(card, items, file, eviFiles){
   const rows = card.querySelectorAll('tbody tr');
   const updates = [];
   for(const rowEl of rows){
@@ -8089,12 +9563,51 @@ async function submitGroup(card, items, file){
     const safeName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, '_');
     sharedFilePath = `${items[0].retailer_id}/${items[0].round_id}/GROUP-${Date.now()}-${safeName}`;
     const { error: upErr } = await sb.storage.from('settlements').upload(sharedFilePath, file, { upsert:true });
-    if(upErr){ alert('파일 업로드 실패: ' + upErr.message); return; }
+    if(upErr){
+      const tooBig = /exceeded the maximum allowed size|payload too large|413/i.test(upErr.message || '');
+      alert(tooBig
+        ? `파일이 너무 큽니다 (${(file.size/1048576).toFixed(1)}MB · 한도 ${UPLOAD_LIMIT/1048576}MB).\n\n`
+          + '엑셀의 사진을 압축하거나(그림 서식 → 그림 압축 → 웹 150ppi),\n'
+          + '사진을 빼고 증빙 파일 란에 따로 올려주세요.\n\n입력하신 금액은 그대로 남아 있습니다.'
+        : '파일 업로드 실패: ' + upErr.message);
+      return;
+    }
+  }
+
+  // 증빙 파일(사진·작업지시서) — 엑셀과 별도로 올린다
+  const evidence = [];
+  const evi = Array.from(eviFiles || []);
+  if(evi.length){
+    const big = evi.filter(f => f.size > UPLOAD_LIMIT);
+    if(big.length){
+      alert(`증빙 파일 ${big.length}개가 ${UPLOAD_LIMIT/1048576}MB 를 넘습니다.\n`
+          + big.slice(0,5).map(f => `· ${f.name} (${(f.size/1048576).toFixed(1)}MB)`).join('\n')
+          + '\n\n해당 파일만 줄여서 다시 선택해주세요.');
+      return;
+    }
+    const btn = card.querySelector('.group-submit-btn');
+    for(let i = 0; i < evi.length; i++){
+      const f = evi[i];
+      if(btn) btn.textContent = `증빙 업로드 중... (${i+1}/${evi.length})`;
+      const path = `${items[0].retailer_id}/${items[0].round_id}/EVI-${Date.now()}-${i}-${storageSafeName(f.name)}`;
+      const { error } = await sb.storage.from('settlements').upload(path, f, { upsert:true });
+      if(error){
+        if(btn) btn.textContent = '제출';
+        alert(`증빙 파일 업로드 실패 (${f.name}): ${error.message}`);
+        return;
+      }
+      evidence.push({ path, name: f.name, size: f.size });
+    }
+    if(btn) btn.textContent = '제출';
   }
 
   for(const u of updates){
     const payload = { claimed_amount: u.amount, status:'SUBMITTED', submitted_at: new Date().toISOString() };
     if(sharedFilePath) payload.file_path = sharedFilePath;
+    if(evidence.length){
+      const cur = (items.find(x => x.id === u.claimId) || {}).detail || {};
+      payload.detail = { ...cur, evidence_files: [...(cur.evidence_files || []), ...evidence] };
+    }
     const { error } = await sb.from('claims').update(payload).eq('id', u.claimId);
     if(error){ alert('제출 실패 (일부 항목): ' + error.message); }
   }
