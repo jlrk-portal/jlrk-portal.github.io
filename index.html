@@ -401,8 +401,9 @@
         <div class="field"><label>회계연도</label><select id="roundFilterYear"><option value="">전체</option></select></div>
         <div class="field"><label>상태</label>
           <select id="roundFilterStatus">
+            <option value="live" selected>진행 중</option>
             <option value="">전체</option>
-            <option value="live">진행 중</option>
+            <option value="done">완료·종료</option>
             <option value="DRAFT">준비중</option>
             <option value="OPEN">접수중</option>
             <option value="CLOSED">검토중</option>
@@ -415,6 +416,7 @@
           </select>
         </div>
       </div>
+      <div class="hint" id="roundsHiddenNote" style="margin:-4px 0 10px;"></div>
       <table id="roundsTable">
         <thead><tr><th>기간</th><th>유형</th><th>방향</th><th>상태</th><th>마감</th><th>제출 현황</th><th></th></tr></thead>
         <tbody id="roundsBody"></tbody>
@@ -4073,8 +4075,10 @@ async function refreshNavBadges(){
         .select('id', { count:'exact', head:true }).in('round_id', liveIds).eq('status','SUBMITTED');
       pending = count || 0;
     }
-    const toArchive = (rounds||[]).filter(r => ['VOUCHERED','FINALIZED'].includes(r.status)).length;
-    const set = (nav, n) => {
+    // 배지는 '내가 지금 해야 할 일' 만 센다.
+    // 예전엔 검토대기 청구 + 아카이브 대상 회차를 더해서 보여줬는데,
+    // 성격이 다른 둘을 합치니 '회차가 18개' 로 읽혔다. (2026-10-19)
+    const set = (nav, n, title) => {
       const el = document.querySelector(`#adminNav .nav-item[data-nav="${nav}"]`);
       if(!el) return;
       const old = el.querySelector('.nav-badge');
@@ -4082,10 +4086,11 @@ async function refreshNavBadges(){
       if(n > 0){
         const b = document.createElement('span');
         b.className = 'nav-badge'; b.textContent = n > 99 ? '99+' : n;
+        if(title) b.title = title;
         el.appendChild(b);
       }
     };
-    set('rounds', pending + toArchive);
+    set('rounds', pending, `검토 대기 청구 ${pending}건`);
   } catch(e){ /* 배지는 부가 기능이므로 조용히 무시 */ }
 }
 
@@ -5594,11 +5599,31 @@ async function loadRounds(){
 
   const fType = typeSel.value, fYear = yearSel.value, fStatus = document.getElementById('roundFilterStatus').value;
   const LIVE = ['DRAFT','OPEN','CLOSED','CONFIRMED','INVOICED','PUBLISHED'];
+  const DONE = ['VOUCHERED','FINALIZED','ARCHIVED'];
+  const matchStatus = r => !fStatus ? true
+    : fStatus === 'live' ? LIVE.includes(r.status)
+    : fStatus === 'done' ? DONE.includes(r.status)
+    : r.status === fStatus;
   const rows = data.filter(r =>
     (!fType || r.type_id === fType) &&
     (!fYear || r.fiscal_year === fYear) &&
-    (!fStatus || (fStatus === 'live' ? LIVE.includes(r.status) : r.status === fStatus))
+    matchStatus(r)
   );
+  // 끝난 회차를 숨기고 있다는 사실과 건수를 알려준다 (숨긴 줄 모르면 '왜 없지' 가 된다)
+  const hiddenDone = data.filter(r => DONE.includes(r.status)
+    && (!fType || r.type_id === fType) && (!fYear || r.fiscal_year === fYear)).length;
+  const noteEl = document.getElementById('roundsHiddenNote');
+  if(noteEl){
+    noteEl.innerHTML = (fStatus === 'live' && hiddenDone)
+      ? `완료·종료된 회차 <b>${hiddenDone}건</b>은 숨겨져 있습니다. `
+        + `<a class="file-link" id="roundsShowDone">완료·종료만 보기</a> · `
+        + `<a class="file-link" id="roundsShowAll">전체 보기</a>`
+      : '';
+    const sd = document.getElementById('roundsShowDone');
+    if(sd) sd.onclick = () => { document.getElementById('roundFilterStatus').value = 'done'; loadRounds(); };
+    const sa = document.getElementById('roundsShowAll');
+    if(sa) sa.onclick = () => { document.getElementById('roundFilterStatus').value = ''; loadRounds(); };
+  }
 
   if(rows.length === 0){
     emptyState.style.display='block';
