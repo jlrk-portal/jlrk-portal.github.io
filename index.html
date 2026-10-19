@@ -2845,8 +2845,13 @@ async function renderEngineOilRetailerCard(listEl, round, items){
       <span class="hint" style="margin-left:8px;">확정하면 이 금액으로 세금계산서 발행 대상이 확정됩니다.</span>`;
     w.querySelector('.eo-confirm-btn').addEventListener('click', async () => {
       if(!confirm(`정산 합계 ${won(d.total)} 을(를) 확정할까요? 확정 후에는 취소할 수 없습니다.`)) return;
-      const { error } = await sb.from('claims').update({ confirmed_at: new Date().toISOString() }).eq('id', c.id);
-      if(error){ alert('처리 실패: ' + error.message); return; }
+      const { data: upd, error } = await sb.from('claims')
+        .update({ confirmed_at: new Date().toISOString() }).eq('id', c.id).select('id');
+      if(error || !upd || !upd.length){
+        alert(error ? ('처리 실패: ' + error.message)
+                    : '확정 처리가 반영되지 않았습니다. 회차 상태를 JLR Korea 담당자에게 확인해주세요.');
+        return;
+      }
       await loadRetailerClaims();
     });
     card.appendChild(w);
@@ -6770,7 +6775,7 @@ async function pndPublish(round, type, lines, wmap){
   const btn = document.getElementById('pndPublish');
   btn.disabled = true; btn.textContent = '공지 처리 중...';
   try{
-    const { error } = await sb.from('rounds').update({ status:'CONFIRMED' }).eq('id', round.id);
+    const { error } = await sb.from('rounds').update({ status:'PUBLISHED' }).eq('id', round.id);
     if(error) throw error;
     const byRt = new Map();
     lines.forEach(l => {
@@ -7010,9 +7015,14 @@ async function renderPndRetailerCard(listEl, round, items){
     if(!confirm(`정산 금액 ${fmtWon(s.approved+vat)} (VAT 포함) 을(를) 확정할까요?\n확정 후에는 취소할 수 없습니다.`)) return;
     cb.disabled = true; cb.textContent = '처리 중...';
     const now = new Date().toISOString();
-    const { error } = await sb.from('claims').update({ confirmed_at: now })
-      .in('id', items.map(c => c.id));
-    if(error){ alert('처리 실패: ' + error.message); cb.disabled = false; cb.textContent = '정산 확정'; return; }
+    // RLS 로 막히면 에러가 아니라 '0행 갱신' 으로 조용히 끝난다 → 몇 행이 바뀌었는지 받아서 확인
+    const { data: upd, error } = await sb.from('claims').update({ confirmed_at: now })
+      .in('id', items.map(c => c.id)).select('id');
+    if(error || !upd || !upd.length){
+      alert(error ? ('처리 실패: ' + error.message)
+                  : '확정 처리가 반영되지 않았습니다. 회차 상태를 JLR Korea 담당자에게 확인해주세요.');
+      cb.disabled = false; cb.textContent = '정산 확정'; return;
+    }
     await loadRetailerClaims();
   });
 }
