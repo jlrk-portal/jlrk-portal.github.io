@@ -6576,9 +6576,17 @@ function pndParse(buf){
     for(let i = 0; i < H.length; i++) if(H[i] === normalizeLabel(name)){ k++; if(k === nth) return i; }
     return -1; };
   const one = (...names) => { for(const nm of names){ const i = at(nm, 0); if(i !== -1) return i; } return -1; };
-  const CHK = [['주문자명','주문자명'], ['주문자연락처','주문자 연락처'], ['고객명','고객명'],
-               ['차량번호','차량 번호'], ['차량모델','차량 모델'],
-               ['RO/예약번호','RO# / 예약#'], ['차대번호','차대번호']];
+  //  [내부키, 리테일러 제출 열 머리글, JLRK 검증 열 머리글]
+  //  대부분 두 열의 머리글이 같아서 '몇 번째냐' 로 가르지만, RO 만 이름이 아예 다르다
+  //  (제출 '예약번호/RO번호'  vs  검증 'RO# / 예약#').
+  //  이걸 같은 이름으로 보면 검증열(O/X)을 RO번호로 읽어버린다 — 2026-10-19 실측.
+  const CHK = [['주문자명','주문자명','주문자명'],
+               ['주문자연락처','주문자 연락처','주문자연락처'],
+               ['고객명','고객명','고객명'],
+               ['차량번호','차량 번호','차량번호'],
+               ['차량모델','차량 모델','차량모델'],
+               ['RO/예약번호','예약번호/RO번호','RO# / 예약#'],
+               ['차대번호','차대번호','차대번호']];
   const col = {
     no: one('No'), date: one('탁송일자'), ws: one('지점'),
     verdict: one('데이터 검증'), note: one('JLRK Comment'),
@@ -6591,11 +6599,20 @@ function pndParse(buf){
   };
   // 제출값(1번째) / 검증 O·X(2번째)
   const sub = {}, chk = {};
-  CHK.forEach(([key, label]) => {
-    sub[key] = at(label, 0) !== -1 ? at(label, 0) : at(key, 0);
-    const second = at(label, 1) !== -1 ? at(label, 1) : at(key, 1);
-    chk[key] = second !== -1 ? second : at(key, 1);
+  CHK.forEach(([key, subLabel, chkLabel]) => {
+    const same = normalizeLabel(subLabel) === normalizeLabel(chkLabel);
+    if(same){                       // 같은 이름이면 첫 번째가 제출, 두 번째가 검증
+      sub[key] = at(subLabel, 0);
+      chk[key] = at(chkLabel, 1);
+    } else {                        // 이름이 다르면 각각 찾는다
+      sub[key] = at(subLabel, 0);
+      chk[key] = at(chkLabel, 0);
+    }
+    if(sub[key] === -1) sub[key] = at(key, 0);
+    if(chk[key] === -1) chk[key] = at(key, 1);
   });
+  const noChk = CHK.filter(([k]) => chk[k] === -1).map(([k]) => k);
+  if(noChk.length) throw new Error('검증(O/X) 열을 찾지 못했습니다: ' + noChk.join(', '));
   const missing = Object.entries({ 지점:col.ws, '데이터 검증':col.verdict, JLRK청구:col.jlrk })
     .filter(([, v]) => v === -1).map(([k]) => k);
   if(missing.length) throw new Error('필수 열을 찾지 못했습니다: ' + missing.join(', '));
