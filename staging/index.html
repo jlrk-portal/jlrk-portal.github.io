@@ -6395,6 +6395,8 @@ function xlsxHouse({ filename, sheetName, title, subtitle, summary, steps, colum
      리테일러가 "원 청구 얼마 / 뭐가 걸렸나 / 그래서 정산 얼마" 를 보게 한다.
    ================================================================ */
 const PND_FIELDS = ['주문자명','주문자연락처','고객명','차량번호','차량모델','RO/예약번호','차대번호'];
+// 아직 리테일러에 공지하기 전 = 검토본을 갈아끼울 수 있는 상태
+const PND_EDITABLE = (st) => ['DRAFT','OPEN','CLOSED'].includes(st);
 
 async function pndLoad(roundId, retailerId){
   const out = [];
@@ -6743,8 +6745,8 @@ async function renderPndRoundDetail(round, type){
     + `<div class="info-card">
          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
            <button class="btn btn-sm btn-ghost" id="pndXlsx">엑셀 내려받기</button>
-           ${round.status === 'DRAFT' ? '<button class="btn btn-sm btn-ghost" id="pndReload">검토본 다시 올리기</button>' : ''}
-           ${round.status === 'DRAFT'
+           ${PND_EDITABLE(round.status) ? '<button class="btn btn-sm btn-ghost" id="pndReload">검토본 다시 올리기</button>' : ''}
+           ${PND_EDITABLE(round.status)
              ? `<button class="btn btn-sm" id="pndPublish">리테일러에 검토 결과 공지</button>`
              : `<span class="badge badge-ap">공지됨</span>`}
            <span class="hint" style="margin-left:auto;">공지하면 각 리테일러가 자기 지점 건만 봅니다.
