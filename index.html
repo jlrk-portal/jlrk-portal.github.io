@@ -6405,7 +6405,8 @@ function xlsxHouse({ filename, sheetName, title, subtitle, summary, steps, colum
    ================================================================ */
 const PND_FIELDS = ['주문자명','주문자연락처','고객명','차량번호','차량모델','RO/예약번호','차대번호'];
 // 아직 리테일러에 공지하기 전 = 검토본을 갈아끼울 수 있는 상태
-const PND_EDITABLE = (st) => ['DRAFT','OPEN','CLOSED'].includes(st);
+const PND_EDITABLE  = (st) => ['DRAFT','OPEN','CLOSED'].includes(st);   // 검토본 교체 가능
+const PND_UNPUBLISHED = (st) => st === 'DRAFT';                          // 아직 공지 전
 
 async function pndLoad(roundId, retailerId){
   const out = [];
@@ -6745,7 +6746,7 @@ function pndConfirmPanel(round, claims, rets){
   const due = round.confirm_due_at ? new Date(round.confirm_due_at) : null;
   const over = due && due < new Date();
   const dueStr = due ? due.toLocaleString('ko-KR') : '미설정';
-  const published = ['PUBLISHED','CONFIRMED','INVOICED'].includes(round.status);
+  const published = ['OPEN','PUBLISHED','CONFIRMED','INVOICED'].includes(round.status);
 
   return `<div style="border:1px solid var(--surface3); border-radius:6px; overflow:hidden; margin-bottom:12px;">
     <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;
@@ -6776,7 +6777,7 @@ function pndConfirmPanel(round, claims, rets){
               .toISOString().slice(0,16) : ''}"></div>
       <button class="btn btn-sm btn-ghost" id="pndDueSave">기한 저장·안내</button>
       <button class="btn btn-sm btn-ghost" id="pndForce" ${done === rows.length ? 'disabled' : ''}>미확정 일괄 확정</button>
-      ${round.status === 'PUBLISHED'
+      ${['OPEN','PUBLISHED'].includes(round.status)
         ? '<button class="btn btn-sm" id="pndClose" style="margin-left:auto;">확정 마감 · 세금계산서 요청</button>'
         : '<span class="badge badge-ap" style="margin-left:auto;">세금계산서 요청됨</span>'}
     </div>` : ''}
@@ -6962,11 +6963,12 @@ async function renderPndRoundDetail(round, type){
          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
            <button class="btn btn-sm btn-ghost" id="pndXlsx">엑셀 내려받기</button>
            ${PND_EDITABLE(round.status) ? '<button class="btn btn-sm btn-ghost" id="pndReload">검토본 다시 올리기</button>' : ''}
-           ${PND_EDITABLE(round.status)
+           ${PND_UNPUBLISHED(round.status)
              ? `<button class="btn btn-sm" id="pndPublish">리테일러에 검토 결과 공지</button>`
              : `<span class="badge badge-ap">공지됨</span>`}
-           <span class="hint" style="margin-left:auto;">공지하면 각 리테일러가 자기 지점 건만 봅니다.
-             메일은 발송 대기함에 쌓이고, 발송 버튼을 눌러야 나갑니다.</span>
+           <span class="hint" style="margin-left:auto;">${PND_UNPUBLISHED(round.status)
+             ? '아직 리테일러에게 보이지 않습니다. [공지] 를 눌러야 열리고, 그때 메일이 발송 대기함에 쌓입니다.'
+             : '리테일러에게 공개된 상태입니다. 메일은 발송 대기함에서 보내주세요.'}</span>
          </div></div>`;
 
   pndBindConfirm(round, type, pclaims||[], retMap, host);
@@ -6996,7 +6998,7 @@ async function pndPublish(round, type, lines, wmap){
   const btn = document.getElementById('pndPublish');
   btn.disabled = true; btn.textContent = '공지 처리 중...';
   try{
-    const { error } = await sb.from('rounds').update({ status:'PUBLISHED' }).eq('id', round.id);
+    const { error } = await sb.from('rounds').update({ status:'OPEN' }).eq('id', round.id);
     if(error) throw error;
     const byRt = new Map();
     lines.forEach(l => {
@@ -7009,10 +7011,11 @@ async function pndPublish(round, type, lines, wmap){
       const s = pndSum(byRt.get(rt.id) || []);
       const to = splitEmails(rt.email).filter(e => !/placeholder@example\.com/i.test(e));
       if(!to.length) continue;
-      await sendEmail(to, `[JLRK 정산] ${type.name} · ${round.period_label} 검토 결과 안내`,
-        emailShell('Pick up & Delivery 검토 결과', `
+      await sendEmail(to, `[JLRK 정산] ${type.name} · ${round.period_label} 정산내역 확인 요청`,
+        emailShell('정산내역 확인 요청', `
           <p>${rt.name} 담당자님,</p>
-          <p>${round.period_label} Pick up &amp; Delivery 청구 건에 대한 JLR Korea 검토가 완료되었습니다.</p>
+          <p>${round.period_label} ${type.name} 청구 건에 대한 JLR Korea 검토가 완료되었습니다.
+             아래 금액을 확인하시고 정산포털에서 <b>[정산 확정]</b> 을 눌러주십시오.</p>
           <table style="${EMAIL_STYLE}border-collapse:collapse;">
             <tr><td style="padding:4px 12px 4px 0;color:#666;">원 청구 금액</td><td><b>${fmtWon(s.claimed)}</b> (${s.n.toLocaleString()}건)</td></tr>
             <tr><td style="padding:4px 12px 4px 0;color:#666;">검증 제외</td><td><b style="color:#c0392b;">${fmtWon(s.cut)}</b> (${s.ng}건)</td></tr>
