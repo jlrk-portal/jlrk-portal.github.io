@@ -6664,7 +6664,11 @@ function pndExport(lines, wsName, round, who){
       red.push('chk_' + f);
       if(FIELD_COL[f]) red.push(FIELD_COL[f]);
     });
-    if(l.verdict === 'X') red.push('verdict', 'note');
+    if(l.verdict === 'X'){
+      red.push('verdict', 'note');
+      // 항목 오류가 아닌 X = 청구유형(마감 유형) 이 잘못된 건 → 서비스 유형 칸을 짚어준다
+      if(!red.length || !Object.keys(c).some(f => c[f] === 'X')) red.push('svc', 'ctype');
+    }
     const r = {
       no: l.src_row, ws: wsName(l), date: l.svc_date || '', leg: l.leg || '',
       svc: l.svc_type || '', pcoc: x['PC/OC 여부'] || '', ctype: l.charge_type || '',
