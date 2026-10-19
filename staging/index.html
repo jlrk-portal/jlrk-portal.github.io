@@ -3930,11 +3930,16 @@ async function renderOneDmsRetailerCard(listEl, round, items){
         <td style="text-align:right;">${u.months_active||0}</td>
       </tr>${disp[u.login] ? `<tr class="od-rsn"><td colspan="${(branches.length?8:7)+months.length+(canConfirm?1:0)}"
          style="background:var(--surface2); padding:8px 12px;">
-         <span class="hint" style="margin-right:6px;">사유</span>
-         <select class="od-rsn-sel" data-login="${u.login||''}" style="padding:4px 8px;">
-           ${OD_REASONS.map(r=>`<option ${disp[u.login]===r?'selected':''}>${r}</option>`).join('')}
-         </select>
-         <span class="hint" style="margin-left:10px;">${u.name||''} · ${u.months_active||0}개월</span></td></tr>` : ''}`).join('')
+         <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+           <span class="hint">사유</span>
+           <select class="od-rsn-sel" data-login="${u.login||''}" style="padding:4px 8px;">
+             ${OD_REASONS.map(r=>`<option ${disp[u.login].r===r?'selected':''}>${r}</option>`).join('')}
+           </select>
+           <input class="od-rsn-memo" data-login="${u.login||''}" style="flex:1; min-width:260px; padding:4px 8px;"
+                  placeholder="비고 (선택) — 자세한 사정을 적어주시면 확인이 빨라집니다"
+                  value="${(disp[u.login].m||'').replace(/"/g,'&quot;')}">
+           <span class="hint">${u.name||''} · ${u.months_active||0}개월</span>
+         </div></td></tr>` : ''}`).join('')
       || `<tr><td colspan="${(branches.length?8:7)+months.length+(canConfirm?1:0)}" class="hint">조건에 맞는 인원이 없습니다.</td></tr>`;
     card.querySelector('.od-cnt').textContent = rows.length;
     card.querySelector('.od-of').textContent = rows.length === users.length ? '' : `(전체 ${users.length}명 중)`;
@@ -3949,17 +3954,24 @@ async function renderOneDmsRetailerCard(listEl, round, items){
   card.addEventListener('change', (e) => {
     const t = e.target;
     if(t.classList.contains('od-chk')){
-      if(t.checked) disp[t.dataset.login] = OD_REASONS[0]; else delete disp[t.dataset.login];
+      if(t.checked) disp[t.dataset.login] = { r: OD_REASONS[0], m: '' };
+      else delete disp[t.dataset.login];
       draw();
     }
-    if(t.classList.contains('od-rsn-sel')) disp[t.dataset.login] = t.value;
+    if(t.classList.contains('od-rsn-sel')) disp[t.dataset.login].r = t.value;
     if(t.classList.contains('od-all')){
       card.querySelectorAll('.od-chk').forEach(ch => {
-        if(t.checked) disp[ch.dataset.login] = disp[ch.dataset.login] || OD_REASONS[0];
+        if(t.checked) disp[ch.dataset.login] = disp[ch.dataset.login] || { r: OD_REASONS[0], m: '' };
         else delete disp[ch.dataset.login];
       });
       draw();
     }
+  });
+
+  // 비고는 타이핑 중에 저장만 하고 다시 그리지 않는다 (그리면 포커스가 날아간다)
+  card.addEventListener('input', (e) => {
+    const t = e.target;
+    if(t.classList.contains('od-rsn-memo') && disp[t.dataset.login]) disp[t.dataset.login].m = t.value;
   });
 
   const db = card.querySelector('.od-dispute-btn');
@@ -3971,9 +3983,11 @@ async function renderOneDmsRetailerCard(listEl, round, items){
       const byLogin = new Map(users.map(u => [u.login, u]));
       const months_off = picked.reduce((a,[lg]) => a + (byLogin.get(lg)?.months_active || 0), 0);
       const cut = Math.round(months_off * Number(d.rate || 0));
-      const lines = picked.map(([lg,rsn]) => {
+      const lines = picked.map(([lg,v]) => {
         const u = byLogin.get(lg) || {};
-        return `${u.name||lg} (${lg}) — ${rsn}${u.retire?` · 퇴사 ${u.retire}`:''} · ${u.months_active||0}개월`;
+        const memo = (v.m || '').trim();
+        return `${u.name||lg} (${lg}) — ${v.r}${u.retire?` · 퇴사 ${u.retire}`:''} · ${u.months_active||0}개월`
+             + (memo ? `\n    비고: ${memo}` : '');
       });
       if(!confirm(`${picked.length}명에 대해 이의를 제출합니다.\n조정 요청 금액 ${won(cut)} (공급가 기준)\n\n` + lines.join('\n'))) return;
       db.disabled = true; db.textContent = '제출 중...';
@@ -3983,7 +3997,7 @@ async function renderOneDmsRetailerCard(listEl, round, items){
         reason: `[One DMS 대상 인원 이의 ${picked.length}건 · 조정 요청 ${won(cut)}]\n` + lines.join('\n')
       });
       if(error){ alert('제출 실패: ' + error.message); db.disabled = false; syncDispute(); return; }
-      alert('이의를 제출했습니다. JLR Korea 가 웅진에 확인 후 회신드립니다.');
+      alert('이의를 제출했습니다. JLR Korea 가 확인 후 회신드립니다.');
       await loadRetailerClaims();
     });
   }
