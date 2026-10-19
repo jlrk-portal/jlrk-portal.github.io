@@ -6247,8 +6247,11 @@ const PND_FIELDS = ['주문자명','주문자연락처','고객명','차량번�
 async function pndLoad(roundId, retailerId){
   const out = [];
   for(let from = 0; ; from += 1000){
+    // ⚠ range() 로 쪽을 나눠 받을 땐 정렬 키가 '유일' 해야 한다.
+    //   verdict+svc_date 처럼 중복되는 키로만 정렬하면 쪽 경계에서 같은 행이
+    //   두 번 오거나 빠진다 (실측: 합계가 26,000원 어긋남). id 로 못을 박는다.
     let q = sb.from('pnd_lines').select('*').eq('round_id', roundId)
-             .order('verdict').order('svc_date').range(from, from + 999);
+             .order('verdict').order('svc_date').order('id').range(from, from + 999);
     if(retailerId) q = q.eq('retailer_id', retailerId);
     const { data, error } = await q;
     if(error) throw error;
