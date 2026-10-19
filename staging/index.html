@@ -6331,14 +6331,23 @@ function xlsxHouse({ filename, sheetName, title, subtitle, summary, steps, colum
        columns.map(() => ({ font:{ name:XS.KO, sz:9.5, bold:true, color:{rgb:'FFFFFFFF'} },
                             fill:{ fgColor:{rgb:XS.CHAR} }, alignment:{horizontal:'center', wrapText:true},
                             border:xsBorder() })));
+  // 칸마다 서식 객체를 만들면 파일이 몇 배로 불어난다. 같은 모양은 하나를 돌려쓰고,
+  // 행이 아주 많으면(전사 다운로드 등) 테두리를 빼 가볍게 만든다. 2026-10-19 실측.
+  const LIGHT = rows.length > 4000;
+  const plain = {};
+  const styleFor = (c, red) => {
+    const key = c.key + '|' + (c.align || '') + '|' + (c.type || '') + '|' + (red ? 1 : 0);
+    if(plain[key]) return plain[key];
+    return plain[key] = {
+      font:{ name:XS.KO, sz:9.5, color:{ rgb: red ? XS.DANGER : XS.INK }, bold: !!red },
+      alignment:{ horizontal: c.align || (c.type === 'num' ? 'right' : 'left'), vertical:'center' },
+      numFmt: c.type === 'num' ? '#,##0' : undefined,
+      border: LIGHT ? undefined : xsBorder() };
+  };
   rows.forEach(r => {
+    const red = r.__red || [];
     push(columns.map(c => r[c.key] === undefined || r[c.key] === null ? '' : r[c.key]),
-         columns.map(c => ({
-           font:{ name:XS.KO, sz:9.5, color:{ rgb: (r.__red && r.__red.includes(c.key)) ? XS.DANGER : XS.INK },
-                  bold: !!(r.__red && r.__red.includes(c.key)) },
-           alignment:{ horizontal: c.align || (c.type === 'num' ? 'right' : 'left'), vertical:'center' },
-           numFmt: c.type === 'num' ? '#,##0' : undefined,
-           border: xsBorder() })));
+         columns.map(c => styleFor(c, red.includes(c.key))));
   });
   if(totals){
     push(columns.map(c => totals[c.key] === undefined ? '' : totals[c.key]),
@@ -6369,7 +6378,6 @@ function xlsxHouse({ filename, sheetName, title, subtitle, summary, steps, colum
   ws['!rows'] = aoa.map((_, R) => R === 0 ? { hpt: 22 } : (R === headRow ? { hpt: 20 } : {}));
   ws['!autofilter'] = { ref: XLSX.utils.encode_range(
       { s:{r:headRow,c:0}, e:{r: headRow + rows.length, c: W-1} }) };
-  ws['!freeze'] = { xSplit:0, ySplit: headRow+1 };
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, sheetName || 'Sheet1');
   XLSX.writeFile(wb, filename);
