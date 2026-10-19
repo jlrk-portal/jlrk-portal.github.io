@@ -6540,6 +6540,157 @@ function pndNgTable(all, wsName){
     }).join('')}</tbody></table></div></div>`;
 }
 
+/* ── P&D 원본(차란차 전체리스트 + 매니저 검토본) 업로드 ──────────────
+   매니저가 엑셀에 적은 7개 항목 O/X·전체판정·코멘트를 그대로 읽어 적재한다.
+   컬럼 위치가 아니라 '머리글 이름' 으로 찾는다 — 열이 밀려도 깨지지 않게. */
+const PND_WS = {
+  'AJU한남 AS':'AJ-HN','AJU인천남동 AS':'AJ-ICND','AJU성산 AS':'AJ-SS',
+  'CHL대치 AS':'CH-DC','CHL성수 AS':'CH-SS','CHL수원 AS':'CH-SW','CHL천안 AS':'CH-SW',
+  'EN대구 AS':'EN-DG','HS부산센텀 AS':'HS-BC','HS울산 AS':'HS-US','HY부산 AS':'HY',
+  'JL대전 AS':'JL','KCC분당 AS':'KCC-BD','KCC강동 AS':'KCC-GD','KCC일산 AS':'KCC-IS',
+  'KCC제주자일 AS':'KCC-JJ','KCC서초양재 AS':'KCC-SC','KCC성남 AS':'KCC-SN',
+  'KCC원주 AS':'KCC-WJ','WB광주 AS':'WB-GJ','WB전주 AS':'WB-JJ',
+};
+
+function pndParse(buf){
+  const wb = XLSX.read(buf, { type:'array', cellDates:true });
+  const sh = wb.SheetNames.find(n => /전체리스트|JLRK/i.test(n)) || wb.SheetNames[0];
+  const rows = XLSX.utils.sheet_to_json(wb.Sheets[sh], { header:1, defval:'', raw:false });
+  // 머리글 행 찾기 — '지점' 과 '탁송일자' 가 같이 있는 줄
+  let h = -1;
+  for(let i = 0; i < Math.min(rows.length, 12); i++){
+    const n = rows[i].map(normalizeLabel);
+    if(n.includes('지점') && n.some(x => x.startsWith('탁송일'))){ h = i; break; }
+  }
+  if(h === -1) throw new Error("머리글(지점·탁송일자)을 찾지 못했습니다. 원본 시트인지 확인해주세요.");
+  const H = rows[h].map(normalizeLabel);
+  //  같은 이름이 두 번 나오는 묶음(리테일러 제출 7개 / JLRK 확인 7개) — 앞/뒤를 나눠 잡는다
+  const at = (name, nth) => { let k = -1;
+    for(let i = 0; i < H.length; i++) if(H[i] === normalizeLabel(name)){ k++; if(k === nth) return i; }
+    return -1; };
+  const one = (...names) => { for(const nm of names){ const i = at(nm, 0); if(i !== -1) return i; } return -1; };
+  const CHK = [['주문자명','주문자명'], ['주문자연락처','주문자 연락처'], ['고객명','고객명'],
+               ['차량번호','차량 번호'], ['차량모델','차량 모델'],
+               ['RO/예약번호','RO# / 예약#'], ['차대번호','차대번호']];
+  const col = {
+    no: one('No'), date: one('탁송일자'), ws: one('지점'),
+    verdict: one('데이터 검증'), note: one('JLRK Comment'),
+    svc: one('서비스 유형'), leg: one('픽업&딜리버리'),
+    ctype: one('청구유형_JLRK용'), brand: one('Brand_JLRK용'), pcoc: one('PC/OC 여부'),
+    origin: one('출발지'), dest: one('도착지'), dist: one('주행거리'),
+    jlrk: one('JLRK청구'), own: one('리테일러부담'), total: one('청구 금액'),
+    fuel: one('주유비'), memo: one('특이사항'), etc: one('비고'),
+    dmsbk: one('DMS예약번호'), dmsuse: one('DMS사용목적'),
+  };
+  // 제출값(1번째) / 검증 O·X(2번째)
+  const sub = {}, chk = {};
+  CHK.forEach(([key, label]) => {
+    sub[key] = at(label, 0) !== -1 ? at(label, 0) : at(key, 0);
+    const second = at(label, 1) !== -1 ? at(label, 1) : at(key, 1);
+    chk[key] = second !== -1 ? second : at(key, 1);
+  });
+  const missing = Object.entries({ 지점:col.ws, '데이터 검증':col.verdict, JLRK청구:col.jlrk })
+    .filter(([, v]) => v === -1).map(([k]) => k);
+  if(missing.length) throw new Error('필수 열을 찾지 못했습니다: ' + missing.join(', '));
+
+  const S = v => String(v ?? '').trim();
+  const N = v => { const n = Number(S(v).replace(/,/g, '')); return isNaN(n) ? 0 : n; };
+  const D = v => { const t = S(v); if(!t) return null;
+    const m = t.match(/(\d{4})[-./](\d{1,2})[-./](\d{1,2})/);
+    return m ? `${m[1]}-${String(m[2]).padStart(2,'0')}-${String(m[3]).padStart(2,'0')}` : null; };
+
+  const out = [], unmatched = new Map();
+  for(let i = h + 1; i < rows.length; i++){
+    const r = rows[i];
+    const label = S(r[col.ws]);
+    if(!label) continue;
+    const code = PND_WS[label];
+    if(!code){ unmatched.set(label, (unmatched.get(label)||0) + 1); continue; }
+    const checks = {};
+    CHK.forEach(([key]) => { checks[key] = S(r[chk[key]]).toUpperCase() === 'X' ? 'X' : 'O'; });
+    out.push({
+      code, src_row: i + 1, branch_label: label,
+      svc_date: D(r[col.date]), leg: S(r[col.leg]), svc_type: S(r[col.svc]),
+      charge_type: S(r[col.ctype]), brand: S(r[col.brand]),
+      orderer: S(r[sub['주문자명']]), orderer_tel: S(r[sub['주문자연락처']]),
+      customer: S(r[sub['고객명']]), car_no: S(r[sub['차량번호']]),
+      car_model: S(r[sub['차량모델']]), ro_no: S(r[sub['RO/예약번호']]), vin: S(r[sub['차대번호']]),
+      origin: S(r[col.origin]), dest: S(r[col.dest]), distance: N(r[col.dist]),
+      claim_jlrk: N(r[col.jlrk]), retailer_own: N(r[col.own]), total_amt: N(r[col.total]),
+      checks, verdict: S(r[col.verdict]).toUpperCase() === 'X' ? 'X' : 'O',
+      note: S(r[col.note]),
+      extra: { 'PC/OC 여부':S(r[col.pcoc]), '주유비':S(r[col.fuel]), '특이사항':S(r[col.memo]),
+               '비고':S(r[col.etc]), 'DMS예약번호':S(r[col.dmsbk]), 'DMS사용목적':S(r[col.dmsuse]) },
+    });
+  }
+  return { rows: out, unmatched };
+}
+
+async function pndUpload(round, file, hintEl){
+  const say = t => { if(hintEl) hintEl.textContent = t; };
+  say('파일을 읽는 중...');
+  const { rows, unmatched } = pndParse(await file.arrayBuffer());
+  if(!rows.length) throw new Error('데이터 행을 찾지 못했습니다.');
+  if(unmatched.size){
+    const list = [...unmatched.entries()].map(([k,v]) => `${k} (${v}건)`).join(', ');
+    if(!confirm(`포털 지점과 매칭되지 않는 표기가 있습니다:\n${list}\n\n`
+              + `이 건들은 제외하고 ${rows.length.toLocaleString()}건만 올립니다. 계속할까요?`)) return null;
+  }
+  const { data: wss, error: wErr } = await sb.from('workshops').select('id, code, retailer_id');
+  if(wErr) throw wErr;
+  const wmap = new Map((wss||[]).map(w => [w.code, w]));
+  const bad = [...new Set(rows.map(r => r.code))].filter(c => !wmap.has(c));
+  if(bad.length) throw new Error('포털에 없는 지점 코드: ' + bad.join(', '));
+
+  say('기존 내역을 지우는 중...');
+  const { error: dErr } = await sb.from('pnd_lines').delete().eq('round_id', round.id);
+  if(dErr) throw dErr;
+
+  const CH = 500;
+  for(let i = 0; i < rows.length; i += CH){
+    say(`적재 중... ${Math.min(i+CH, rows.length).toLocaleString()} / ${rows.length.toLocaleString()}`);
+    const chunk = rows.slice(i, i + CH).map(r => {
+      const w = wmap.get(r.code);
+      const { code, ...rest } = r;
+      return { ...rest, round_id: round.id, retailer_id: w.retailer_id, workshop_id: w.id };
+    });
+    const { error } = await sb.from('pnd_lines').insert(chunk);
+    if(error) throw error;
+  }
+
+  // 지점별 청구행 — 청구액은 원 청구, 확정액은 검증 통과분
+  say('지점별 청구행을 만드는 중...');
+  const agg = new Map();
+  rows.forEach(r => {
+    const w = wmap.get(r.code);
+    const k = w.id;
+    if(!agg.has(k)) agg.set(k, { w, n:0, claimed:0, approved:0, ng:0 });
+    const a = agg.get(k), amt = Number(r.claim_jlrk||0);
+    a.n++; a.claimed += amt;
+    if(r.verdict === 'O') a.approved += amt; else a.ng++;
+  });
+  await sb.from('claims').delete().eq('round_id', round.id);
+  const claims = [...agg.values()].map(a => ({
+    round_id: round.id, retailer_id: a.w.retailer_id, workshop_id: a.w.id,
+    status: 'SUBMITTED', claimed_amount: Math.round(a.claimed), approved_amount: Math.round(a.approved),
+    submitted_at: new Date().toISOString(),
+    detail: { preset:'PND_REVIEW', lines:a.n, ng:a.ng,
+              claimed:Math.round(a.claimed), approved:Math.round(a.approved),
+              cut:Math.round(a.claimed - a.approved) },
+  }));
+  const { error: cErr } = await sb.from('claims').insert(claims);
+  if(cErr) throw cErr;
+
+  const tot = rows.reduce((s,r) => s + Number(r.claim_jlrk||0), 0);
+  const ok  = rows.filter(r => r.verdict === 'O').reduce((s,r) => s + Number(r.claim_jlrk||0), 0);
+  await sb.from('rounds').update({ source_summary: {
+    preset:'PND_REVIEW', rows: rows.length, loaded_at: new Date().toISOString(),
+    claimed: Math.round(tot), approved: Math.round(ok), file: file.name } }).eq('id', round.id);
+  await logAudit('PND_UPLOAD','ROUND',round.id,
+    { label:`${round.period_label} · ${rows.length}행`, claimed: Math.round(tot) });
+  return { n: rows.length, claimed: tot, approved: ok, workshops: agg.size };
+}
+
 async function renderPndRoundDetail(round, type){
   document.getElementById('claimsTable').style.display = 'none';
   document.getElementById('rd_title').textContent = `${type.name} · ${round.period_label}`;
@@ -6554,6 +6705,27 @@ async function renderPndRoundDetail(round, type){
     pndLoad(round.id, null),
     sb.from('workshops').select('id, code, name, retailers(code, name)')
   ]);
+  const upBox = (label) => `
+    <div class="info-card" style="margin-bottom:12px;">
+      <div class="field" style="margin:0; max-width:620px;">
+        <label>${label}</label>
+        <input type="file" id="pndFile" accept=".xlsx,.xls">
+        <div class="hint pnd-up-hint" style="margin-top:6px;">차란차 전체리스트에 검토 결과(7개 항목 O/X · 데이터 검증 · JLRK Comment)를
+          적은 원본을 그대로 올리세요. 열 위치가 달라도 머리글 이름으로 찾습니다.</div>
+      </div></div>`;
+  if(!lines.length){
+    host.innerHTML = upBox('검토본 업로드');
+    document.getElementById('pndFile').onchange = async (e) => {
+      const f = e.target.files[0]; if(!f) return;
+      const hint = host.querySelector('.pnd-up-hint');
+      try{
+        const r = await pndUpload(round, f, hint);
+        if(r){ alert(`${r.n.toLocaleString()}건 적재 완료\n원 청구 ${fmtWon(r.claimed)} · 정산 ${fmtWon(r.approved)}`);
+               await renderRoundDetail(); }
+      }catch(err){ hint.innerHTML = `<span style="color:var(--danger);">${err.message}</span>`; }
+    };
+    return;
+  }
   const wmap = new Map((wss||[]).map(w => [w.id, w]));
   const wsName = l => { const w = wmap.get(l.workshop_id);
     return w ? `${w.retailers?.code||''} ${w.name}` : (l.branch_label||'—'); };
@@ -6566,6 +6738,7 @@ async function renderPndRoundDetail(round, type){
     + `<div class="info-card">
          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
            <button class="btn btn-sm btn-ghost" id="pndXlsx">엑셀 내려받기</button>
+           ${round.status === 'DRAFT' ? '<button class="btn btn-sm btn-ghost" id="pndReload">검토본 다시 올리기</button>' : ''}
            ${round.status === 'DRAFT'
              ? `<button class="btn btn-sm" id="pndPublish">리테일러에 검토 결과 공지</button>`
              : `<span class="badge badge-ap">공지됨</span>`}
@@ -6574,6 +6747,19 @@ async function renderPndRoundDetail(round, type){
          </div></div>`;
 
   document.getElementById('pndXlsx').onclick = () => pndExport(lines, wsName, round);
+  const rl = document.getElementById('pndReload');
+  if(rl) rl.onclick = () => {
+    host.insertAdjacentHTML('afterbegin', upBox('검토본 다시 올리기 — 기존 내역을 지우고 새로 적재합니다'));
+    document.getElementById('pndFile').onchange = async (e) => {
+      const f = e.target.files[0]; if(!f) return;
+      const hint = host.querySelector('.pnd-up-hint');
+      try{
+        const r = await pndUpload(round, f, hint);
+        if(r){ alert(`${r.n.toLocaleString()}건 적재 완료\n원 청구 ${fmtWon(r.claimed)} · 정산 ${fmtWon(r.approved)}`);
+               await renderRoundDetail(); }
+      }catch(err){ hint.innerHTML = `<span style="color:var(--danger);">${err.message}</span>`; }
+    };
+  };
   const pb = document.getElementById('pndPublish');
   if(pb) pb.onclick = () => pndPublish(round, type, lines, wmap);
 }
