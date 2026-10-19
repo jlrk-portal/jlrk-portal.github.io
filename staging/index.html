@@ -1,3 +1,93 @@
+function pndExport(lines, wsName, round, who){
+  const s = pndSum(lines);
+  const F = PND_FIELDS;
+  const columns = [
+    { key:'no',     label:'No',            w:7,  type:'num', align:'center' },
+    { key:'ws',     label:'지점',          w:12 },
+    { key:'date',   label:'탁송일자',      w:11, align:'center' },
+    { key:'leg',    label:'픽업/딜리버리', w:11, align:'center' },
+    { key:'svc',    label:'서비스 유형',   w:26 },
+    { key:'pcoc',   label:'PC/OC 여부',    w:16 },
+    { key:'ctype',  label:'청구유형',      w:10, align:'center' },
+    { key:'brand',  label:'Brand',         w:11, align:'center' },
+    { key:'orderer',label:'주문자명',      w:11 },
+    { key:'tel',    label:'주문자 연락처', w:15 },
+    { key:'cust',   label:'고객명',        w:11 },
+    { key:'carno',  label:'차량번호',      w:12 },
+    { key:'model',  label:'차량모델',      w:24 },
+    { key:'rono',   label:'RO#/예약#',     w:16 },
+    { key:'vin',    label:'차대번호',      w:19 },
+    { key:'origin', label:'출발지',        w:24 },
+    { key:'dest',   label:'도착지',        w:24 },
+    { key:'dist',   label:'주행거리',      w:10, type:'num' },
+    { key:'jlrk',   label:'JLRK청구',      w:12, type:'num' },
+    { key:'own',    label:'리테일러부담',  w:13, type:'num' },
+    { key:'total',  label:'청구 금액',     w:12, type:'num' },
+    { key:'fuel',   label:'주유비',        w:10 },
+    ...F.map(f => ({ key:'chk_'+f, label:f, w:11, align:'center' })),
+    { key:'verdict',label:'데이터 검증',   w:11, align:'center' },
+    { key:'note',   label:'JLRK Comment',  w:34 },
+    { key:'memo',   label:'특이사항',      w:20 },
+    { key:'etc',    label:'비고',          w:16 },
+    { key:'dmsbk',  label:'DMS예약번호',   w:16 },
+    { key:'dmsuse', label:'DMS사용목적',   w:18 },
+  ];
+  const rows = lines.map(l => {
+    const c = l.checks || {}, x = l.extra || {};
+    const red = Object.keys(c).filter(f => c[f] === 'X').map(f => 'chk_'+f);
+    const fieldCol = { '고객명':'cust', '차량번호':'carno', '차량모델':'model',
+                       'RO/예약번호':'rono', '차대번호':'vin',
+                       '주문자명':'orderer', '주문자연락처':'tel' };
+    Object.keys(c).forEach(f => { if(c[f] === 'X' && fieldCol[f]) red.push(fieldCol[f]); });
+    if(l.verdict === 'X') red.push('verdict', 'note');
+    return {
+      no: l.src_row, ws: wsName(l), date: l.svc_date || '', leg: l.leg || '',
+      svc: l.svc_type || '', pcoc: x['PC/OC 여부'] || '', ctype: l.charge_type || '',
+      brand: l.brand || '', orderer: l.orderer || '', tel: l.orderer_tel || '',
+      cust: l.customer || '', carno: l.car_no || '', model: l.car_model || '',
+      rono: l.ro_no || '', vin: l.vin || '', origin: l.origin || '', dest: l.dest || '',
+      dist: Number(l.distance || 0), jlrk: Number(l.claim_jlrk || 0),
+      own: Number(l.retailer_own || 0), total: Number(l.total_amt || 0),
+      fuel: x['주유비'] || '',
+      ...Object.fromEntries(F.map(f => ['chk_'+f, c[f] || ''])),
+      verdict: l.verdict, note: l.note || '', memo: x['특이사항'] || '', etc: x['비고'] || '',
+      dmsbk: x['DMS예약번호'] || '', dmsuse: x['DMS사용목적'] || '',
+      __red: red,
+    };
+  });
+  const vat = Math.round(s.approved * 0.1);
+  xlsxHouse({
+    filename: `Pick up & Delivery 정산내역_${sanitizeFilename(round.period_label)}`
+            + `${who ? '_' + sanitizeFilename(who) : ''}.xlsx`,
+    sheetName: '정산내역',
+    title: `Pick up & Delivery 정산 내역 — ${round.period_label}${who ? ' · ' + who : ''}`,
+    subtitle: 'JLR Korea 검토 완료 · 금액은 공급가 기준(부가세 별도) · 빨간 글씨는 오류로 판정된 값',
+    summary: [
+      { label:'검토 대상',  value:`${s.n.toLocaleString()}건` },
+      { label:'원 청구',    value:s.claimed },
+      { label:'검증 제외',  value:s.cut, color:XS.DANGER },
+      { label:'공급가액',   value:s.approved, color:XS.OK },
+      { label:'부가세(10%)',value:vat },
+      { label:'합계',       value:s.approved + vat, color:XS.OK },
+    ],
+    steps: [
+      '■ 금액 산출',
+      `   ① 청구 ${s.n.toLocaleString()}건 중 JLR Korea 가 7개 항목과 청구유형을 건별로 대조`,
+      `   ② 오류 ${s.ng}건 (${fmtWon(s.cut)}) 을 정산에서 제외`,
+      `   ③ 나머지 ${(s.n - s.ng).toLocaleString()}건 = 공급가액 ${fmtWon(s.approved)}`,
+      ...(s.skipped ? [`   ※ JLRK 부담이 없는 Retailer 100% 건 ${s.skipped.toLocaleString()}건은 검토 대상에서 제외 (청구액 0원)`] : []),
+    ],
+    columns, rows,
+    totals: { no:'합계', jlrk:s.claimed + 0, own: lines.reduce((a,l)=>a+Number(l.retailer_own||0),0),
+              total: lines.reduce((a,l)=>a+Number(l.total_amt||0),0) },
+    notes: [
+      '· 「데이터 검증」 X 인 건이 정산에서 제외된 건입니다. 사유는 JLRK Comment 를 보십시오.',
+      '· 7개 검토 항목은 리테일러가 제출한 값과 JLR Korea 확인값을 대조한 결과입니다 (O 적합 / X 오류).',
+      '· 이견이 있으시면 정산포털에서 [이의 제출] 로 알려주십시오.',
+    ],
+  });
+}
+
 <!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -925,7 +1015,9 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<!-- SheetJS 0.18.5 커뮤니티판은 셀 서식을 못 쓴다. 같은 버전·같은 API 에
+     서식만 더한 포크로 바꿨다 — 기존 XLSX.* 코드는 그대로 동작한다. (2026-10-19) -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script>
@@ -4056,34 +4148,76 @@ async function renderOneDmsRetailerCard(listEl, round, items){
 function downloadOneDmsRetailerXlsx(claim, round){
   const d = claim.detail || {};
   const months = d.month_labels || [];
-  const header = ['이름','로그인 아이디','역할','첫 로그인 일자','재직상태','퇴직일', ...months, '사용 개월수'];
-  const dataRows = (d.users||[]).map(u => [
-    u.name||'', u.login||'', u.role||'', u.first||'', u.status||'', u.retire||'',
-    ...((u.flags||[]).map(f => f ? 'O' : '')), u.months_active||0
-  ]);
-  const pad = months.map(()=>'');
-  const aoa = [
-    [`${round.settlement_types?.name||'One DMS License Fee'} — ${round.period_label}`],
-    [`대상 인원 ${d.user_count||(d.users||[]).length}명 · ${d.user_months||0} 유저-month · 집계월 ${months.join(' / ')}`],
-    [],
-    header,
-    ...dataRows,
-    [],
-    ['합계 (유저-month)','','','','','', ...pad, d.user_months||0],
-    ['공급가액', d.amount||0],
-    ['부가세 (10%)', d.vat||0],
-    ['합계 (VAT 포함)', (d.amount||0)+(d.vat||0)]
+  const users = (d.users || []).slice()
+    .sort((x,y) => (x.status !== '재직') - (y.status !== '재직')
+                || String(x.name||'').localeCompare(String(y.name||'')));
+  const adjs = d.adjustments || [];
+  const adjSum = adjs.reduce((t,x) => t + Number(x.amount||0), 0);
+  const base = Number(d.amount || 0);
+  const net  = base + adjSum;
+  const vat  = Math.round(net * 0.1);
+  const rate = Number(d.rate || 0);
+  const who  = myRetailer?.name || '';
+  // 공급업체명은 리테일러 발송본에 넣지 않는다
+  const clean = t => String(t || '').replace(/웅진\s?/g, '');
+
+  const columns = [
+    { key:'name',  label:'이름',        w:11 },
+    { key:'login', label:'로그인 ID',   w:26 },
+    { key:'role',  label:'역할',        w:20 },
+    { key:'first', label:'최초 등록',   w:12, align:'center' },
+    { key:'stat',  label:'재직',        w:8,  align:'center' },
+    { key:'quit',  label:'퇴사일',      w:12, align:'center' },
+    ...months.map((m,i) => ({ key:'m'+i, label:m, w:9, align:'center' })),
+    { key:'mon',   label:'과금',        w:7,  type:'num', align:'center' },
+    { key:'amt',   label:'금액 (참고)', w:13, type:'num' },
   ];
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, '청구내역');
-  const fname = `${sanitizeFilename(round.settlement_types?.name||'One DMS')}_${sanitizeFilename(round.period_label)}.xlsx`;
-  const out = XLSX.write(wb, { bookType:'xlsx', type:'array' });
-  const blob = new Blob([out], { type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a'); a.href = url; a.download = fname;
-  document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+  const rows = users.map(u => ({
+    name:u.name||'', login:u.login||'', role:u.role||'', first:u.first||'',
+    stat:u.status||'', quit:u.retire||'—',
+    ...Object.fromEntries(months.map((_,i) => ['m'+i, (u.flags||[])[i] ? 'O' : '·'])),
+    mon: Number(u.months_active||0), amt: Math.round(Number(u.months_active||0) * rate),
+    __red: u.retire ? ['stat','quit'] : [],
+  }));
+  const steps = [
+    '■ 이 금액이 나온 과정',
+    '   ① 사용자별로 각 달에 라이선스가 활성이었는지 확인했습니다.  O = 그 달에 활성',
+    `   ② 활성이었던 달을 모두 더합니다.  →  ${d.user_months||0} user·월  (사용자 ${users.length}명)`,
+    `   ③ 단가를 곱합니다.  ${d.user_months||0} × ${rate.toLocaleString('ko-KR',{maximumFractionDigits:4})}원 = ${fmtWon(base)}`
+      + '   ← 원 단위 반올림은 여기서 한 번만',
+  ];
+  adjs.forEach(x => steps.push(
+    `   ④ 정정 : ${x.label||'조정'}  ${Number(x.amount)<0?'−':'+'}${fmtWon(Math.abs(x.amount))}   (${clean(x.note)})`));
+  if(adjs.length) steps.push(`   ⑤ 당분기 공급가  ${fmtWon(base)} ${adjSum<0?'−':'+'} ${fmtWon(Math.abs(adjSum))} = ${fmtWon(net)}`);
+  steps.push(`   ${adjs.length?'⑥':'④'} 부가세 10% 별도  ${fmtWon(vat)}  →  합계 ${fmtWon(net+vat)}`);
+
+  const mids = users.filter(u => u.retire).length;
+  xlsxHouse({
+    filename: `One DMS 라이선스 정산_${sanitizeFilename(round.period_label)}`
+            + `${who ? '_' + sanitizeFilename(who) : ''}.xlsx`,
+    sheetName: '라이선스 청구내역',
+    title: `One DMS 라이선스 정산 내역 — ${round.period_label}${who ? ' · ' + who : ''}`,
+    subtitle: `집계월 ${months.join(' / ')}   ·   공급가 기준, 부가세 별도`,
+    summary: [
+      { label:'청구 대상 사용자', value:`${users.length}명` },
+      { label:'과금 합계', value:`${d.user_months||0} user·월` },
+      { label:'공급가액', value:net },
+      { label:'부가세 (10%)', value:vat },
+      { label:'합계 (VAT 포함)', value:net+vat, color:XS.OK },
+    ],
+    steps,
+    columns, rows,
+    totals: { name:'합계', mon: d.user_months||0, amt: base },
+    notes: [
+      `· 「금액 (참고)」 는 1인당 환산액이라 반올림 때문에 합이 ${fmtWon(base)} 과 몇 원 다를 수 있습니다.`,
+      '  실제 청구액은 user·월 합계에 단가를 한 번 곱해 계산합니다.',
+      ...(mids ? [`· 분기 중 퇴사·휴직 ${mids}명이 포함되어 있습니다. 계약상 분기 중 퇴사자도 그 분기 비용은 전액 과금됩니다.`,
+                  '  다만 분기 마지막날 18:00 이전에 퇴사 처리가 완료되어야 다음 분기에 과금되지 않습니다.'] : []),
+      '· 이의가 있으시면 정산포털에서 해당 인원을 체크하고 사유·비고를 적어 [이의 제출] 을 눌러주십시오.',
+    ],
+  });
 }
+
 
 /* ================================================================
    Engine Oil 3V — 바우처 3종 생성 (3단계)
@@ -6237,6 +6371,101 @@ function appendDueEditor(actions, round, type){
 }
 
 /* ================================================================
+   내려받는 엑셀의 하우스 서식
+     매니저 지시(2026-10-19): 앞으로 포털에서 나가는 모든 파일은 이 꼴로.
+     제목 → 부제 → 요약칸 → (산출 과정) → 표 → 합계.
+     숫자는 천 단위 구분, 머리글은 차콜 바탕에 흰 글씨, 합계는 회색 바탕.
+   ================================================================ */
+const XS = {
+  INK:'FF1A1A1A', MUTED:'FF6E7375', CHAR:'FF3D4448', PANEL:'FFF4F5F5',
+  LINE:'FFE3E5E6', WARN:'FFFDF3EC', DANGER:'FFC0392B', OK:'FF2F7D52',
+  KO:'맑은 고딕',
+};
+const xsBorder = () => ({ top:{style:'thin',color:{rgb:XS.LINE}}, bottom:{style:'thin',color:{rgb:XS.LINE}},
+                          left:{style:'thin',color:{rgb:XS.LINE}}, right:{style:'thin',color:{rgb:XS.LINE}} });
+const xsCell = (v, st) => ({ v: (v === null || v === undefined) ? '' : v,
+                             t: typeof v === 'number' ? 'n' : 's', s: st });
+
+/* columns: [{key, label, w, type:'num'|'date'|'text', align}] */
+function xlsxHouse({ filename, sheetName, title, subtitle, summary, steps, columns, rows, totals, notes }){
+  const aoa = [];        // 값
+  const sty = [];        // 같은 좌표의 서식
+  const push = (vals, styles) => { aoa.push(vals); sty.push(styles || []); };
+  const W = columns.length;
+  const blank = () => new Array(W).fill('');
+
+  push([title, ...new Array(W-1).fill('')],
+       [{ font:{ name:XS.KO, sz:14, bold:true, color:{rgb:XS.INK} } }]);
+  if(subtitle) push([subtitle, ...new Array(W-1).fill('')],
+       [{ font:{ name:XS.KO, sz:9, color:{rgb:XS.MUTED} } }]);
+  push(blank());
+
+  if(summary && summary.length){
+    push(summary.map(x => x.label).concat(new Array(Math.max(0, W-summary.length)).fill('')),
+         summary.map(() => ({ font:{ name:XS.KO, sz:9.5, bold:true, color:{rgb:'FFFFFFFF'} },
+                              fill:{ fgColor:{rgb:XS.CHAR} }, alignment:{horizontal:'center'}, border:xsBorder() })));
+    push(summary.map(x => x.value).concat(new Array(Math.max(0, W-summary.length)).fill('')),
+         summary.map(x => ({ font:{ name:XS.KO, sz:12, bold:true,
+                                    color:{rgb: x.color || XS.INK} },
+                             alignment:{horizontal:'center'}, border:xsBorder(),
+                             numFmt: typeof x.value === 'number' ? '#,##0' : undefined })));
+    push(blank());
+  }
+  (steps || []).forEach(t => push([t, ...new Array(W-1).fill('')],
+    [{ font:{ name:XS.KO, sz:9.5, color: t.startsWith('■') ? {rgb:XS.INK} : {rgb:XS.MUTED},
+              bold: t.startsWith('■') } }]));
+  if(steps && steps.length) push(blank());
+
+  const headRow = aoa.length;
+  push(columns.map(c => c.label),
+       columns.map(() => ({ font:{ name:XS.KO, sz:9.5, bold:true, color:{rgb:'FFFFFFFF'} },
+                            fill:{ fgColor:{rgb:XS.CHAR} }, alignment:{horizontal:'center', wrapText:true},
+                            border:xsBorder() })));
+  rows.forEach(r => {
+    push(columns.map(c => r[c.key] === undefined || r[c.key] === null ? '' : r[c.key]),
+         columns.map(c => ({
+           font:{ name:XS.KO, sz:9.5, color:{ rgb: (r.__red && r.__red.includes(c.key)) ? XS.DANGER : XS.INK },
+                  bold: !!(r.__red && r.__red.includes(c.key)) },
+           alignment:{ horizontal: c.align || (c.type === 'num' ? 'right' : 'left'), vertical:'center' },
+           numFmt: c.type === 'num' ? '#,##0' : undefined,
+           border: xsBorder() })));
+  });
+  if(totals){
+    push(columns.map(c => totals[c.key] === undefined ? '' : totals[c.key]),
+         columns.map(c => ({ font:{ name:XS.KO, sz:9.5, bold:true, color:{rgb:XS.INK} },
+                             fill:{ fgColor:{rgb:XS.PANEL} },
+                             alignment:{ horizontal: c.align || (c.type === 'num' ? 'right' : 'left') },
+                             numFmt: c.type === 'num' ? '#,##0' : undefined,
+                             border: xsBorder() })));
+  }
+  if(notes && notes.length){
+    push(blank());
+    notes.forEach(t => push([t, ...new Array(W-1).fill('')],
+      [{ font:{ name:XS.KO, sz:9, color:{rgb:XS.MUTED} } }]));
+  }
+
+  // AOA → 시트 (서식을 같이 입힌다)
+  const ws = {};
+  const range = { s:{r:0,c:0}, e:{r:aoa.length-1, c:W-1} };
+  aoa.forEach((row, R) => row.forEach((v, C) => {
+    const st = (sty[R] || [])[C];
+    const cell = xsCell(v, st);
+    if(st && st.numFmt && typeof v === 'number') cell.z = st.numFmt;
+    if(cell.v === '' && !st) return;
+    ws[XLSX.utils.encode_cell({r:R, c:C})] = cell;
+  }));
+  ws['!ref'] = XLSX.utils.encode_range(range);
+  ws['!cols'] = columns.map(c => ({ wch: c.w || 14 }));
+  ws['!rows'] = aoa.map((_, R) => R === 0 ? { hpt: 22 } : (R === headRow ? { hpt: 20 } : {}));
+  ws['!autofilter'] = { ref: XLSX.utils.encode_range(
+      { s:{r:headRow,c:0}, e:{r: headRow + rows.length, c: W-1} }) };
+  ws['!freeze'] = { xSplit:0, ySplit: headRow+1 };
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, sheetName || 'Sheet1');
+  XLSX.writeFile(wb, filename);
+}
+
+/* ================================================================
    Pick up & Delivery — 건별 검토 결과
      매니저가 차란차 전체 리스트에 7개 항목(주문자명·연락처·고객명·차량번호·
      차량모델·RO/예약번호·차대번호) O/X 와 전체판정·사유를 적은 것을 그대로 담아,
@@ -6563,7 +6792,7 @@ async function renderPndRetailerCard(listEl, round, items){
          <br>· 제외된 건에 이견이 있으시면 <b>[이의 제출]</b> 로 알려주십시오.</div>`;
 
   card.querySelector('.pd-xlsx').addEventListener('click', e => {
-    e.stopPropagation(); pndExport(lines, wsName, round);
+    e.stopPropagation(); pndExport(lines, wsName, round, myRetailer?.name);
   });
   const db = card.querySelector('.pd-dispute');
   if(db) db.addEventListener('click', async (e) => {
