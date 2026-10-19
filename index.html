@@ -1067,11 +1067,35 @@ function parseClaimWorkbook(arrayBuffer){
   return Array.from(agg.values()).map(v => ({ label: v.label, amount: Math.round(v.amount) }));
 }
 
+/* 청구서 양식에 쓰이는 지점 표기 중 포털 코드와 다른 것들.
+   양식은 리테일러가 오래 쓰던 것이라 건드리지 않고 포털에서 받아준다. (2026-10-19)
+     · 'EN'    — Recall 양식 드롭다운의 인타이어 대구. 포털 코드는 EN-DG
+                 ('EN SDG'(서대구)는 별도로 있으므로 EN = 대구가 맞다)
+     · 'CH CA' — 천안. 벤더코드 폐기로 수원(CH-SW)에 합산 정산한다 (2026-09-29 확정) */
+const WS_ALIAS = { 'EN':'EN-DG', 'CHCA':'CH-SW', '천안':'CH-SW', '천안서비스센터':'CH-SW' };
+
 function matchWorkshop(label){
   const norm = normalizeLabel(label);
-  // 1순위: 지점 코드(workshops.code) 매칭, 2순위: 지점명(workshops.name) 매칭
-  return myWorkshops.find(w => normalizeLabel(w.code) === norm)
-      || myWorkshops.find(w => normalizeLabel(w.name) === norm);
+  // 1순위: 지점 코드(workshops.code), 2순위: 지점명(workshops.name)
+  let hit = myWorkshops.find(w => normalizeLabel(w.code) === norm)
+         || myWorkshops.find(w => normalizeLabel(w.name) === norm);
+  if(hit) return hit;
+  // 3순위: 별칭표
+  const alias = WS_ALIAS[norm];
+  if(alias){
+    hit = myWorkshops.find(w => normalizeLabel(w.code) === normalizeLabel(alias));
+    if(hit) return hit;
+  }
+  // 4순위: '한남 서비스센터' 처럼 뒤에 붙은 말을 떼고 다시 본다
+  const bare = norm.replace(/(서비스센터|서비스쎈터|지점|센터|SERVICECENTER|WORKSHOP)$/,'');
+  if(bare && bare !== norm){
+    hit = myWorkshops.find(w => normalizeLabel(w.code) === bare)
+       || myWorkshops.find(w => normalizeLabel(w.name) === bare);
+    if(hit) return hit;
+    const a2 = WS_ALIAS[bare];
+    if(a2) return myWorkshops.find(w => normalizeLabel(w.code) === normalizeLabel(a2)) || null;
+  }
+  return null;
 }
 
 // 마감 임박 배지
