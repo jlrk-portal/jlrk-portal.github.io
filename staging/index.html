@@ -6261,11 +6261,17 @@ async function pndLoad(roundId, retailerId){
   return out;
 }
 
+/* JLRK 부담이 0원인 건은 Retailer 100% 부담이라 정합성을 볼 이유가 없다.
+   (N634 등 캠페인·기타 Retailer100% 유형) — 검토 대상에서 빼고 건수만 따로 알린다.
+   2026-10-19 매니저 지시. 금액에는 영향이 없다(어차피 0원). */
+const pndBillable = l => Number(l.claim_jlrk || 0) > 0;
+
 function pndSum(lines){
-  const s = { n: lines.length, claimed: 0, approved: 0, ng: 0, cut: 0 };
+  const s = { n: 0, claimed: 0, approved: 0, ng: 0, cut: 0, skipped: 0 };
   lines.forEach(l => {
     const a = Number(l.claim_jlrk || 0);
-    s.claimed += a;
+    if(!pndBillable(l)){ s.skipped++; return; }
+    s.n++; s.claimed += a;
     if(l.verdict === 'O') s.approved += a; else { s.ng++; s.cut += a; }
   });
   return s;
@@ -6282,11 +6288,15 @@ function pndCards(s){
     ${box('리테일러 원 청구', fmtWon(s.claimed), `${s.n.toLocaleString()}건`)}
     ${box('검증 제외', fmtWon(s.cut), `${s.ng}건`, 'color:var(--danger,#c0392b);')}
     ${box('이번 정산 금액', fmtWon(s.approved), `${(s.n - s.ng).toLocaleString()}건 · 공급가`, 'color:var(--accent);')}
-  </div>`;
+  </div>
+  ${s.skipped ? `<div class="hint" style="margin:-4px 0 12px;">
+      JLRK 부담이 없는 Retailer 100% 건 <b>${s.skipped.toLocaleString()}건</b>은 정합성 검토 대상에서 제외했습니다
+      (N634 등 캠페인·기타). 청구액이 0원이라 정산 금액에는 영향이 없습니다.</div>` : ''}`;
 }
 
 /* 항목별 적합 여부 — 7개 항목 각각 몇 건이 걸렸는지 */
-function pndFieldTable(lines){
+function pndFieldTable(all){
+  const lines = all.filter(pndBillable);
   const cnt = {}; PND_FIELDS.forEach(f => cnt[f] = 0);
   lines.forEach(l => PND_FIELDS.forEach(f => { if((l.checks||{})[f] === 'X') cnt[f]++; }));
   const typeNg = lines.filter(l => l.verdict === 'X'
@@ -6313,7 +6323,8 @@ function pndFieldTable(lines){
 }
 
 /* 지점별 집계 */
-function pndByWorkshop(lines, wsName){
+function pndByWorkshop(all, wsName){
+  const lines = all.filter(pndBillable);
   const g = new Map();
   lines.forEach(l => {
     const k = l.workshop_id || l.branch_label;
@@ -6344,8 +6355,8 @@ function pndByWorkshop(lines, wsName){
 }
 
 /* 제외된 건 상세 — 어느 항목이 걸렸는지 그 줄에서 보이게 */
-function pndNgTable(lines, wsName){
-  const ng = lines.filter(l => l.verdict === 'X');
+function pndNgTable(all, wsName){
+  const ng = all.filter(l => pndBillable(l) && l.verdict === 'X');
   if(!ng.length) return `<div class="info-card" style="margin-bottom:12px;">
     <b style="color:var(--accent);">✓ 제외된 건이 없습니다.</b>
     <div class="hint" style="margin-top:4px;">청구하신 전 건이 검토를 통과했습니다.</div></div>`;
