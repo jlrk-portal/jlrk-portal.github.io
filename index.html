@@ -670,6 +670,13 @@
     <div class="section-label">금액 처리</div>
     <div class="row2">
       <div class="field"><label>부가세</label><select id="f_vat_included"><option value="false">별도</option><option value="true">포함</option></select></div>
+      <div class="field"><label>세금계산서</label>
+        <select id="f_requires_invoice">
+          <option value="false">발행 없음</option>
+          <option value="true">리테일러가 JLRK 앞으로 발행</option>
+        </select>
+        <div class="hint">「발행」이면 정산 확정 뒤 리테일러 화면에 계산서 업로드 칸이 열리고,
+          제출하면 관리자에게 알림이 갑니다.</div></div>
       <div class="field"><label>절사 방식</label><select id="f_rounding"><option value="FLOOR">원단위 절사</option><option value="ROUND">반올림</option><option value="CEIL">원단위 올림</option></select></div>
     </div>
     <div class="field"><label>상한액 (선택)</label><input id="f_amount_cap" type="number" placeholder="없으면 비워두기"></div>
@@ -1823,6 +1830,7 @@ function openTypePanel(t){
   document.getElementById('f_early_close').checked = !!t?.early_close;
   document.getElementById('f_allow_reopen').checked = t ? !!t.allow_reopen : true;
   document.getElementById('f_vat_included').value = String(!!t?.vat_included);
+  document.getElementById('f_requires_invoice').value = String(!!t?.requires_invoice);
   document.getElementById('f_rounding').value = t?.rounding || 'FLOOR';
   document.getElementById('f_amount_cap').value = t?.amount_cap || '';
   document.getElementById('f_notify').value = t?.notify || 'INSTANT';
@@ -1880,6 +1888,7 @@ document.getElementById('saveTypeBtn').addEventListener('click', async () => {
     early_close: document.getElementById('f_early_close').checked,
     allow_reopen: document.getElementById('f_allow_reopen').checked,
     vat_included: document.getElementById('f_vat_included').value === 'true',
+    requires_invoice: document.getElementById('f_requires_invoice').value === 'true',
     rounding: document.getElementById('f_rounding').value,
     amount_cap: document.getElementById('f_amount_cap').value ? parseFloat(document.getElementById('f_amount_cap').value) : null,
     notify: document.getElementById('f_notify').value,
@@ -6859,6 +6868,46 @@ function pndBindConfirm(round, type, claims, rets, host){
   };
 }
 
+/* 관리자 — 리테일러가 올린 세금계산서 접수 현황 (requires_invoice 유형만) */
+async function pndInvoicePanel(round, type, claims, rets){
+  if(!type?.requires_invoice) return '';
+  if(!['CONFIRMED','INVOICED'].includes(round.status)) return '';
+  const { data: invs } = await sb.from('invoices').select('*').eq('round_id', round.id);
+  const byRt = new Map((invs||[]).map(i => [i.retailer_id, i]));
+  const sums = new Map();
+  claims.forEach(c => sums.set(c.retailer_id,
+    (sums.get(c.retailer_id) || 0) + Number(c.approved_amount || 0)));
+  const rows = [...sums.entries()].map(([id, amt]) => ({
+    id, amt, name: (rets.get(id)?.code || '') + ' ' + (rets.get(id)?.name || ''), inv: byRt.get(id),
+  })).sort((a,b) => a.name.localeCompare(b.name));
+  const got = rows.filter(r => r.inv).length;
+  return `<div style="border:1px solid var(--surface3); border-radius:6px; overflow:hidden; margin-bottom:12px;">
+    <div style="padding:9px 12px; background:var(--surface2); border-bottom:1px solid var(--surface3); font-weight:600;">
+      세금계산서 접수 현황 <span class="hint" style="margin-left:6px;">${got} / ${rows.length}개사 제출</span>
+      ${round.invoice_issue_date ? `<span class="hint" style="margin-left:8px;">발행일 ${round.invoice_issue_date}</span>` : ''}</div>
+    <div style="overflow-x:auto;"><table style="min-width:720px;"><thead><tr>
+      <th>리테일러</th><th style="text-align:right;">공급가액</th><th style="text-align:right;">제출 부가세</th>
+      <th style="text-align:center;">10% 검산</th><th style="text-align:center;">상태</th>
+      <th>제출일시</th><th>파일</th></tr></thead><tbody>
+      ${rows.map(r => {
+        const exp = Math.round(r.amt * 0.1);
+        const ok = r.inv && Number(r.inv.vat) === exp;
+        return `<tr><td>${r.name}</td>
+          <td style="text-align:right;">${fmtWon(r.amt)}</td>
+          <td style="text-align:right;">${r.inv && r.inv.vat != null ? fmtWon(r.inv.vat) : '—'}</td>
+          <td style="text-align:center;">${!r.inv ? '—'
+            : (ok ? '<span class="badge badge-ap">일치</span>'
+                  : '<span class="badge badge-ar">확인필요</span>')}</td>
+          <td style="text-align:center;">${r.inv
+            ? '<span class="badge badge-ap">제출됨</span>'
+            : '<span class="badge badge-warn">미제출</span>'}</td>
+          <td class="muted">${r.inv?.submitted_at ? new Date(r.inv.submitted_at).toLocaleString('ko-KR') : '—'}</td>
+          <td>${r.inv?.file_path
+            ? `<span class="file-link" data-path="${r.inv.file_path}">내려받기</span>` : '—'}</td></tr>`;
+      }).join('')}
+    </tbody></table></div></div>`;
+}
+
 async function renderPndRoundDetail(round, type){
   document.getElementById('claimsTable').style.display = 'none';
   document.getElementById('rd_title').textContent = `${type.name} · ${round.period_label}`;
@@ -6902,8 +6951,10 @@ async function renderPndRoundDetail(round, type){
     return w ? `${w.retailers?.code||''} ${w.name}` : (l.branch_label||'—'); };
   const s = pndSum(lines);
 
+  const invPanel = await pndInvoicePanel(round, type, pclaims || [], retMap);
   host.innerHTML = pndCards(s)
     + ((pclaims||[]).length ? pndConfirmPanel(round, pclaims, retMap) : '')
+    + invPanel
     + pndByWorkshop(lines, wsName)
     + pndFieldTable(lines)
     + pndNgTable(lines, wsName)
@@ -6919,6 +6970,8 @@ async function renderPndRoundDetail(round, type){
          </div></div>`;
 
   pndBindConfirm(round, type, pclaims||[], retMap, host);
+  host.querySelectorAll('.file-link').forEach(el =>
+    el.addEventListener('click', () => downloadFile(el.dataset.path)));
   document.getElementById('pndXlsx').onclick = () => pndExport(lines, wsName, round);
   const rl = document.getElementById('pndReload');
   if(rl) rl.onclick = () => {
@@ -7084,6 +7137,7 @@ function pndExport(lines, wsName, round, who){
 /* 확정 마감(CONFIRMED) 이후 세금계산서 제출 — invoices 테이블·관리자 알림은 기존 흐름 그대로 */
 async function pndInvoiceBlock(host, round, supplyAmount){
   if(!host) return;
+  if(!round.settlement_types?.requires_invoice) return;
   if(!['CONFIRMED','INVOICED'].includes(round.status)) return;
   const { data: inv } = await sb.from('invoices').select('*')
     .eq('round_id', round.id).eq('retailer_id', myRetailer?.id).maybeSingle();
@@ -7438,7 +7492,7 @@ async function renderRoundDetail(){
   /* ---------- 세금계산서 섹션 (CONFIRMED / INVOICED) — 리테일러 단위 1건, 제출현황을 실시간 계산 ---------- */
   const invoiceSection = document.getElementById('invoiceSection');
   invoiceSection.innerHTML = '';
-  if(round.status === 'CONFIRMED' || round.status === 'INVOICED'){
+  if((round.status === 'CONFIRMED' || round.status === 'INVOICED') && type?.requires_invoice){
     const summary = buildRetailerSummary(claims).filter(g => g.approved === g.total && g.total > 0);
     const { data: invoiceRows } = await sb.from('invoices').select('*').eq('round_id', currentRoundId);
     const invByRetailer = new Map((invoiceRows||[]).map(i => [i.retailer_id, i]));
@@ -9679,8 +9733,10 @@ async function loadRetailerClaims(){
       el.addEventListener('click', () => downloadFile(el.dataset.path, el.dataset.name));
     });
 
-    /* ---------- 세금계산서 제출 (확정 공지 이후, 전체 승인 완료 시 자동 오픈, 리테일러당 1건) ---------- */
-    if(round.status === 'CONFIRMED' || round.status === 'INVOICED'){
+    /* ---------- 세금계산서 제출 (확정 공지 이후, 전체 승인 완료 시 자동 오픈, 리테일러당 1건) ----------
+       리테일러가 JLRK 앞으로 계산서를 끊는 유형에서만 연다 (정산유형 관리 → 세금계산서). */
+    if((round.status === 'CONFIRMED' || round.status === 'INVOICED')
+       && round.settlement_types?.requires_invoice){
       const total = items.length;
       const approvedCount = items.filter(c => c.status === 'APPROVED').length;
       const supplyAmount = items.reduce((sum,c) => sum + (c.status==='APPROVED' ? Number(c.approved_amount||0) : 0), 0);
