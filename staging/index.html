@@ -1417,17 +1417,16 @@ async function checkEmailStatus(){
   const el = document.getElementById('rd_email_hint');
   if(!el) return;
   try{
-    const { error } = await sb.functions.invoke('send-email', { body: { ping: true } });
-    // 함수가 배포돼 있으면 파라미터 부족(400) 응답이 오고, 미배포면 404/네트워크 오류
-    if(error && /not found|404|failed to fetch|networkerror/i.test(error.message || '')){
-      el.textContent = '※ 이메일 알림 미연결 — Edge Function(send-email) 배포 전입니다. 개설 후 리테일러에 별도 안내해주세요.';
-      el.style.color = 'var(--accent-ar)';
-    } else {
-      el.textContent = '✓ 이메일 알림 연결됨 — 개설 시 대상 리테일러에게 청구 요청 메일이 자동 발송됩니다.';
-      el.style.color = 'var(--accent)';
-    }
+    // 메일은 전부 email_outbox 에 쌓였다가 사람이 [발송] 을 눌러야 나간다.
+    // 그러니 점검할 대상은 send-email 함수가 아니라 대기함 테이블이다.
+    const { error } = await sb.from('email_outbox').select('id', { count:'exact', head:true });
+    if(error) throw error;
+    el.innerHTML = '✓ 개설하면 청구 요청 메일이 <b>발송 대기함</b>에 쌓입니다 — '
+                 + '대기함에서 [발송] 을 눌러야 리테일러에게 실제로 나갑니다.';
+    el.style.color = 'var(--accent)';
   } catch(e){
-    el.textContent = '※ 이메일 알림 상태를 확인할 수 없습니다.';
+    el.textContent = '※ 발송 대기함을 확인할 수 없습니다. 개설 후 메일 발송 대기함을 직접 확인해주세요.';
+    el.style.color = 'var(--accent-ar)';
   }
 }
 
@@ -3809,6 +3808,10 @@ async function generateOneDmsVoucher(round, type, claims){
   }
 }
 
+// 스토리지 버킷 업로드 상한 (Supabase settlements 버킷 설정값). 바꾸려면 버킷 설정도 같이 바꿀 것.
+const UPLOAD_LIMIT = 20 * 1024 * 1024;
+const UPLOAD_WARN  = 16 * 1024 * 1024;
+
 const OD_REASONS = ['직전 분기 이전 퇴사','미사용 계정','중복 계정','담당자 아님','지점이 다름','기타'];
 
 /* ---------- 리테일러 화면: One DMS 청구내역 확인 카드 (라이선스 종류 비공개)
@@ -5232,7 +5235,7 @@ async function renderAdminUploadSection(round, type, claims){
         const detail = { ...(cur.detail || {}) };
         if(file){
           hint.textContent = `파일 업로드 중... (${saved+1})`;
-          const path = `${tr.dataset.retailerId}/${round.id}/admin-${Date.now()}-${sanitizeFilename(file.name)}`;
+          const path = `${tr.dataset.retailerId}/${round.id}/admin-${Date.now()}-${storageSafeName(file.name)}`;
           const { error: upErr } = await sb.storage.from('settlements').upload(path, file, { upsert:true });
           if(upErr){ failed++; console.warn('산정파일 업로드 실패', upErr.message); continue; }
           detail.admin_file_path = path;
@@ -5357,7 +5360,7 @@ async function renderAdminUploadRetailerCard(listEl, round, items){
       reviseBtn.disabled = true;
       let filePath = claim.file_path || null;
       if(file){
-        const path = `${myProfile.retailer_id}/${round.id}/revised-${Date.now()}-${sanitizeFilename(file.name)}`;
+        const path = `${myProfile.retailer_id}/${round.id}/revised-${Date.now()}-${storageSafeName(file.name)}`;
         const { error: upErr } = await sb.storage.from('settlements').upload(path, file, { upsert:true });
         if(upErr){ alert('파일 업로드 실패: ' + upErr.message); reviseBtn.disabled = false; return; }
         filePath = path;
@@ -6447,7 +6450,13 @@ async function renderRoundDetail(){
       <td>${claimedText}</td>
       <td>${approvedText}</td>
       <td class="muted">${c.submitted_at ? new Date(c.submitted_at).toLocaleString('ko-KR') : '—'}</td>
-      <td>${c.file_path ? `<span class="file-link" data-path="${c.file_path}">다운로드</span>` : '—'}</td>`;
+      <td>${c.file_path ? `<span class="file-link" data-path="${c.file_path}">다운로드</span>` : '—'}
+          ${(c.detail?.evidence_files||[]).length
+            ? `<div class="hint" style="margin-top:4px;">증빙 ${c.detail.evidence_files.length}개<br>`
+              + c.detail.evidence_files.map(f =>
+                  `<span class="file-link" data-path="${f.path}">${String(f.name).replace(/[<>]/g,'')}</span>`
+                ).join('<br>') + '</div>'
+            : ''}</td>`;
     tbody.appendChild(tr);
   });
   tbody.querySelectorAll('.file-link').forEach(el => {
@@ -7320,6 +7329,18 @@ async function buildVoucherFromTemplate(tplBuffer, { inputCells, coverCells, ima
 
 function sanitizeFilename(s){
   return String(s||'').trim().replace(/[\\/:*?"<>|]/g, '_');
+}
+
+/* 스토리지 키 전용 — ASCII 만 남긴다.
+   Supabase Storage 는 한글·공백·괄호가 든 키를 InvalidKey(400) 로 거절한다.
+   원본 파일명은 화면 표시용으로 따로 들고 다닐 것. */
+function storageSafeName(s){
+  const n = String(s || 'file').trim();
+  const dot = n.lastIndexOf('.');
+  const ext = dot > 0 ? n.slice(dot + 1).replace(/[^a-zA-Z0-9]/g, '').slice(0, 8) : '';
+  const base = (dot > 0 ? n.slice(0, dot) : n).replace(/[^a-zA-Z0-9.\-_]/g, '_')
+                 .replace(/_+/g, '_').replace(/^_|_$/g, '').slice(0, 60);
+  return (base || 'file') + (ext ? '.' + ext : '');
 }
 
 
@@ -8347,6 +8368,13 @@ async function loadRetailerClaims(){
           <label>② 작성한 청구서 업로드 (전 지점 데이터를 한 파일에 작성)</label>
           <input type="file" class="group-file-input" accept=".xlsx,.xls" ${formPath?'':'disabled'}>
           <div class="hint group-parse-hint">${noticeHtml}</div>
+        </div>
+        <div class="field" style="margin-bottom:14px;">
+          <label>③ 증빙 파일 (선택) — 장착 사진 · 작업지시서 등</label>
+          <input type="file" class="group-evi-input" accept=".jpg,.jpeg,.png,.heic,.pdf,.zip" multiple>
+          <div class="hint group-evi-hint">여러 장 한 번에 고를 수 있습니다. <b>사진은 엑셀에 붙여넣지 말고 여기에 올려주세요</b> —
+            엑셀에 넣으면 파일 하나가 ${UPLOAD_LIMIT/1048576}MB 를 넘어 업로드가 막힙니다.
+            파일 1개당 ${UPLOAD_LIMIT/1048576}MB 까지.</div>
         </div>`;
     }
 
@@ -8474,8 +8502,23 @@ async function loadRetailerClaims(){
         const file = fileInput.files[0];
         if(!file) return;
         try{
+          // 스토리지 업로드 상한(20MB). 제출 버튼까지 간 뒤 영문 에러로 막히면
+          // 리테일러가 작성한 내용을 날린 것처럼 느낀다 — 고르는 순간 잡는다.
+          if(file.size > UPLOAD_LIMIT){
+            fileInput.value = '';
+            hintEl.innerHTML = `<span style="color:var(--danger);">✕ 파일이 너무 큽니다 — `
+              + `${(file.size/1048576).toFixed(1)}MB (업로드 한도 ${UPLOAD_LIMIT/1048576}MB)</span>`
+              + `<div style="margin-top:6px;">증빙사진을 엑셀에 붙여넣으면 금방 한도를 넘습니다. 아래 방법 중 하나로 줄여주세요.`
+              + `<br>· 엑셀에서 사진 하나를 클릭 → [그림 서식] → <b>그림 압축</b> → 해상도를 '웹(150ppi)' 으로, `
+              + `'이 그림에만 적용' 체크 해제 후 저장`
+              + `<br>· 또는 사진을 엑셀에서 빼고, 아래 <b>증빙 파일</b> 란에 따로 올려주세요.</div>`;
+            return;
+          }
           hintEl.textContent = '파일을 확인하는 중...';
           const buf = await file.arrayBuffer();
+          if(file.size > UPLOAD_WARN){
+            console.info('[업로드] 한도에 근접:', (file.size/1048576).toFixed(1), 'MB');
+          }
 
           // ── 1) 지정 양식인지 검증 ──
           const formPath = round.settlement_types?.form_template_path;
@@ -8539,9 +8582,26 @@ async function loadRetailerClaims(){
       });
     }
 
+    const eviInput = card.querySelector('.group-evi-input');
+    const eviHint = card.querySelector('.group-evi-hint');
+    if(eviInput){
+      eviInput.addEventListener('change', () => {
+        const fs = Array.from(eviInput.files || []);
+        if(!fs.length){ eviHint.innerHTML = eviHint.dataset.base || eviHint.innerHTML; return; }
+        if(!eviHint.dataset.base) eviHint.dataset.base = eviHint.innerHTML;
+        const over = fs.filter(f => f.size > UPLOAD_LIMIT);
+        const total = fs.reduce((a,f) => a + f.size, 0);
+        eviHint.innerHTML = over.length
+          ? `<span style="color:var(--danger);">✕ ${over.length}개 파일이 ${UPLOAD_LIMIT/1048576}MB 를 넘습니다 — `
+            + `${over.slice(0,3).map(f=>f.name).join(', ')}${over.length>3?' 외':''}</span>`
+            + `<div style="margin-top:4px;">해당 사진만 줄여서 다시 골라주세요.</div>`
+          : `<span style="color:var(--accent);">✓ ${fs.length}개 선택 · 합계 ${(total/1048576).toFixed(1)}MB</span>`;
+      });
+    }
+
     const submitBtn = card.querySelector('.group-submit-btn');
     if(submitBtn){
-      submitBtn.addEventListener('click', () => submitGroup(card, items, fileInput?.files[0]));
+      submitBtn.addEventListener('click', () => submitGroup(card, items, fileInput?.files[0], eviInput?.files));
     }
 
     card.querySelectorAll('.file-link').forEach(el => {
@@ -8647,7 +8707,7 @@ async function submitInvoice(round, supplyAmount, rowEl){
   await loadRetailerClaims();
 }
 
-async function submitGroup(card, items, file){
+async function submitGroup(card, items, file, eviFiles){
   const rows = card.querySelectorAll('tbody tr');
   const updates = [];
   for(const rowEl of rows){
@@ -8664,12 +8724,51 @@ async function submitGroup(card, items, file){
     const safeName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, '_');
     sharedFilePath = `${items[0].retailer_id}/${items[0].round_id}/GROUP-${Date.now()}-${safeName}`;
     const { error: upErr } = await sb.storage.from('settlements').upload(sharedFilePath, file, { upsert:true });
-    if(upErr){ alert('파일 업로드 실패: ' + upErr.message); return; }
+    if(upErr){
+      const tooBig = /exceeded the maximum allowed size|payload too large|413/i.test(upErr.message || '');
+      alert(tooBig
+        ? `파일이 너무 큽니다 (${(file.size/1048576).toFixed(1)}MB · 한도 ${UPLOAD_LIMIT/1048576}MB).\n\n`
+          + '엑셀의 사진을 압축하거나(그림 서식 → 그림 압축 → 웹 150ppi),\n'
+          + '사진을 빼고 증빙 파일 란에 따로 올려주세요.\n\n입력하신 금액은 그대로 남아 있습니다.'
+        : '파일 업로드 실패: ' + upErr.message);
+      return;
+    }
+  }
+
+  // 증빙 파일(사진·작업지시서) — 엑셀과 별도로 올린다
+  const evidence = [];
+  const evi = Array.from(eviFiles || []);
+  if(evi.length){
+    const big = evi.filter(f => f.size > UPLOAD_LIMIT);
+    if(big.length){
+      alert(`증빙 파일 ${big.length}개가 ${UPLOAD_LIMIT/1048576}MB 를 넘습니다.\n`
+          + big.slice(0,5).map(f => `· ${f.name} (${(f.size/1048576).toFixed(1)}MB)`).join('\n')
+          + '\n\n해당 파일만 줄여서 다시 선택해주세요.');
+      return;
+    }
+    const btn = card.querySelector('.group-submit-btn');
+    for(let i = 0; i < evi.length; i++){
+      const f = evi[i];
+      if(btn) btn.textContent = `증빙 업로드 중... (${i+1}/${evi.length})`;
+      const path = `${items[0].retailer_id}/${items[0].round_id}/EVI-${Date.now()}-${i}-${storageSafeName(f.name)}`;
+      const { error } = await sb.storage.from('settlements').upload(path, f, { upsert:true });
+      if(error){
+        if(btn) btn.textContent = '제출';
+        alert(`증빙 파일 업로드 실패 (${f.name}): ${error.message}`);
+        return;
+      }
+      evidence.push({ path, name: f.name, size: f.size });
+    }
+    if(btn) btn.textContent = '제출';
   }
 
   for(const u of updates){
     const payload = { claimed_amount: u.amount, status:'SUBMITTED', submitted_at: new Date().toISOString() };
     if(sharedFilePath) payload.file_path = sharedFilePath;
+    if(evidence.length){
+      const cur = (items.find(x => x.id === u.claimId) || {}).detail || {};
+      payload.detail = { ...cur, evidence_files: [...(cur.evidence_files || []), ...evidence] };
+    }
     const { error } = await sb.from('claims').update(payload).eq('id', u.claimId);
     if(error){ alert('제출 실패 (일부 항목): ' + error.message); }
   }
