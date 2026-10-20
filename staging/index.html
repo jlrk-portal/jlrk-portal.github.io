@@ -1390,7 +1390,7 @@ function renderOutbox(){
 // 관리자 알림 수신 주소 조회
 /* 이의 제출 — 회차·리테일러당 1건(UNIQUE)이라 이미 있으면 덮어쓴다.
    이전 내용은 날리지 않고 아래에 이어 붙여 경위가 남게 한다. */
-async function submitDispute(round, reason, requestedAmount, evidencePath){
+async function raiseDispute(round, reason, requestedAmount, evidencePath){
   const rid = myRetailer?.id;
   if(!rid) return { error: { message: '리테일러 정보를 찾지 못했습니다.' } };
   const { data: prev, error: findErr } = await sb.from('disputes')
@@ -4081,7 +4081,7 @@ async function renderOneDmsRetailerCard(listEl, round, items){
       });
       if(!confirm(`${picked.length}명에 대해 이의를 제출합니다.\n조정 요청 금액 ${won(cut)} (공급가 기준)\n\n` + lines.join('\n'))) return;
       db.disabled = true; db.textContent = '제출 중...';
-      const { error } = (await submitDispute(round,
+      const { error } = (await raiseDispute(round,
         `[One DMS 대상 인원 이의 ${picked.length}건 · 조정 요청 ${won(cut)}]\n` + lines.join('\n'),
         Math.max(0, net - cut)));
       if(error){ alert('제출 실패: ' + error.message); db.disabled = false; syncDispute(); return; }
@@ -7334,16 +7334,22 @@ async function renderPndRetailerCard(listEl, round, items){
       + `(해당 건의 지점·탁송일·RO번호를 같이 적어주시면 확인이 빠릅니다)`);
     if(!reason || !reason.trim()) return;
     db.disabled = true; db.textContent = '제출 중...';
-    const { error, updated } = await submitDispute(round,
-      `[Pick up & Delivery 검토 결과 이의 · 제외 ${s.ng}건 ${fmtWon(s.cut)}]\n` + reason.trim(),
-      Math.round(s.claimed));
-    if(error){ alert('제출 실패: ' + error.message); db.disabled = false; db.textContent = '이의 제출'; return; }
-    await notifyDisputeRaised(round, round.settlement_types?.name || 'Pick up & Delivery',
-      myRetailer?.name || myRetailer?.code || '', reason.trim(), s.cut);
-    alert(updated
-      ? '앞서 제출하신 이의에 내용을 덧붙였습니다. JLR Korea 가 확인 후 회신드립니다.'
-      : '이의를 제출했습니다. JLR Korea 가 확인 후 회신드립니다.');
-    await loadRetailerClaims();
+    // 중간에 무엇이 터지든 버튼이 '제출 중...' 에 머무르지 않게 한다 (2026-10-20)
+    try{
+      const { error, updated } = await raiseDispute(round,
+        `[Pick up & Delivery 검토 결과 이의 · 제외 ${s.ng}건 ${fmtWon(s.cut)}]\n` + reason.trim(),
+        Math.round(s.claimed));
+      if(error){ alert('제출 실패: ' + error.message); return; }
+      alert(updated
+        ? '앞서 제출하신 이의에 내용을 덧붙였습니다. JLR Korea 가 확인 후 회신드립니다.'
+        : '이의를 제출했습니다. JLR Korea 가 확인 후 회신드립니다.');
+      await loadRetailerClaims();
+    }catch(err){
+      console.error(err);
+      alert('제출 처리 중 오류가 발생했습니다: ' + (err.message || err));
+    }finally{
+      db.disabled = false; db.textContent = '이의 제출';
+    }
   });
   const cb = card.querySelector('.pd-confirm');
   if(cb) cb.addEventListener('click', async (e) => {
@@ -9282,7 +9288,7 @@ async function submitDispute(wrap, round, claim){
     if(upErr){ alert('근거 파일 업로드 실패: ' + upErr.message); return; }
   }
 
-  const { error } = await submitDispute(round, reason, requested, evidencePath);
+  const { error } = await raiseDispute(round, reason, requested, evidencePath);
   if(error){ alert('이의제기 실패: ' + error.message); return; }
   await logAudit('DISPUTE_RAISE','ROUND',round.id,{label:myRetailer?.code||'', reason, amount:requested});
 
