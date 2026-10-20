@@ -1388,6 +1388,26 @@ function renderOutbox(){
 }
 
 // 관리자 알림 수신 주소 조회
+// 리테일러가 이의를 제출하면 관리자에게 알린다 (발송 대기함 경유)
+async function notifyDisputeRaised(round, typeName, retailerName, reason, amount){
+  try{
+    const to = await getAdminEmails();
+    if(!to.length) return false;
+    return await sendEmail(to,
+      `[JLRK 정산] ${retailerName} 이의 제출 — ${typeName} · ${round.period_label}`,
+      emailShell('리테일러 이의 제출', `
+        <table style="${EMAIL_STYLE}border-collapse:collapse;">
+          <tr><td style="padding:4px 12px 4px 0;color:#666;">리테일러</td><td><b>${retailerName}</b></td></tr>
+          <tr><td style="padding:4px 12px 4px 0;color:#666;">정산 유형</td><td>${typeName}</td></tr>
+          <tr><td style="padding:4px 12px 4px 0;color:#666;">회차</td><td>${round.period_label}</td></tr>
+          ${amount != null ? `<tr><td style="padding:4px 12px 4px 0;color:#666;">관련 금액</td><td>${fmtWon(amount)}</td></tr>` : ''}
+        </table>
+        <p style="margin-top:14px;white-space:pre-wrap;">${String(reason||'').replace(/[<>]/g,'')}</p>
+        <p style="margin-top:14px;">정산포털에서 내용을 확인해 주세요.</p>`),
+      { kind:'DISPUTE_RAISED', retailer: retailerName, period: round.period_label });
+  }catch(e){ console.warn('[이의 알림]', e); return false; }
+}
+
 async function getAdminEmails(){
   const { data } = await sb.from('profiles').select('notify_email').eq('role','ADMIN');
   return (data||[]).map(p => p.notify_email).filter(Boolean);
@@ -4042,6 +4062,8 @@ async function renderOneDmsRetailerCard(listEl, round, items){
         reason: `[One DMS 대상 인원 이의 ${picked.length}건 · 조정 요청 ${won(cut)}]\n` + lines.join('\n')
       });
       if(error){ alert('제출 실패: ' + error.message); db.disabled = false; syncDispute(); return; }
+      await notifyDisputeRaised(round, round.settlement_types?.name || 'One DMS License Fee',
+        myRetailer?.name || myRetailer?.code || '', lines.join('\n'), cut);
       alert('이의를 제출했습니다. JLR Korea 가 확인 후 회신드립니다.');
       await loadRetailerClaims();
     });
@@ -7295,6 +7317,8 @@ async function renderPndRetailerCard(listEl, round, items){
       reason: `[Pick up & Delivery 검토 결과 이의 · 제외 ${s.ng}건 ${fmtWon(s.cut)}]\n` + reason.trim()
     });
     if(error){ alert('제출 실패: ' + error.message); db.disabled = false; db.textContent = '이의 제출'; return; }
+    await notifyDisputeRaised(round, round.settlement_types?.name || 'Pick up & Delivery',
+      myRetailer?.name || myRetailer?.code || '', reason.trim(), s.cut);
     alert('이의를 제출했습니다. JLR Korea 가 확인 후 회신드립니다.');
     await loadRetailerClaims();
   });
