@@ -6954,6 +6954,162 @@ async function pndInvoicePanel(round, type, claims, rets){
     </tbody></table></div></div>`;
 }
 
+/* ── 리테일러 이의 검토 (확정 현황 바로 위) ────────────────────────────
+   메일로 알리는 대신 화면에서 바로 본다. 매니저가 여기서
+     · 이의 반려(그대로 확정)  또는
+     · 이의 수용 → 검증 실패(X) 라인을 열어 판정·금액을 고치고 재계산
+   을 결정한다. 고친 결과가 그 리테일러의 최종 정산액이 된다. */
+async function pndDisputePanel(round, rets){
+  const { data: ds } = await sb.from('disputes')
+    .select('*, retailers(code, name)').eq('round_id', round.id)
+    .order('created_at', { ascending:false });
+  if(!ds || !ds.length) return '';
+  const open = ds.filter(d => d.status === 'RAISED');
+  const badge = st => st === 'RAISED' ? '<span class="badge badge-ar">검토 대기</span>'
+               : st === 'APPROVED' ? '<span class="badge badge-ap">수용</span>'
+               : '<span class="badge badge-off">반려</span>';
+  return `<div id="pndDisputeBox" style="border:1px solid ${open.length?'#f0c98a':'var(--surface3)'};
+       border-radius:6px; overflow:hidden; margin-bottom:12px;">
+    <div style="padding:9px 12px; background:${open.length?'#fff4e5':'var(--surface2)'};
+         border-bottom:1px solid ${open.length?'#f0c98a':'var(--surface3)'}; font-weight:600;">
+      리테일러 이의 ${ds.length}건
+      ${open.length ? `<span style="color:var(--danger,#c0392b);">· 검토 대기 ${open.length}건</span>` : ''}</div>
+    ${ds.map(d => `
+      <div style="padding:11px 13px; border-top:1px solid var(--surface3);" data-dsp="${d.id}">
+        <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+          <b>${d.retailers?.code || ''} ${d.retailers?.name || ''}</b>
+          ${badge(d.status)}
+          <span class="hint">${new Date(d.created_at).toLocaleString('ko-KR')}</span>
+          ${d.status === 'RAISED' ? `<span style="margin-left:auto; display:flex; gap:6px;">
+             <button class="btn btn-sm btn-ghost dsp-reject" data-id="${d.id}" data-rt="${d.retailer_id}">이의 반려 · 그대로 확정</button>
+             <button class="btn btn-sm dsp-accept" data-id="${d.id}" data-rt="${d.retailer_id}">이의 수용 · 라인 수정</button>
+           </span>` : ''}
+        </div>
+        <div class="hint" style="white-space:pre-wrap; margin-top:6px;">${String(d.reason||'').replace(/[<>]/g,'')}</div>
+        ${d.decision_note ? `<div class="hint" style="margin-top:4px; color:var(--accent);">처리 : ${String(d.decision_note).replace(/[<>]/g,'')}</div>` : ''}
+        <div class="dsp-editor"></div>
+      </div>`).join('')}
+  </div>`;
+}
+
+function pndBindDispute(round, type, host){
+  host.querySelectorAll('.dsp-reject').forEach(b => b.onclick = async () => {
+    const note = prompt('반려 사유를 적어주세요. 리테일러에게 그대로 보입니다.',
+      '검토 결과 변경 사항이 없어 기존 금액으로 확정합니다.');
+    if(note === null) return;
+    b.disabled = true; b.textContent = '처리 중...';
+    const { error } = await sb.from('disputes')
+      .update({ status:'REJECTED', decision_note: note,
+                decided_at: new Date().toISOString() }).eq('id', b.dataset.id).select('id');
+    if(error){ alert('처리 실패: ' + error.message); b.disabled = false; b.textContent = '이의 반려 · 그대로 확정'; return; }
+    await logAudit('PND_DISPUTE_REJECT','ROUND',round.id,{ label: note });
+    await renderRoundDetail();
+  });
+
+  host.querySelectorAll('.dsp-accept').forEach(b => b.onclick = async () => {
+    const box = b.closest('[data-dsp]').querySelector('.dsp-editor');
+    if(box.dataset.open === '1'){ box.innerHTML = ''; box.dataset.open = '0'; b.textContent = '이의 수용 · 라인 수정'; return; }
+    box.dataset.open = '1'; b.textContent = '편집 닫기';
+    box.innerHTML = '<div class="hint" style="margin-top:8px;">검증 실패 건을 불러오는 중...</div>';
+    const { data: lines, error } = await sb.from('pnd_lines').select('*')
+      .eq('round_id', round.id).eq('retailer_id', b.dataset.rt).eq('verdict','X')
+      .order('svc_date');
+    if(error){ box.innerHTML = `<div class="hint" style="color:var(--danger);">${error.message}</div>`; return; }
+    if(!lines.length){ box.innerHTML = '<div class="hint" style="margin-top:8px;">이 리테일러에는 검증 실패 건이 없습니다.</div>'; return; }
+    box.innerHTML = `
+      <div style="margin-top:10px; border:1px solid var(--surface3); border-radius:6px; overflow:hidden;">
+        <div style="padding:8px 11px; background:var(--surface2); border-bottom:1px solid var(--surface3);">
+          <b>검증 실패 ${lines.length}건</b>
+          <span class="hint" style="margin-left:6px;">판정을 O 로 바꾸거나 금액을 고치면 그 값으로 다시 계산됩니다</span></div>
+        <div style="overflow-x:auto; max-height:420px; overflow-y:auto;">
+        <table style="min-width:900px;"><thead><tr>
+          <th>탁송일</th><th>구분</th><th>고객</th><th>차량번호</th><th>RO/예약</th>
+          <th>사유</th><th style="text-align:center;">판정</th><th style="text-align:right;">JLRK 청구</th>
+        </tr></thead><tbody>
+        ${lines.map(l => `<tr data-line="${l.id}">
+          <td class="muted" style="white-space:nowrap;">${l.svc_date||''}</td>
+          <td>${l.leg||''}</td><td>${(l.customer||'').replace(/[<>]/g,'')}</td>
+          <td>${(l.car_no||'').replace(/[<>]/g,'')}</td>
+          <td class="muted">${(l.ro_no||'').replace(/[<>]/g,'')}</td>
+          <td class="hint" style="max-width:240px;">${String(l.note||'').replace(/[<>]/g,'')}</td>
+          <td style="text-align:center;">
+            <select class="dsp-v" style="padding:3px 6px;">
+              <option value="X" selected>X · 제외</option>
+              <option value="O">O · 인정</option>
+            </select></td>
+          <td style="text-align:right;">
+            <input type="text" inputmode="numeric" class="row-amt-input dsp-amt" style="width:100px;"
+                   value="${Number(l.claim_jlrk||0).toLocaleString('ko-KR')}"></td>
+        </tr>`).join('')}
+        </tbody></table></div>
+        <div style="display:flex; gap:8px; align-items:center; padding:10px 11px; border-top:1px solid var(--surface3);">
+          <span class="hint">인정으로 바꾼 금액만큼 그 리테일러의 정산액이 올라갑니다.</span>
+          <button class="btn btn-sm dsp-save" style="margin-left:auto;"
+                  data-id="${b.dataset.id}" data-rt="${b.dataset.rt}">수정 반영 · 이의 수용 처리</button>
+        </div></div>`;
+    box.querySelectorAll('.row-amt-input').forEach(formatAmountInput);
+    box.querySelector('.dsp-save').onclick = () => pndSaveDisputeEdit(round, type, box, b.dataset.id, b.dataset.rt);
+  });
+}
+
+async function pndSaveDisputeEdit(round, type, box, disputeId, retailerId){
+  const rows = [...box.querySelectorAll('tr[data-line]')].map(tr => ({
+    id: tr.dataset.line,
+    verdict: tr.querySelector('.dsp-v').value,
+    amt: readAmountInput(tr.querySelector('.dsp-amt')) || 0,
+  }));
+  const changed = rows.filter(r => r.verdict === 'O');
+  if(!confirm(`검증 실패 ${rows.length}건 중 ${changed.length}건을 인정으로 바꿉니다.\n`
+            + '이 리테일러의 정산 금액이 다시 계산됩니다. 계속할까요?')) return;
+  const btn = box.querySelector('.dsp-save');
+  btn.disabled = true; btn.textContent = '반영 중...';
+  try{
+    for(const r of rows){
+      const { error } = await sb.from('pnd_lines')
+        .update({ verdict: r.verdict, claim_jlrk: r.amt }).eq('id', r.id).select('id');
+      if(error) throw error;
+    }
+    // 그 리테일러의 지점별 청구행을 다시 계산한다
+    const all = await pndLoad(round.id, retailerId);
+    const byWs = new Map();
+    all.forEach(l => {
+      const k = l.workshop_id;
+      if(!byWs.has(k)) byWs.set(k, { claimed:0, approved:0, n:0, ng:0 });
+      const g = byWs.get(k), a = Number(l.claim_jlrk || 0);
+      g.n++; g.claimed += a;
+      if(l.verdict === 'O') g.approved += a; else g.ng++;
+    });
+    const { data: cls } = await sb.from('claims').select('id, workshop_id')
+      .eq('round_id', round.id).eq('retailer_id', retailerId);
+    for(const c of (cls||[])){
+      const g = byWs.get(c.workshop_id);
+      if(!g) continue;
+      const { error } = await sb.from('claims').update({
+        claimed_amount: Math.round(g.claimed), approved_amount: Math.round(g.approved),
+        detail: { preset:'PND_REVIEW', lines:g.n, ng:g.ng,
+                  claimed:Math.round(g.claimed), approved:Math.round(g.approved),
+                  cut:Math.round(g.claimed - g.approved), adjusted_at:new Date().toISOString() },
+      }).eq('id', c.id).select('id');
+      if(error) throw error;
+    }
+    const total = [...byWs.values()].reduce((a,g) => a + g.approved, 0);
+    const { error: dErr } = await sb.from('disputes').update({
+      status:'APPROVED',
+      decision_note: `이의 수용 — 검증 실패 ${rows.length}건 중 ${changed.length}건 인정. `
+                   + `조정 후 정산 금액 ${fmtWon(total)}`,
+      decided_at: new Date().toISOString(),
+    }).eq('id', disputeId).select('id');
+    if(dErr) throw dErr;
+    await logAudit('PND_DISPUTE_ACCEPT','ROUND',round.id,
+      { label:`${changed.length}건 인정 · 조정 후 ${Math.round(total)}` });
+    alert(`반영했습니다.\n조정 후 이 리테일러의 정산 금액: ${fmtWon(total)}`);
+    await renderRoundDetail();
+  }catch(e){
+    alert('반영 실패: ' + (e.message || e));
+    btn.disabled = false; btn.textContent = '수정 반영 · 이의 수용 처리';
+  }
+}
+
 async function renderPndRoundDetail(round, type){
   document.getElementById('claimsTable').style.display = 'none';
   document.getElementById('rd_title').textContent = `${type.name} · ${round.period_label}`;
@@ -6998,7 +7154,9 @@ async function renderPndRoundDetail(round, type){
   const s = pndSum(lines);
 
   const invPanel = await pndInvoicePanel(round, type, pclaims || [], retMap);
+  const dspPanel = await pndDisputePanel(round, retMap);
   host.innerHTML = pndCards(s)
+    + dspPanel
     + ((pclaims||[]).length ? pndConfirmPanel(round, pclaims, retMap) : '')
     + invPanel
     + pndByWorkshop(lines, wsName)
@@ -7017,6 +7175,7 @@ async function renderPndRoundDetail(round, type){
          </div></div>`;
 
   pndBindConfirm(round, type, pclaims||[], retMap, host);
+  pndBindDispute(round, type, host);
   host.querySelectorAll('.file-link').forEach(el =>
     el.addEventListener('click', () => downloadFile(el.dataset.path)));
   document.getElementById('pndXlsx').onclick = () => pndExport(lines, wsName, round);
