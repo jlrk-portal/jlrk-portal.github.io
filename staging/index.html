@@ -1300,8 +1300,18 @@ async function dispatchOutbox(row){
   });
   const { data: { user } } = await sb.auth.getUser();
   if(error){
-    await sb.from('email_outbox').update({ status:'FAILED', error: error.message }).eq('id', row.id);
-    return { ok:false, msg: error.message };
+    // invoke 가 주는 message 는 "non-2xx status code" 뿐이라 원인을 알 수 없다.
+    // 함수가 본문에 담아 보낸 진짜 사유를 꺼내 기록한다. (2026-10-20)
+    let msg = error.message || '발송 실패';
+    try{
+      if(error.context && typeof error.context.text === 'function'){
+        const body = await error.context.text();
+        try{ const j = JSON.parse(body); if(j && j.error) msg = j.error; }
+        catch(_){ if(body) msg = body.slice(0, 300); }
+      }
+    }catch(_){}
+    await sb.from('email_outbox').update({ status:'FAILED', error: msg }).eq('id', row.id);
+    return { ok:false, msg };
   }
   await sb.from('email_outbox')
     .update({ status:'SENT', sent_at:new Date().toISOString(), sent_by:user?.id||null, error:null })
