@@ -7016,34 +7016,60 @@ function pndBindDispute(round, type, host){
       .order('svc_date');
     if(error){ box.innerHTML = `<div class="hint" style="color:var(--danger);">${error.message}</div>`; return; }
     if(!lines.length){ box.innerHTML = '<div class="hint" style="margin-top:8px;">이 리테일러에는 검증 실패 건이 없습니다.</div>'; return; }
+    const esc = v => String(v ?? '').replace(/[<>"]/g, '');
+    const sel = (cls, cur) => `<select class="${cls}" style="padding:2px 4px; font-size:11px;">
+        <option value="O"${cur!=='X'?' selected':''}>O</option>
+        <option value="X"${cur==='X'?' selected':''}>X</option></select>`;
+    const num = (cls, v) => `<input type="text" inputmode="numeric" class="row-amt-input ${cls}"
+        style="width:92px;" value="${Number(v||0).toLocaleString('ko-KR')}">`;
+    const ro = v => `<td class="muted" style="white-space:nowrap;">${esc(v)}</td>`;
     box.innerHTML = `
       <div style="margin-top:10px; border:1px solid var(--surface3); border-radius:6px; overflow:hidden;">
         <div style="padding:8px 11px; background:var(--surface2); border-bottom:1px solid var(--surface3);">
           <b>검증 실패 ${lines.length}건</b>
-          <span class="hint" style="margin-left:6px;">판정을 O 로 바꾸거나 금액을 고치면 그 값으로 다시 계산됩니다</span></div>
-        <div style="overflow-x:auto; max-height:420px; overflow-y:auto;">
-        <table style="min-width:900px;"><thead><tr>
-          <th>탁송일</th><th>구분</th><th>고객</th><th>차량번호</th><th>RO/예약</th>
-          <th>사유</th><th style="text-align:center;">판정</th><th style="text-align:right;">JLRK 청구</th>
+          <span class="hint" style="margin-left:6px;">회색은 원본 그대로, 흰 칸은 고칠 수 있습니다 ·
+            판정을 O 로 바꾸거나 금액을 고치면 그 값으로 다시 계산됩니다 · 표는 좌우로 넘겨 보십시오</span></div>
+        <div style="overflow-x:auto; max-height:460px; overflow-y:auto;">
+        <table style="min-width:2400px; font-size:11.5px;"><thead><tr>
+          <th style="position:sticky; left:0; background:var(--surface2); z-index:2;">지점</th>
+          <th>탁송일자</th><th>픽업/딜리버리</th><th>서비스 유형</th><th>PC/OC 여부</th>
+          <th>청구유형</th><th>Brand</th><th>주문자명</th><th>주문자 연락처</th><th>고객명</th>
+          <th>차량번호</th><th>차량모델</th><th>RO#/예약#</th><th>차대번호</th>
+          <th>출발지</th><th>도착지</th><th style="text-align:right;">주행거리</th>
+          <th style="text-align:center;">주문자명</th><th style="text-align:center;">연락처</th>
+          <th style="text-align:center;">고객명</th><th style="text-align:center;">차량번호</th>
+          <th style="text-align:center;">차량모델</th><th style="text-align:center;">RO/예약</th>
+          <th style="text-align:center;">차대번호</th>
+          <th style="text-align:center;">데이터 검증</th>
+          <th style="text-align:right;">JLRK청구</th><th style="text-align:right;">리테일러부담</th>
+          <th style="text-align:right;">청구 금액</th><th>주유비</th>
+          <th>JLRK Comment</th><th>특이사항</th><th>비고</th><th>DMS예약번호</th><th>DMS사용목적</th>
         </tr></thead><tbody>
-        ${lines.map(l => `<tr data-line="${l.id}">
-          <td class="muted" style="white-space:nowrap;">${l.svc_date||''}</td>
-          <td>${l.leg||''}</td><td>${(l.customer||'').replace(/[<>]/g,'')}</td>
-          <td>${(l.car_no||'').replace(/[<>]/g,'')}</td>
-          <td class="muted">${(l.ro_no||'').replace(/[<>]/g,'')}</td>
-          <td class="hint" style="max-width:240px;">${String(l.note||'').replace(/[<>]/g,'')}</td>
-          <td style="text-align:center;">
-            <select class="dsp-v" style="padding:3px 6px;">
-              <option value="X" selected>X · 제외</option>
-              <option value="O">O · 인정</option>
-            </select></td>
-          <td style="text-align:right;">
-            <input type="text" inputmode="numeric" class="row-amt-input dsp-amt" style="width:100px;"
-                   value="${Number(l.claim_jlrk||0).toLocaleString('ko-KR')}"></td>
-        </tr>`).join('')}
+        ${lines.map(l => { const c = l.checks || {}, x = l.extra || {}; return `<tr data-line="${l.id}">
+          <td style="position:sticky; left:0; background:var(--surface); z-index:1; white-space:nowrap;">${esc(l.branch_label)}</td>
+          ${ro(l.svc_date)}${ro(l.leg)}${ro(l.svc_type)}${ro(x['PC/OC 여부'])}
+          ${ro(l.charge_type)}${ro(l.brand)}${ro(l.orderer)}${ro(l.orderer_tel)}${ro(l.customer)}
+          ${ro(l.car_no)}${ro(l.car_model)}${ro(l.ro_no)}${ro(l.vin)}
+          ${ro(l.origin)}${ro(l.dest)}
+          <td class="muted" style="text-align:right;">${Number(l.distance||0).toLocaleString('ko-KR')}</td>
+          <td style="text-align:center;">${sel('ck-주문자명', c['주문자명'])}</td>
+          <td style="text-align:center;">${sel('ck-주문자연락처', c['주문자연락처'])}</td>
+          <td style="text-align:center;">${sel('ck-고객명', c['고객명'])}</td>
+          <td style="text-align:center;">${sel('ck-차량번호', c['차량번호'])}</td>
+          <td style="text-align:center;">${sel('ck-차량모델', c['차량모델'])}</td>
+          <td style="text-align:center;">${sel('ck-RO/예약번호', c['RO/예약번호'])}</td>
+          <td style="text-align:center;">${sel('ck-차대번호', c['차대번호'])}</td>
+          <td style="text-align:center; background:#fff4e5;">${sel('dsp-v', l.verdict)}</td>
+          <td style="text-align:right;">${num('dsp-amt', l.claim_jlrk)}</td>
+          <td style="text-align:right;">${num('dsp-own', l.retailer_own)}</td>
+          <td style="text-align:right;">${num('dsp-tot', l.total_amt)}</td>
+          ${ro(x['주유비'])}
+          <td><input type="text" class="dsp-note" style="width:230px; font-size:11px;" value="${esc(l.note)}"></td>
+          ${ro(x['특이사항'])}${ro(x['비고'])}${ro(x['DMS예약번호'])}${ro(x['DMS사용목적'])}
+        </tr>`; }).join('')}
         </tbody></table></div>
         <div style="display:flex; gap:8px; align-items:center; padding:10px 11px; border-top:1px solid var(--surface3);">
-          <span class="hint">인정으로 바꾼 금액만큼 그 리테일러의 정산액이 올라갑니다.</span>
+          <span class="hint">「데이터 검증」 을 O 로 바꾼 건의 JLRK청구 금액만큼 그 리테일러의 정산액이 올라갑니다.</span>
           <button class="btn btn-sm dsp-save" style="margin-left:auto;"
                   data-id="${b.dataset.id}" data-rt="${b.dataset.rt}">수정 반영 · 이의 수용 처리</button>
         </div></div>`;
@@ -7053,11 +7079,20 @@ function pndBindDispute(round, type, host){
 }
 
 async function pndSaveDisputeEdit(round, type, box, disputeId, retailerId){
-  const rows = [...box.querySelectorAll('tr[data-line]')].map(tr => ({
-    id: tr.dataset.line,
-    verdict: tr.querySelector('.dsp-v').value,
-    amt: readAmountInput(tr.querySelector('.dsp-amt')) || 0,
-  }));
+  const CK = ['주문자명','주문자연락처','고객명','차량번호','차량모델','RO/예약번호','차대번호'];
+  const rows = [...box.querySelectorAll('tr[data-line]')].map(tr => {
+    const checks = {};
+    CK.forEach(k => { const el = tr.querySelector('.ck-' + CSS.escape(k)); checks[k] = el ? el.value : 'O'; });
+    return {
+      id: tr.dataset.line,
+      verdict: tr.querySelector('.dsp-v').value,
+      amt:  readAmountInput(tr.querySelector('.dsp-amt')) || 0,
+      own:  readAmountInput(tr.querySelector('.dsp-own')) || 0,
+      tot:  readAmountInput(tr.querySelector('.dsp-tot')) || 0,
+      note: tr.querySelector('.dsp-note').value,
+      checks,
+    };
+  });
   const changed = rows.filter(r => r.verdict === 'O');
   if(!confirm(`검증 실패 ${rows.length}건 중 ${changed.length}건을 인정으로 바꿉니다.\n`
             + '이 리테일러의 정산 금액이 다시 계산됩니다. 계속할까요?')) return;
@@ -7065,8 +7100,10 @@ async function pndSaveDisputeEdit(round, type, box, disputeId, retailerId){
   btn.disabled = true; btn.textContent = '반영 중...';
   try{
     for(const r of rows){
-      const { error } = await sb.from('pnd_lines')
-        .update({ verdict: r.verdict, claim_jlrk: r.amt }).eq('id', r.id).select('id');
+      const { error } = await sb.from('pnd_lines').update({
+        verdict: r.verdict, claim_jlrk: r.amt, retailer_own: r.own,
+        total_amt: r.tot, note: r.note, checks: r.checks,
+      }).eq('id', r.id).select('id');
       if(error) throw error;
     }
     // 그 리테일러의 지점별 청구행을 다시 계산한다
