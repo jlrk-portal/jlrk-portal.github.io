@@ -7191,7 +7191,10 @@ async function pndInvoiceBlock(host, round, supplyAmount){
 async function renderPndRetailerCard(listEl, round, items){
   const uid = 'pd' + String(items[0].id).slice(0, 8);
   const confirmed = items.every(c => c.confirmed_at);
-  const canConfirm = ['CONFIRMED','PUBLISHED','INVOICED'].includes(round.status) && !confirmed;
+  const due = round.confirm_due_at ? new Date(round.confirm_due_at) : null;
+  const overdue = !!(due && due < new Date());
+  // 공지된 뒤(접수중)부터 확정할 수 있고, 기한이 지나면 리테일러 쪽은 잠근다
+  const canConfirm = ['OPEN','PUBLISHED'].includes(round.status) && !confirmed && !overdue;
   const days = items[0].submitted_at ? (Date.now() - new Date(items[0].submitted_at)) / 864e5 : 999;
   const isNew = !confirmed && days <= 7;
 
@@ -7206,7 +7209,9 @@ async function renderPndRetailerCard(listEl, round, items){
           ${isNew ? '<span class="badge badge-ar" style="margin-left:8px;">NEW</span>' : ''}
         </div>
         <div class="claim-sub" style="margin-left:18px;">JLR Korea 검토 완료 · <span class="pd-cnt">—</span>
-          · <span class="badge badge-ap">${ROUND_STATUS_LABEL[round.status]||round.status}</span></div>
+          · <span class="badge badge-ap">${ROUND_STATUS_LABEL[round.status]||round.status}</span>
+          ${due ? `· 확정 기한 <b>${due.toLocaleString('ko-KR')}</b>
+             ${overdue ? '<span class="badge badge-ar" style="margin-left:4px;">기한 경과</span>' : ''}` : ''}</div>
       </div>
       ${confirmed ? '<span class="badge badge-ap">확정완료</span>' : '<span class="badge badge-off">확인 대기</span>'}
     </div>
@@ -7255,7 +7260,15 @@ async function renderPndRetailerCard(listEl, round, items){
     </div>`;
 
   document.getElementById(uid + '-body').innerHTML =
-      (s.skipped ? `<div class="hint" style="margin:10px 0 8px;">
+      (due && !confirmed ? `<div class="hint" style="margin:10px 0 8px; padding:8px 10px;
+            background:${overdue ? '#fdecea' : '#fff4e5'}; border-radius:6px;
+            color:${overdue ? 'var(--danger,#c0392b)' : '#8a6d00'};">
+          ${overdue
+            ? '확정 기한이 지났습니다. 회신이 없어 확정된 것으로 처리됩니다. 이견이 있으시면 JLR Korea 담당자에게 연락해 주십시오.'
+            : `<b>${due.toLocaleString('ko-KR')}</b> 까지 [정산 확정] 을 눌러주십시오.
+               기한이 지나면 확정하신 것으로 보고 자동으로 마감됩니다.`}
+        </div>` : '')
+    + (s.skipped ? `<div class="hint" style="margin:10px 0 8px;">
           JLRK 부담이 없는 Retailer 100% 건 <b>${s.skipped.toLocaleString()}건</b>은 정합성 검토 대상에서 제외했습니다.
           청구액이 0원이라 정산 금액에는 영향이 없습니다.</div>` : '')
     + (wmap.size > 1 ? pndByWorkshop(lines, wsName) : '')
@@ -9411,7 +9424,7 @@ async function loadRetailerClaims(){
   listEl.innerHTML = '';
 
   const { data: claims, error } = await sb.from('claims')
-    .select('*, rounds(id, period_label, status, claim_due_at, invoice_due_at, invoice_issue_date, dispute_due_at, type_id), workshops(name, code, biz_no)')
+    .select('*, rounds(id, period_label, status, claim_due_at, invoice_due_at, invoice_issue_date, dispute_due_at, confirm_due_at, type_id), workshops(name, code, biz_no)')
     .order('created_at', { ascending:true });
 
   if(error){ console.error(error); return; }
