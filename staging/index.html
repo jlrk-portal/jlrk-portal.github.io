@@ -1295,6 +1295,10 @@ async function sendEmail(to, subject, html, context){
 
 /* 실제 발송 — 대기함 화면에서만 호출한다 */
 async function dispatchOutbox(row){
+  // 재시도면 예전 실패 사유를 먼저 지운다 (옛 메시지가 남아 원인을 오인하게 된다)
+  if(row.status === 'FAILED'){
+    await sb.from('email_outbox').update({ status:'PENDING', error:null }).eq('id', row.id);
+  }
   const { data, error } = await sb.functions.invoke('send-email', {
     body: { to: row.to_addrs, subject: row.subject, html: row.html }
   });
@@ -1348,11 +1352,14 @@ async function loadOutbox(){
 
 function renderOutbox(){
   const host = document.getElementById('outboxHost');
-  const pending = outboxRows.filter(r => r.status === 'PENDING');
+  // 실패한 건도 다시 보낼 대상에 넣는다 — 안 그러면 한 번 실패하면 손쓸 방법이 없다
+  const pending = outboxRows.filter(r => r.status === 'PENDING' || r.status === 'FAILED');
   const LABEL = { PENDING:'발송 대기', SENT:'발송됨', CANCELLED:'취소됨', FAILED:'발송 실패' };
   const BADGE = { PENDING:'badge-ar', SENT:'badge-ap', CANCELLED:'badge-off', FAILED:'badge-warn' };
   document.getElementById('obSendAll').disabled = pending.length === 0;
-  document.getElementById('obSendAll').textContent = pending.length ? `대기 전체 발송 (${pending.length}건)` : '대기 전체 발송';
+  const nFail = outboxRows.filter(r => r.status === 'FAILED').length;
+  document.getElementById('obSendAll').textContent = pending.length
+    ? `대기 전체 발송 (${pending.length}건${nFail ? ` · 실패 ${nFail}건 포함` : ''})` : '대기 전체 발송';
   if(outboxRows.length === 0){
     host.innerHTML = '<div class="info-card"><div class="hint">대기 중인 메일이 없습니다.</div></div>';
     return;
@@ -1370,6 +1377,8 @@ function renderOutbox(){
           <button class="btn btn-sm btn-ghost ob-view" data-id="${r.id}">내용 보기</button>
           ${r.status==='PENDING' ? `<button class="btn btn-sm btn-ghost ob-cancel" data-id="${r.id}">취소</button>
                                     <button class="btn btn-sm ob-send" data-id="${r.id}">발송</button>` : ''}
+          ${r.status==='FAILED' ? `<button class="btn btn-sm btn-ghost ob-cancel" data-id="${r.id}">취소</button>
+                                   <button class="btn btn-sm ob-send" data-id="${r.id}">다시 발송</button>` : ''}
         </div>
       </div>
       <div class="ob-body" data-id="${r.id}" style="display:none; margin-top:10px; padding:12px;
@@ -5279,13 +5288,20 @@ function downloadHistoryXlsx(entry){
 
 document.getElementById('obRefresh').addEventListener('click', loadOutbox);
 document.getElementById('obSendAll').addEventListener('click', async () => {
-  const pending = outboxRows.filter(r => r.status === 'PENDING');
+  const pending = outboxRows.filter(r => r.status === 'PENDING' || r.status === 'FAILED');
   if(!pending.length) return;
-  if(!confirm(`대기 중인 ${pending.length}건을 전부 발송합니다. 계속할까요?`)) return;
+  const nFail = pending.filter(r => r.status === 'FAILED').length;
+  if(!confirm(`${pending.length}건을 발송합니다${nFail ? ` (실패했던 ${nFail}건 재시도 포함)` : ''}. 계속할까요?`)) return;
   const btn = document.getElementById('obSendAll'); btn.disabled = true;
-  let ok = 0, ng = 0;
-  for(const row of pending){ const r = await dispatchOutbox(row); r.ok ? ok++ : ng++; }
-  alert(`발송 완료 ${ok}건${ng?` · 실패 ${ng}건`:''}`);
+  const t = btn.textContent;
+  let ok = 0, ng = 0, lastMsg = '';
+  for(let i = 0; i < pending.length; i++){
+    btn.textContent = `발송 중... ${i+1}/${pending.length}`;
+    const r = await dispatchOutbox(pending[i]);
+    if(r.ok) ok++; else { ng++; lastMsg = r.msg || lastMsg; }
+  }
+  btn.textContent = t; btn.disabled = false;
+  alert(`발송 완료 ${ok}건${ng ? ` · 실패 ${ng}건\n\n실패 사유: ${lastMsg}` : ''}`);
   loadOutbox();
 });
 
