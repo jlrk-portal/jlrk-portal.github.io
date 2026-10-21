@@ -3186,7 +3186,12 @@ function parseOneDmsRaw(buf, type, fiscalYear, retailersList){
     if(!code) code = Object.entries(P.DEALER_MAP).find(([k]) => _odNorm(k) === _odNorm(dealer))?.[1];
     if(!code){ unmatched.set(dealer, (unmatched.get(dealer)||0)+1); continue; }
 
-    const flags = useMonths.map(m => String(row[m.idx] ?? '').trim() !== '');
+    // 월 셀에는 'PRO' / 'SERVICE' 같은 라이선스 유형이 들어 있다.
+    // 지금까지 "값이 있으면 과금" 으로만 쓰고 유형은 버렸는데, 증빙에 필요하다.
+    // ★ 유형은 리테일러에게 나가면 안 된다 — claims.detail 이 아니라
+    //   onedms_licenses(관리자 전용) 에만 저장한다.
+    const types = useMonths.map(m => String(row[m.idx] ?? '').trim());
+    const flags = types.map(t => t !== '');
     const monthsActive = flags.filter(Boolean).length;
     if(monthsActive === 0) continue;
 
@@ -3203,7 +3208,9 @@ function parseOneDmsRaw(buf, type, fiscalYear, retailersList){
       first:  cFirst  !== undefined ? String(row[cFirst] ?? '').trim() : '',
       status: cStatus !== undefined ? String(row[cStatus] ?? '').trim() : '',
       retire: cRetire !== undefined ? String(row[cRetire] ?? '').trim() : '',
-      flags, months_active: monthsActive
+      flags, months_active: monthsActive,
+      // _types 는 관리자 전용이다. 아래 publish 에서 detail 에 넣기 전에 떼어낸다.
+      _types: types
     });
     g.user_months += monthsActive;
   }
@@ -3740,6 +3747,30 @@ async function renderOneDmsRoundDetail(round, type){
 
   const { data: retailersList } = await sb.from('retailers').select('id, code, name').eq('is_active', true);
 
+  // 공지 후에는 증빙 묶음을 받을 수 있게 한다 (회계 증빙용 — 관리자 전용)
+  if(round.status !== 'DRAFT'){
+    const host = document.getElementById('reviewSection');
+    if(host){
+      host.insertAdjacentHTML('afterbegin', odsAttachPanel(round) + `
+        <div class="info-card" style="margin-bottom:12px;">
+          <div class="section-label" style="margin-top:0;">증빙자료</div>
+          <div class="hint">요약 · Retailer Charge(라이선스 유형별) · 사용자 상세 ·
+            리테일러별 정산서를 한 권으로 받습니다.
+            <b>라이선스 유형이 들어 있어 리테일러에게는 제공하지 않는 문서입니다.</b></div>
+          <div style="display:flex; gap:8px; align-items:center; margin-top:10px; flex-wrap:wrap;">
+            <button class="btn btn-sm" id="odsEviBtn">증빙자료 다운로드</button>
+            <button class="btn btn-sm btn-ghost" id="odsPrintBtn">확정 현황 인쇄 (PDF 저장)</button>
+            <span class="hint" id="odsEviMsg"></span>
+          </div>
+        </div>`);
+      odsBindAttach(round, type);
+      const eb = document.getElementById('odsEviBtn');
+      if(eb) eb.onclick = () => odsBuildEvidence(round, type);
+      const pb = document.getElementById('odsPrintBtn');
+      if(pb) pb.onclick = () => odsPrintConfirm(round, type, claims || []);
+    }
+  }
+
   if(round.status === 'DRAFT'){
     const P = oneDmsParams(type);
     const fyGuess = round.fiscal_year || (round.period_label.match(/FY\s?\d{2}/i)?.[0]?.replace(/\s/,'') || '');
@@ -3930,7 +3961,9 @@ async function publishOneDmsRound(round, type){
         detail: {
           preset: 'ONE_DMS_AR', user_count: r.users.length, user_months: r.user_months,
           rate: p.rate, fiscal_year: p.fiscalYear, month_labels: p.monthLabels,
-          amount: r.amount, vat: Math.round(r.amount * P.VAT_RATE), users: r.users
+          amount: r.amount, vat: Math.round(r.amount * P.VAT_RATE),
+          // ★ 라이선스 유형(_types)은 반드시 뺀다. detail 은 리테일러가 읽는다.
+          users: r.users.map(u => { const { _types, ...safe } = u; return safe; })
         },
         confirmed_at: null, submitted_at: new Date().toISOString()
       };
@@ -3938,6 +3971,26 @@ async function publishOneDmsRound(round, type){
         ? await sb.from('claims').update(payload).eq('id', existing.id)
         : await sb.from('claims').insert(payload);
       if(error) throw error;
+    }
+
+    // 라이선스 유형 — 관리자 전용 표에만. 회차 단위로 갈아끼운다.
+    await sb.from('onedms_licenses').delete().eq('round_id', round.id);
+    const licRows = [];
+    for(const r of p.retailers){
+      for(const u of r.users){
+        licRows.push({
+          round_id: round.id, retailer_id: r.retailer_id, retailer_code: r.code,
+          dealer_name: r.dealerName || r.retailer_name || '', user_name: u.name,
+          login: u.login || '', role: u.role || '', first_login: u.first || '',
+          status: u.status || '', retire: u.retire || '',
+          month_labels: p.monthLabels, types: u._types || [],
+          months_active: u.months_active,
+        });
+      }
+    }
+    for(let i = 0; i < licRows.length; i += 500){
+      const { error: lErr } = await sb.from('onedms_licenses').insert(licRows.slice(i, i+500));
+      if(lErr) throw new Error('라이선스 유형 저장 실패: ' + lErr.message);
     }
 
     const summary = {
@@ -6520,7 +6573,15 @@ const xsCell = (v, st) => ({ v: (v === null || v === undefined) ? '' : v,
                              t: typeof v === 'number' ? 'n' : 's', s: st });
 
 /* columns: [{key, label, w, type:'num'|'date'|'text', align}] */
-function xlsxHouse({ filename, sheetName, title, subtitle, summary, steps, columns, rows, totals, notes }){
+/* 여러 장짜리 문서(증빙 등)도 같은 서식을 쓰도록 시트 생성만 떼어냈다.
+   xlsxHouse 는 이 함수로 한 장을 만들어 바로 내려받는다. */
+function xlsxHouse(spec){
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, xsSheet(spec), spec.sheetName || 'Sheet1');
+  XLSX.writeFile(wb, spec.filename);
+}
+
+function xsSheet({ title, subtitle, summary, steps, columns, rows, totals, notes }){
   const aoa = [];        // 값
   const sty = [];        // 같은 좌표의 서식
   const push = (vals, styles) => { aoa.push(vals); sty.push(styles || []); };
@@ -6601,9 +6662,7 @@ function xlsxHouse({ filename, sheetName, title, subtitle, summary, steps, colum
   ws['!rows'] = aoa.map((_, R) => R === 0 ? { hpt: 22 } : (R === headRow ? { hpt: 20 } : {}));
   ws['!autofilter'] = { ref: XLSX.utils.encode_range(
       { s:{r:headRow,c:0}, e:{r: headRow + rows.length, c: W-1} }) };
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, sheetName || 'Sheet1');
-  XLSX.writeFile(wb, filename);
+  return ws;
 }
 
 /* ================================================================
@@ -11482,6 +11541,333 @@ function modelCodeOf(vin, fallback){
    7% 로 잘못 잡히므로 '확인 필요' 로 따로 보여준다. */
 function modelUnknown(vin, fallback){
   return !modelOf(vin, fallback);
+}
+
+/* ================================================================
+   One DMS 증빙자료 (2026-10-21)
+
+   매니저가 회계 증빙으로 쓰는 묶음을 포털이 한 번에 만든다.
+   지금까지는 웅진 원본에 손으로 두 시트(Retailer Charge · 사용자별
+   월별 O)를 만들어 붙이고 계셨다. 그 두 장이 정확히 포털이 이미
+   갖고 있는 데이터다.
+
+   ★ 라이선스 유형은 관리자 전용이다. 이 파일은 매니저가 받는
+     증빙이라 유형이 들어가지만, 리테일러에게 나가는 정산서·화면
+     에는 절대 넣지 않는다 (onedms_licenses 는 RLS 로 관리자만 읽는다).
+   ================================================================ */
+
+/* 회차에 붙여둔 원본 파일 (웅진 발송본 등) */
+async function odsAttachments(round){
+  const list = (round.attachments || []);
+  return Array.isArray(list) ? list : [];
+}
+
+function odsAttachPanel(round){
+  const files = (round.attachments || []);
+  return `<div class="info-card" style="margin-bottom:12px;">
+    <div class="section-label" style="margin-top:0;">원본 파일 첨부 (증빙에 함께 묶입니다)</div>
+    <div class="hint">웅진에서 받은 운영비용 요약·상세, 라이선스 카운트 원본을 올려두시면
+      증빙 받을 때 같이 내려받습니다. 리테일러에게는 나가지 않습니다.</div>
+    <div style="display:flex; gap:8px; align-items:center; margin-top:10px; flex-wrap:wrap;">
+      <input type="file" id="odsFile" accept=".xlsx,.xls,.csv,.pdf" multiple>
+      <button class="btn btn-sm btn-ghost" id="odsUpBtn">올리기</button>
+      <span class="hint" id="odsUpMsg"></span>
+    </div>
+    ${files.length ? `<table style="margin-top:10px; max-width:720px;"><tbody>
+      ${files.map((f, i) => `<tr>
+        <td>${String(f.name||'').replace(/[<>]/g,'')}</td>
+        <td class="muted" style="text-align:right; width:110px;">${
+          f.size ? (f.size/1024).toLocaleString('ko-KR', {maximumFractionDigits:0}) + ' KB' : ''}</td>
+        <td class="muted" style="width:150px;">${f.at ? new Date(f.at).toLocaleDateString('ko-KR') : ''}</td>
+        <td style="text-align:right; width:70px;">
+          <button class="btn btn-ghost btn-sm ods-del" data-i="${i}">삭제</button></td>
+      </tr>`).join('')}</tbody></table>`
+      : '<div class="hint" style="margin-top:8px;">올려둔 원본이 없습니다.</div>'}
+  </div>`;
+}
+
+function odsBindAttach(round, type){
+  const up = document.getElementById('odsUpBtn');
+  if(up) up.onclick = async () => {
+    const files = [...(document.getElementById('odsFile').files || [])];
+    const msg = document.getElementById('odsUpMsg');
+    if(!files.length){ msg.textContent = '파일을 선택해주세요.'; return; }
+    up.disabled = true;
+    try{
+      const cur = [...(round.attachments || [])];
+      for(const f of files){
+        if(f.size > UPLOAD_LIMIT) throw new Error(`${f.name} 가 20MB 를 넘습니다.`);
+        msg.textContent = `${f.name} 올리는 중...`;
+        // 스토리지 키는 ASCII 만 받는다. 보여줄 이름은 따로 남긴다.
+        const path = `onedms-source/${round.id}/${Date.now()}-${storageSafeName(f.name)}`;
+        const { error } = await sb.storage.from('settlements').upload(path, f, { upsert:true });
+        if(error) throw error;
+        cur.push({ name:f.name, path, size:f.size, at:new Date().toISOString() });
+      }
+      const { data, error: uErr } = await sb.from('rounds')
+        .update({ attachments: cur }).eq('id', round.id).select('id');
+      if(uErr) throw uErr;
+      if(!data || !data.length) throw new Error('첨부 목록이 저장되지 않았습니다 (0건).');
+      await logAudit('ODS_ATTACH','ROUND',round.id,{ label:`원본 ${files.length}건` });
+      msg.textContent = '';
+      await renderRoundDetail();
+    }catch(e){
+      msg.innerHTML = `<span style="color:var(--danger);">${e.message||e}</span>`;
+    }finally{ up.disabled = false; }
+  };
+
+  document.querySelectorAll('.ods-del').forEach(b => b.onclick = async () => {
+    if(!confirm('이 원본 파일을 지울까요?')) return;
+    const cur = [...(round.attachments || [])];
+    const gone = cur.splice(Number(b.dataset.i), 1)[0];
+    if(gone?.path) await sb.storage.from('settlements').remove([gone.path]);
+    const { error } = await sb.from('rounds').update({ attachments: cur }).eq('id', round.id);
+    if(error){ alert('삭제 실패: ' + error.message); return; }
+    await renderRoundDetail();
+  });
+}
+
+/* ── 증빙 엑셀 ────────────────────────────────────────────────── */
+async function odsBuildEvidence(round, type){
+  const btn = document.getElementById('odsEviBtn');
+  const msg = document.getElementById('odsEviMsg');
+  if(btn){ btn.disabled = true; btn.textContent = '만드는 중...'; }
+  try{
+    const [{ data: claims }, { data: lics }] = await Promise.all([
+      sb.from('claims').select('*, retailers(code,name)').eq('round_id', round.id).order('created_at'),
+      sb.from('onedms_licenses').select('*').eq('round_id', round.id).order('retailer_code'),
+    ]);
+    const cfg = round.source_summary || {};
+    const months = cfg.month_labels || (claims?.[0]?.detail?.month_labels) || [];
+    const rate = cfg.rate || claims?.[0]?.detail?.rate || 0;
+    const wb = XLSX.utils.book_new();
+    const add = (name, spec) => XLSX.utils.book_append_sheet(wb, xsSheet(spec), name);
+
+    // ① 요약
+    const sumRows = (claims||[]).map(c => ({
+      code: c.retailers?.code || '', name: c.retailers?.name || '',
+      users: c.detail?.user_count || 0, um: c.detail?.user_months || 0,
+      amount: Number(c.approved_amount || 0),
+      vat: Number(c.detail?.vat || 0),
+      total: Number(c.approved_amount || 0) + Number(c.detail?.vat || 0),
+      confirmed: c.confirmed_at ? new Date(c.confirmed_at).toLocaleString('ko-KR') : '미확정',
+    }));
+    const T = k => sumRows.reduce((a, r) => a + (Number(r[k]) || 0), 0);
+    add('1. 요약', {
+      title: `One DMS License Fee · ${round.period_label} 정산 증빙`,
+      subtitle: `${months.join(' · ')} · 유저당 월단가 ${fmtWon(rate)} · 발행일 ${round.invoice_issue_date || '—'}`,
+      summary: [
+        { label:'리테일러', value: sumRows.length },
+        { label:'유저-MONTH', value: T('um') },
+        { label:'공급가액', value: T('amount') },
+        { label:'부가세', value: T('vat') },
+        { label:'합계', value: T('total') },
+      ],
+      steps: [
+        '■ 산출 방식',
+        `리테일러별 유저-MONTH 합계 × 유저당 월단가 ${fmtWon(rate)} = 공급가액`,
+        '유저-MONTH = 해당 분기 각 월에 라이선스가 할당된 사용자 수의 합',
+        ...(cfg.excluded?.length ? [`정산 제외 : ${cfg.excluded.join(' · ')}`] : []),
+      ],
+      columns: [
+        { key:'code', label:'리테일러', w:10 }, { key:'name', label:'법인명', w:20 },
+        { key:'users', label:'인원', w:8, type:'num' }, { key:'um', label:'유저-MONTH', w:12, type:'num' },
+        { key:'amount', label:'공급가액', w:14, type:'num' }, { key:'vat', label:'부가세', w:12, type:'num' },
+        { key:'total', label:'합계', w:14, type:'num' }, { key:'confirmed', label:'확정 일시', w:20 },
+      ],
+      rows: sumRows,
+      totals: { code:'합계', users:T('users'), um:T('um'), amount:T('amount'), vat:T('vat'), total:T('total') },
+      notes: ['※ 본 문서는 JLR Korea 내부 회계 증빙용입니다. 라이선스 유형 정보가 포함되어 있어 리테일러에게 제공하지 않습니다.'],
+    });
+
+    // ② Retailer Charge — 리테일러 × 유형 × 월별 수량
+    if(lics && lics.length){
+      const types = [...new Set(lics.flatMap(l => (l.types||[])
+        .map(t => String(t||'').trim().toUpperCase()).filter(Boolean)))].sort();
+      const key = (code, t) => code + '|' + t;
+      const grid = new Map();
+      lics.forEach(l => (l.types||[]).forEach((t, i) => {
+        const tt = String(t||'').trim().toUpperCase();
+        if(!tt) return;
+        const k = key(l.retailer_code || l.dealer_name, tt);
+        if(!grid.has(k)) grid.set(k, { code:l.retailer_code || '', dealer:l.dealer_name || '', type:tt, m:{} });
+        const g = grid.get(k);
+        const ml = (l.month_labels||[])[i] || months[i] || `${i+1}`;
+        g.m[ml] = (g.m[ml] || 0) + 1;
+      }));
+      const chargeRows = [...grid.values()]
+        .sort((a,b) => (a.code+a.type).localeCompare(b.code+b.type))
+        .map(g => ({ code:g.code, dealer:g.dealer, type:g.type,
+                     ...Object.fromEntries(months.map(m => [m, g.m[m] || 0])) }));
+      add('2. Retailer Charge', {
+        title: 'Retailer Charge — 리테일러 × 라이선스 유형 × 월별 수량',
+        subtitle: `${round.period_label} · ${months.join(' · ')}`,
+        steps: ['■ 리테일러별로 각 월에 어떤 라이선스가 몇 개 할당돼 있었는지입니다.',
+                '웅진 원본의 사용자 명단을 유형별로 집계한 값입니다.'],
+        columns: [
+          { key:'code', label:'리테일러', w:10 }, { key:'dealer', label:'딜러사', w:20 },
+          { key:'type', label:'라이선스 유형', w:14 },
+          ...months.map(m => ({ key:m, label:m, w:9, type:'num' })),
+        ],
+        rows: chargeRows,
+        totals: { code:'합계', ...Object.fromEntries(months.map(m =>
+          [m, chargeRows.reduce((a,r) => a + (r[m]||0), 0)])) },
+      });
+
+      // ③ 사용자 상세
+      add('3. 사용자 상세', {
+        title: '사용자별 라이선스 할당 내역',
+        subtitle: `${round.period_label} · 과금은 각 월에 유형이 할당된 사용자만 집계됩니다`,
+        columns: [
+          { key:'code', label:'리테일러', w:9 }, { key:'dealer', label:'딜러사', w:18 },
+          { key:'name', label:'사용자', w:12 }, { key:'login', label:'로그인 ID', w:28 },
+          { key:'role', label:'역할', w:20 }, { key:'first', label:'첫 로그인', w:12 },
+          { key:'status', label:'재직상태', w:10 }, { key:'retire', label:'퇴사일', w:12 },
+          ...months.map(m => ({ key:m, label:m, w:11, align:'center' })),
+          { key:'um', label:'과금 월수', w:10, type:'num' },
+        ],
+        rows: lics.map(l => ({
+          code:l.retailer_code || '', dealer:l.dealer_name || '', name:l.user_name || '',
+          login:l.login || '', role:l.role || '', first:l.first_login || '',
+          status:l.status || '', retire:l.retire || '',
+          ...Object.fromEntries((l.month_labels||months).map((m, i) => [m, (l.types||[])[i] || ''])),
+          um: l.months_active || 0,
+        })),
+        totals: { code:'합계', um: lics.reduce((a,l) => a + (l.months_active||0), 0) },
+      });
+    }
+
+    // ④ 리테일러별 정산서
+    for(const c of (claims || [])){
+      const d = c.detail || {};
+      const users = d.users || [];
+      const ml = d.month_labels || months;
+      add(`${c.retailers?.code || '?'} 정산서`.slice(0, 31), {
+        title: `${c.retailers?.name || ''} · One DMS License Fee`,
+        subtitle: `${round.period_label} · ${ml.join(' · ')}`,
+        summary: [
+          { label:'인원', value: users.length },
+          { label:'유저-MONTH', value: d.user_months || 0 },
+          { label:'공급가액', value: Number(c.approved_amount || 0) },
+          { label:'부가세', value: Number(d.vat || 0) },
+          { label:'합계', value: Number(c.approved_amount || 0) + Number(d.vat || 0) },
+        ],
+        steps: [
+          '■ 산출 과정',
+          `유저-MONTH ${(d.user_months||0).toLocaleString('ko-KR')} × 유저당 월단가 ${fmtWon(d.rate || rate)}`
+            + ` = ${fmtWon(c.approved_amount || 0)}`,
+          `확정 : ${c.confirmed_at ? new Date(c.confirmed_at).toLocaleString('ko-KR') : '미확정'}`,
+        ],
+        columns: [
+          { key:'name', label:'사용자', w:12 }, { key:'login', label:'로그인 ID', w:30 },
+          { key:'role', label:'역할', w:22 }, { key:'first', label:'첫 로그인', w:12 },
+          { key:'status', label:'재직상태', w:10 }, { key:'retire', label:'퇴사일', w:12 },
+          ...ml.map((m, i) => ({ key:'m'+i, label:m, w:8, align:'center' })),
+          { key:'um', label:'과금 월수', w:10, type:'num' },
+        ],
+        rows: users.map(u => ({
+          name:u.name, login:u.login, role:u.role, first:u.first,
+          status:u.status, retire:u.retire,
+          ...Object.fromEntries((u.flags||[]).map((f, i) => ['m'+i, f ? 'O' : ''])),
+          um: u.months_active || 0,
+        })),
+        totals: { name:'합계', um: d.user_months || 0 },
+      });
+    }
+
+    const fname = `One_DMS_${String(round.period_label).replace(/\s/g,'_')}_증빙.xlsx`;
+    XLSX.writeFile(wb, fname);
+
+    // 첨부해둔 웅진 원본은 따로 내려받게 링크를 띄운다 (엑셀에 끼워넣을 수 없다)
+    const atts = round.attachments || [];
+    if(atts.length && msg){
+      const links = [];
+      for(const a of atts){
+        const { data } = await sb.storage.from('settlements').createSignedUrl(a.path, 600);
+        if(data?.signedUrl) links.push(`<a href="${data.signedUrl}" download>${a.name}</a>`);
+      }
+      msg.innerHTML = `증빙 엑셀을 받았습니다. 첨부 원본은 따로 받으세요 — ${links.join(' · ')}
+        <span class="hint">(링크는 10분간 유효)</span>`;
+    } else if(msg){
+      msg.innerHTML = '증빙 엑셀을 받았습니다.'
+        + (atts.length ? '' : ' <span class="hint">웅진 원본을 올려두시면 같이 받으실 수 있습니다.</span>');
+    }
+    await logAudit('ODS_EVIDENCE','ROUND',round.id,{ label:`${round.period_label} 증빙 다운로드` });
+  }catch(e){
+    if(msg) msg.innerHTML = `<span style="color:var(--danger);">만들기 실패: ${e.message||e}</span>`;
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = '증빙자료 다운로드'; }
+  }
+}
+
+/* 확정 현황 인쇄 — jsPDF 류는 한글 폰트 임베딩이 까다로워 글자가 깨진다.
+   인쇄용 창을 띄우고 브라우저의 「PDF로 저장」 을 쓰는 쪽이 확실하다. */
+function odsPrintConfirm(round, type, claims){
+  const cfg = round.source_summary || {};
+  const rows = (claims || []).map(c => ({
+    code: c.retailers?.code || '', name: c.retailers?.name || '',
+    users: c.detail?.user_count || 0, um: c.detail?.user_months || 0,
+    amount: Number(c.approved_amount || 0),
+    at: c.confirmed_at ? new Date(c.confirmed_at).toLocaleString('ko-KR') : null,
+  })).sort((a, b) => a.code.localeCompare(b.code));
+  const done = rows.filter(r => r.at).length;
+  const sum = rows.reduce((a, r) => a + r.amount, 0);
+  const esc = v => String(v == null ? '' : v).replace(/[<>&]/g, m => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[m]));
+
+  const w = window.open('', '_blank', 'width=1000,height=760');
+  if(!w){ alert('팝업이 차단되었습니다. 이 사이트의 팝업을 허용해주세요.'); return; }
+  w.document.write(`<!doctype html><html lang="ko"><head><meta charset="utf-8">
+    <title>One DMS ${esc(round.period_label)} 리테일러 확정 현황</title>
+    <style>
+      @page { size: A4 landscape; margin: 14mm; }
+      body { font-family:"맑은 고딕","Malgun Gothic",sans-serif; color:#1a1a1a; margin:0; }
+      h1 { font-size:17px; margin:0 0 4px; }
+      .sub { font-size:11px; color:#6e7375; margin-bottom:14px; }
+      table { border-collapse:collapse; width:100%; font-size:11px; }
+      th { background:#3d4448; color:#fff; font-weight:600; padding:7px 8px; text-align:left; }
+      td { border-bottom:1px solid #e3e5e6; padding:6px 8px; }
+      .n { text-align:right; font-variant-numeric:tabular-nums; }
+      .c { text-align:center; }
+      tfoot td { background:#f4f5f5; font-weight:700; border-top:2px solid #3d4448; }
+      .ok { color:#2f7d52; font-weight:600; }
+      .no { color:#c0392b; font-weight:600; }
+      .foot { margin-top:16px; font-size:10px; color:#6e7375; }
+      @media print { .noprint { display:none; } }
+      .noprint { margin-bottom:12px; }
+      .btn { font:inherit; padding:7px 14px; border:1px solid #3d4448; background:#3d4448;
+             color:#fff; border-radius:5px; cursor:pointer; }
+    </style></head><body>
+    <div class="noprint"><button class="btn" onclick="window.print()">인쇄 / PDF로 저장</button></div>
+    <h1>One DMS License Fee · ${esc(round.period_label)} 리테일러 확정 현황</h1>
+    <div class="sub">
+      ${esc((cfg.month_labels || []).join(' · '))} ·
+      유저당 월단가 ${fmtWon(cfg.rate || 0)} ·
+      세금계산서 발행일 ${esc(round.invoice_issue_date || '—')} ·
+      확정 ${done} / ${rows.length}개사
+    </div>
+    <table><thead><tr>
+      <th>리테일러</th><th>법인명</th><th class="n">인원</th><th class="n">유저-MONTH</th>
+      <th class="n">청구금액</th><th class="c">확정</th><th>확정 일시</th>
+    </tr></thead><tbody>
+      ${rows.map(r => `<tr>
+        <td>${esc(r.code)}</td><td>${esc(r.name)}</td>
+        <td class="n">${r.users.toLocaleString('ko-KR')}명</td>
+        <td class="n">${r.um.toLocaleString('ko-KR')}</td>
+        <td class="n">${r.amount.toLocaleString('ko-KR')}원</td>
+        <td class="c ${r.at ? 'ok' : 'no'}">${r.at ? '확정' : '미확정'}</td>
+        <td>${esc(r.at || '—')}</td></tr>`).join('')}
+    </tbody><tfoot><tr>
+      <td colspan="2">합계</td>
+      <td class="n">${rows.reduce((a,r)=>a+r.users,0).toLocaleString('ko-KR')}명</td>
+      <td class="n">${rows.reduce((a,r)=>a+r.um,0).toLocaleString('ko-KR')}</td>
+      <td class="n">${sum.toLocaleString('ko-KR')}원</td>
+      <td class="c">${done}/${rows.length}</td><td></td>
+    </tr></tfoot></table>
+    <div class="foot">
+      출력 ${new Date().toLocaleString('ko-KR')} · JLR Korea 정산 포털<br>
+      본 문서는 리테일러가 포털에서 직접 [정산 확정] 을 누른 기록입니다. 확정 일시는 서버 기록 시각입니다.
+    </div></body></html>`);
+  w.document.close();
 }
 
 checkSession();
