@@ -280,6 +280,7 @@
     <div class="nav-item" data-nav="accounts">계정 관리</div>
     <div class="nav-item" data-nav="history">과거 정산내역 조회</div>
     <div class="nav-item" data-nav="outbox">메일 발송 대기함 <span id="obBadge" class="badge badge-ar" style="display:none; margin-left:6px;">0</span></div>
+    <div class="nav-item" data-nav="basedata">기준 데이터</div>
     <div class="nav-item" data-nav="inventory">재고 관리</div>
     <div class="nav-item" data-nav="audit">활동 이력</div>
   </nav>
@@ -365,7 +366,7 @@
         <div class="hint" id="initResult" style="margin-top:8px;"></div>
       </div>
       <table id="typesTable">
-        <thead><tr><th>코드</th><th>유형명</th><th>방향</th><th>주기</th><th>청구단위</th><th>대상</th><th>상태</th></tr></thead>
+        <thead><tr><th>코드</th><th>유형명</th><th>방향</th><th>주기</th><th>청구단위</th><th>대상</th><th>상태</th><th>검증</th></tr></thead>
         <tbody id="typesBody"></tbody>
       </table>
       <div id="typesEmpty" class="empty-state" style="display:none; margin-top:12px;">
@@ -503,6 +504,7 @@
         <div style="display:flex; gap:8px;">
           <button class="btn btn-ghost btn-sm" id="obRefresh">새로고침</button>
           <button class="btn btn-sm" id="obSendAll">대기 전체 발송</button>
+          <span id="obBusy" class="badge badge-warn" style="display:none; margin-left:8px;"></span>
         </div>
       </div>
       <div id="outboxHost"></div>
@@ -529,11 +531,110 @@
       <div id="invHost"></div>
     </section>
 
+    <!-- ===== 기준 데이터 (Turn Over · 부품가격 · 대상 차대) ===== -->
+    <section id="view-basedata" style="display:none;">
+      <div class="page-head">
+        <div>
+          <div class="page-title">기준 데이터</div>
+          <div class="page-desc">
+            캠페인 청구를 검증할 때 대조하는 원천 데이터입니다. 여기에 적재된 달만 검증할 수 있습니다.
+          </div>
+        </div>
+      </div>
+
+      <div class="info-card" style="margin-bottom:14px;">
+        <div class="section-label" style="margin-top:0;">IQM 차량 마스터 — 모델 정보의 기준</div>
+        <div class="hint">
+          <b>모델은 IQM 이 모든 것에 우선합니다.</b> IQM 에 없는 차대만 기존 기록값을 씁니다.
+          Turn Over 의 모델 값은 비어 있거나(FY27 Q1 액세서리 3,737건) 이름과 코드가
+          어긋나는 경우가 있어(「New Range Rover L663」) 그대로 쓰면
+          <b>Defender 가 7% 로 잡혀 인센티브가 반토막</b> 납니다.
+          IQM 차량 조회 결과 CSV 를 그대로 올려주세요.
+        </div>
+        <div class="row2" style="max-width:620px; margin-top:10px;">
+          <div class="field"><label>IQM CSV</label>
+            <input type="file" id="iqmFile" accept=".csv"></div>
+          <div class="field"><label>기준 회차 (비우면 이번 달)</label>
+            <input type="text" id="iqmYm" placeholder="예: 202609"></div>
+        </div>
+        <button class="btn btn-sm" id="iqmLoadBtn">IQM 적재</button>
+        <div id="iqmProgress" style="margin-top:10px;"></div>
+        <div id="iqmStatus" style="margin-top:12px;"></div>
+      </div>
+
+      <div class="info-card" style="margin-bottom:14px;">
+        <div class="section-label" style="margin-top:0;">Turn Over 적재</div>
+        <div class="hint">
+          월별 <b>Turn Over 리포트</b> xlsx 를 그대로 올리면 됩니다. 파일명에서 기간을 읽어 해당 월로 적재하고,
+          같은 달을 다시 올리면 그 달만 교체합니다. 월 10~14만 행이라 1~3분 걸립니다 —
+          <b>적재 중에는 창을 닫지 마세요.</b>
+        </div>
+        <div class="row2" style="max-width:620px; margin-top:10px;">
+          <div class="field"><label>Turn Over 파일 (여러 개 선택 가능)</label>
+            <input type="file" id="toFile" accept=".xlsx,.xls" multiple></div>
+          <div class="field"><label>적재 월 (비우면 파일명에서 자동)</label>
+            <input type="text" id="toYm" placeholder="예: 202607"></div>
+        </div>
+        <button class="btn btn-sm" id="toLoadBtn">Turn Over 적재</button>
+        <div id="toProgress" style="margin-top:10px;"></div>
+      </div>
+
+      <div class="info-card" style="margin-bottom:14px;">
+        <div class="section-label" style="margin-top:0;">적재 현황</div>
+        <div id="baseMonths"><div class="hint">불러오는 중...</div></div>
+      </div>
+
+      <div class="info-card" style="margin-bottom:14px;">
+        <div class="section-label" style="margin-top:0;">부품가격 마스터 적재</div>
+        <div class="hint">
+          <b>가격공개</b> xlsx 를 올립니다. 소비자가는 매월 바뀌므로 캠페인이 걸친 달을 모두 올려두셔야
+          「소비자가 마스터 불일치」 검증이 돌아갑니다.
+        </div>
+        <div class="row2" style="max-width:620px; margin-top:10px;">
+          <div class="field"><label>가격공개 파일</label><input type="file" id="ppFile" accept=".xlsx,.xls"></div>
+          <div class="field"><label>적용 월</label><input type="text" id="ppYm" placeholder="예: 202609"></div>
+        </div>
+        <button class="btn btn-sm" id="ppLoadBtn">부품가격 적재</button>
+        <div id="ppProgress" style="margin-top:10px;"></div>
+      </div>
+
+      <div class="info-card">
+        <div class="section-label" style="margin-top:0;">대상 차대 · 리콜 목록</div>
+        <div class="hint">
+          특정 차대만 대상인 캠페인, 리콜코드 기준 캠페인에 씁니다. 엑셀 <b>첫 열에 차대번호</b>,
+          둘째 열에 리콜코드(선택)를 넣어 올려주세요. 검증 조건에서 이 목록을 골라 쓸 수 있습니다.
+        </div>
+        <div class="row3" style="max-width:860px; margin-top:10px;">
+          <div class="field"><label>목록 이름</label><input type="text" id="vlName" placeholder="예: Welcome Back 대상차량"></div>
+          <div class="field"><label>종류</label><select id="vlKind">
+            <option value="VIN">대상 차대 목록</option><option value="RECALL">리콜 대상 목록</option></select></div>
+          <div class="field"><label>파일</label><input type="file" id="vlFile" accept=".xlsx,.xls,.csv"></div>
+        </div>
+        <button class="btn btn-ghost btn-sm" id="vlLoadBtn">목록 등록</button>
+        <div id="vlProgress" style="margin-top:8px;"></div>
+        <div id="vlList" style="margin-top:12px;"></div>
+      </div>
+    </section>
+
   </main>
 </div>
 
 <!-- ============ 슬라이드 패널: 정산 유형 ============ -->
 <div id="overlay"></div>
+
+<!-- ============ 슬라이드 패널: 캠페인 검증 조건 ============ -->
+<div id="rulesPanel" class="panel" style="width:720px;">
+  <div class="panel-head">
+    <div class="panel-title" id="rulesPanelTitle">검증 조건</div>
+    <button class="panel-close" data-close-panel="rulesPanel">&times;</button>
+  </div>
+  <div class="panel-body" id="rulesBody"></div>
+  <div class="panel-foot">
+    <button class="btn" id="rulesSaveBtn">저장</button>
+    <button class="btn btn-ghost" data-close-panel="rulesPanel">닫기</button>
+    <span class="hint" id="rulesMsg" style="margin-left:auto; align-self:center;"></span>
+  </div>
+</div>
 
 <!-- ============ 슬라이드 패널: 재고 - 품목 ============ -->
 <div id="invItemPanel" class="panel">
@@ -1293,35 +1394,45 @@ async function sendEmail(to, subject, html, context){
   }
 }
 
-/* 실제 발송 — 대기함 화면에서만 호출한다 */
+/* 발송 지시 — 대기함 화면에서만 호출한다.
+   ★ 2026-10-21: Edge Function 직접 호출을 걷어냈다.
+   구글이 Supabase 서버 IP 에서 오는 SMTP 인증을 534 WebLoginRequired 로
+   막는다. 앱 비밀번호를 새로 발급해도 같았다. 클라우드에서 Gmail SMTP 로
+   붙는 건 뚫어도 또 막히므로, 보내는 자리를 맥미니로 옮겼다
+   (봇 때문에 24시간 켜져 있고 한국 IP 라 구글이 막지 않는다).
+
+   여기서는 QUEUED 로 표시만 한다. 맥미니 워커(scripts/mail_worker.py)가
+   몇 초 안에 집어가 실제로 보내고 SENT / FAILED 로 바꾼다.
+   "매니저가 버튼을 눌러야 나간다" 원칙은 그대로 — 워커는 QUEUED 만
+   가져가고 PENDING 은 쳐다보지 않는다. */
 async function dispatchOutbox(row){
-  // 재시도면 예전 실패 사유를 먼저 지운다 (옛 메시지가 남아 원인을 오인하게 된다)
-  if(row.status === 'FAILED'){
-    await sb.from('email_outbox').update({ status:'PENDING', error:null }).eq('id', row.id);
-  }
-  const { data, error } = await sb.functions.invoke('send-email', {
-    body: { to: row.to_addrs, subject: row.subject, html: row.html }
-  });
   const { data: { user } } = await sb.auth.getUser();
-  if(error){
-    // invoke 가 주는 message 는 "non-2xx status code" 뿐이라 원인을 알 수 없다.
-    // 함수가 본문에 담아 보낸 진짜 사유를 꺼내 기록한다. (2026-10-20)
-    let msg = error.message || '발송 실패';
-    try{
-      if(error.context && typeof error.context.text === 'function'){
-        const body = await error.context.text();
-        try{ const j = JSON.parse(body); if(j && j.error) msg = j.error; }
-        catch(_){ if(body) msg = body.slice(0, 300); }
-      }
-    }catch(_){}
-    await sb.from('email_outbox').update({ status:'FAILED', error: msg }).eq('id', row.id);
-    return { ok:false, msg };
+  const { data, error } = await sb.from('email_outbox')
+    .update({ status:'QUEUED', error:null, attempts:0,
+              sent_by: user?.id || null })
+    .eq('id', row.id).in('status', ['PENDING','FAILED'])
+    .select('id');
+  if(error) return { ok:false, msg: error.message };
+  // RLS 로 막히면 오류 없이 0건이 돌아온다 — 성공으로 오인하면 안 된다
+  if(!data || !data.length){
+    return { ok:false, msg:'발송 지시가 반영되지 않았습니다 (0건). 새로고침 후 다시 시도해주세요.' };
   }
-  await sb.from('email_outbox')
-    .update({ status:'SENT', sent_at:new Date().toISOString(), sent_by:user?.id||null, error:null })
-    .eq('id', row.id);
-  await logAudit('EMAIL_SEND','EMAIL',row.id,{ subject:row.subject, to:row.to_addrs });
-  return { ok:true, data };
+  await logAudit('EMAIL_QUEUE','EMAIL',row.id,{ subject:row.subject, to:row.to_addrs });
+  return { ok:true, queued:true };
+}
+
+/* 워커가 가져가 보낼 때까지 대기함을 몇 초간 따라가며 새로고침한다.
+   발송은 비동기라, 누르자마자 화면이 '발송됨' 으로 안 바뀌면
+   매니저가 또 누르게 된다. */
+let obWatchTimer = null;
+function watchOutbox(seconds = 40){
+  clearInterval(obWatchTimer);
+  const until = Date.now() + seconds * 1000;
+  obWatchTimer = setInterval(async () => {
+    await loadOutbox();
+    const busy = outboxRows.some(r => r.status === 'QUEUED' || r.status === 'SENDING');
+    if(!busy || Date.now() > until){ clearInterval(obWatchTimer); obWatchTimer = null; }
+  }, 3000);
 }
 
 async function refreshOutboxBadge(){
@@ -1354,17 +1465,34 @@ function renderOutbox(){
   const host = document.getElementById('outboxHost');
   // 실패한 건도 다시 보낼 대상에 넣는다 — 안 그러면 한 번 실패하면 손쓸 방법이 없다
   const pending = outboxRows.filter(r => r.status === 'PENDING' || r.status === 'FAILED');
-  const LABEL = { PENDING:'발송 대기', SENT:'발송됨', CANCELLED:'취소됨', FAILED:'발송 실패' };
-  const BADGE = { PENDING:'badge-ar', SENT:'badge-ap', CANCELLED:'badge-off', FAILED:'badge-warn' };
+  const LABEL = { PENDING:'발송 대기', QUEUED:'발송 요청됨', SENDING:'보내는 중',
+                  SENT:'발송됨', CANCELLED:'취소됨', FAILED:'발송 실패' };
+  const BADGE = { PENDING:'badge-ar', QUEUED:'badge-warn', SENDING:'badge-warn',
+                  SENT:'badge-ap', CANCELLED:'badge-off', FAILED:'badge-warn' };
   document.getElementById('obSendAll').disabled = pending.length === 0;
   const nFail = outboxRows.filter(r => r.status === 'FAILED').length;
   document.getElementById('obSendAll').textContent = pending.length
     ? `대기 전체 발송 (${pending.length}건${nFail ? ` · 실패 ${nFail}건 포함` : ''})` : '대기 전체 발송';
+  // 지금 워커가 들고 있는 건수를 버튼 옆에 보여준다
+  const busyN = outboxRows.filter(r => r.status === 'QUEUED' || r.status === 'SENDING').length;
+  const busyEl = document.getElementById('obBusy');
+  if(busyEl){
+    busyEl.textContent = busyN ? `발송 중 ${busyN}건` : '';
+    busyEl.style.display = busyN ? 'inline-block' : 'none';
+  }
   if(outboxRows.length === 0){
     host.innerHTML = '<div class="info-card"><div class="hint">대기 중인 메일이 없습니다.</div></div>';
     return;
   }
-  host.innerHTML = outboxRows.map(r => `
+  // 발송은 맥미니 워커가 한다. 워커가 멈춰 있으면 QUEUED 가 쌓이기만 하므로 알려준다.
+  const stuck = outboxRows.filter(r => (r.status === 'QUEUED' || r.status === 'SENDING')
+    && (Date.now() - new Date(r.created_at).getTime()) > 120000);
+  host.innerHTML = (stuck.length ? `<div class="info-card" style="margin-bottom:10px;
+       border-color:#e0b050; background:#fff8ec;">
+      <b>발송 요청한 메일 ${stuck.length}건이 2분 넘게 안 나가고 있습니다.</b>
+      <div class="hint" style="margin-top:4px;">맥미니 발송 워커가 멈춰 있을 수 있습니다.
+        터미널에서 <code>~/RESTART-BOTS.md</code> 의 메일 워커 항목을 확인해주세요.</div>
+    </div>` : '') + outboxRows.map(r => `
     <div class="info-card" style="margin-bottom:10px;">
       <div style="display:flex; align-items:flex-start; gap:10px; flex-wrap:wrap;">
         <div style="flex:1; min-width:280px;">
@@ -1402,7 +1530,8 @@ function renderOutbox(){
     b.disabled = true; b.textContent = '발송 중...';
     const r = await dispatchOutbox(row);
     if(!r.ok) alert('발송 실패: ' + r.msg);
-    loadOutbox();
+    await loadOutbox();
+    if(r.ok) watchOutbox();
   }));
 }
 
@@ -1743,6 +1872,7 @@ function switchView(name){
   if(name === 'audit') loadAudit();
   if(name === 'accounts') loadAccounts();
   if(name === 'inventory') loadInventory();
+  if(name === 'basedata') loadBaseData();
   if(name === 'outbox') loadOutbox();
   if(name === 'history') loadHistory();
   if(name === 'retailer') loadRetailerClaims();
@@ -1855,7 +1985,9 @@ async function loadTypes(){
       <td><span class="badge ${t.direction==='AP'?'badge-ap':'badge-ar'}">${t.direction}</span></td>
       <td>${PERIOD_LABEL[t.period]||t.period}</td><td>${t.claim_unit==='RETAILER'?'법인':'지점'}</td>
       <td>${targetLabel}</td>
-      <td>${t.is_active ? '<span class="badge badge-ap">활성</span>' : '<span class="badge badge-off">비활성</span>'}</td>`;
+      <td>${t.is_active ? '<span class="badge badge-ap">활성</span>' : '<span class="badge badge-off">비활성</span>'}</td>
+      <td><button class="btn btn-ghost btn-sm rules-btn" data-tid="${t.id}">검증 조건</button></td>`;
+    tr.querySelector('.rules-btn').addEventListener('click', e => { e.stopPropagation(); openRulesPanel(t); });
     tbody.appendChild(tr);
   });
 }
@@ -3054,7 +3186,12 @@ function parseOneDmsRaw(buf, type, fiscalYear, retailersList){
     if(!code) code = Object.entries(P.DEALER_MAP).find(([k]) => _odNorm(k) === _odNorm(dealer))?.[1];
     if(!code){ unmatched.set(dealer, (unmatched.get(dealer)||0)+1); continue; }
 
-    const flags = useMonths.map(m => String(row[m.idx] ?? '').trim() !== '');
+    // 월 셀에는 'PRO' / 'SERVICE' 같은 라이선스 유형이 들어 있다.
+    // 지금까지 "값이 있으면 과금" 으로만 쓰고 유형은 버렸는데, 증빙에 필요하다.
+    // ★ 유형은 리테일러에게 나가면 안 된다 — claims.detail 이 아니라
+    //   onedms_licenses(관리자 전용) 에만 저장한다.
+    const types = useMonths.map(m => String(row[m.idx] ?? '').trim());
+    const flags = types.map(t => t !== '');
     const monthsActive = flags.filter(Boolean).length;
     if(monthsActive === 0) continue;
 
@@ -3071,7 +3208,9 @@ function parseOneDmsRaw(buf, type, fiscalYear, retailersList){
       first:  cFirst  !== undefined ? String(row[cFirst] ?? '').trim() : '',
       status: cStatus !== undefined ? String(row[cStatus] ?? '').trim() : '',
       retire: cRetire !== undefined ? String(row[cRetire] ?? '').trim() : '',
-      flags, months_active: monthsActive
+      flags, months_active: monthsActive,
+      // _types 는 관리자 전용이다. 아래 publish 에서 detail 에 넣기 전에 떼어낸다.
+      _types: types
     });
     g.user_months += monthsActive;
   }
@@ -3173,6 +3312,9 @@ async function renderCampaignRoundDetail(round, type){
     sb.from('part_price_months').select('*')
   ]);
   const retById = new Map((rets||[]).map(r => [r.id, r]));
+  // 모델은 IQM 이 우선한다 — 화면에 뜨는 모델도, 조건 판정도 같은 기준을 써야 한다
+  await loadIqmCache((ros||[]).map(r => r.vin));
+  (ros||[]).forEach(r => { r.model = modelOf(r.vin, r.model); });
   campState = { round, type, cfg, ros: ros||[], retById, sel:new Set(), filter:'FAIL',
                 retailer:'', reason:'', months: months||[] };
   renderCampaign(months||[]);
@@ -3605,6 +3747,30 @@ async function renderOneDmsRoundDetail(round, type){
 
   const { data: retailersList } = await sb.from('retailers').select('id, code, name').eq('is_active', true);
 
+  // 공지 후에는 증빙 묶음을 받을 수 있게 한다 (회계 증빙용 — 관리자 전용)
+  if(round.status !== 'DRAFT'){
+    const host = document.getElementById('reviewSection');
+    if(host){
+      host.insertAdjacentHTML('afterbegin', odsAttachPanel(round) + `
+        <div class="info-card" style="margin-bottom:12px;">
+          <div class="section-label" style="margin-top:0;">증빙자료</div>
+          <div class="hint">요약 · Retailer Charge(라이선스 유형별) · 사용자 상세 ·
+            리테일러별 정산서를 한 권으로 받습니다.
+            <b>라이선스 유형이 들어 있어 리테일러에게는 제공하지 않는 문서입니다.</b></div>
+          <div style="display:flex; gap:8px; align-items:center; margin-top:10px; flex-wrap:wrap;">
+            <button class="btn btn-sm" id="odsEviBtn">증빙자료 다운로드</button>
+            <button class="btn btn-sm btn-ghost" id="odsPrintBtn">확정 현황 인쇄 (PDF 저장)</button>
+            <span class="hint" id="odsEviMsg"></span>
+          </div>
+        </div>`);
+      odsBindAttach(round, type);
+      const eb = document.getElementById('odsEviBtn');
+      if(eb) eb.onclick = () => odsBuildEvidence(round, type);
+      const pb = document.getElementById('odsPrintBtn');
+      if(pb) pb.onclick = () => odsPrintConfirm(round, type, claims || []);
+    }
+  }
+
   if(round.status === 'DRAFT'){
     const P = oneDmsParams(type);
     const fyGuess = round.fiscal_year || (round.period_label.match(/FY\s?\d{2}/i)?.[0]?.replace(/\s/,'') || '');
@@ -3795,7 +3961,9 @@ async function publishOneDmsRound(round, type){
         detail: {
           preset: 'ONE_DMS_AR', user_count: r.users.length, user_months: r.user_months,
           rate: p.rate, fiscal_year: p.fiscalYear, month_labels: p.monthLabels,
-          amount: r.amount, vat: Math.round(r.amount * P.VAT_RATE), users: r.users
+          amount: r.amount, vat: Math.round(r.amount * P.VAT_RATE),
+          // ★ 라이선스 유형(_types)은 반드시 뺀다. detail 은 리테일러가 읽는다.
+          users: r.users.map(u => { const { _types, ...safe } = u; return safe; })
         },
         confirmed_at: null, submitted_at: new Date().toISOString()
       };
@@ -3803,6 +3971,26 @@ async function publishOneDmsRound(round, type){
         ? await sb.from('claims').update(payload).eq('id', existing.id)
         : await sb.from('claims').insert(payload);
       if(error) throw error;
+    }
+
+    // 라이선스 유형 — 관리자 전용 표에만. 회차 단위로 갈아끼운다.
+    await sb.from('onedms_licenses').delete().eq('round_id', round.id);
+    const licRows = [];
+    for(const r of p.retailers){
+      for(const u of r.users){
+        licRows.push({
+          round_id: round.id, retailer_id: r.retailer_id, retailer_code: r.code,
+          dealer_name: r.dealerName || r.retailer_name || '', user_name: u.name,
+          login: u.login || '', role: u.role || '', first_login: u.first || '',
+          status: u.status || '', retire: u.retire || '',
+          month_labels: p.monthLabels, types: u._types || [],
+          months_active: u.months_active,
+        });
+      }
+    }
+    for(let i = 0; i < licRows.length; i += 500){
+      const { error: lErr } = await sb.from('onedms_licenses').insert(licRows.slice(i, i+500));
+      if(lErr) throw new Error('라이선스 유형 저장 실패: ' + lErr.message);
     }
 
     const summary = {
@@ -5301,8 +5489,11 @@ document.getElementById('obSendAll').addEventListener('click', async () => {
     if(r.ok) ok++; else { ng++; lastMsg = r.msg || lastMsg; }
   }
   btn.textContent = t; btn.disabled = false;
-  alert(`발송 완료 ${ok}건${ng ? ` · 실패 ${ng}건\n\n실패 사유: ${lastMsg}` : ''}`);
-  loadOutbox();
+  // 여기서 끝나는 건 '발송 지시' 까지다. 실제 발송은 맥미니 워커가 한다.
+  alert(`발송 요청 ${ok}건${ng ? ` · 실패 ${ng}건\n\n실패 사유: ${lastMsg}` : ''}\n\n`
+      + '맥미니 발송 워커가 순서대로 보냅니다. 화면이 「발송됨」 으로 바뀌는 것까지 확인해주세요.');
+  await loadOutbox();
+  if(ok) watchOutbox(Math.min(300, 20 + ok * 4));
 });
 
 document.getElementById('historyRefreshBtn').addEventListener('click', () => { histData = null; loadHistory(); });
@@ -6382,7 +6573,15 @@ const xsCell = (v, st) => ({ v: (v === null || v === undefined) ? '' : v,
                              t: typeof v === 'number' ? 'n' : 's', s: st });
 
 /* columns: [{key, label, w, type:'num'|'date'|'text', align}] */
-function xlsxHouse({ filename, sheetName, title, subtitle, summary, steps, columns, rows, totals, notes }){
+/* 여러 장짜리 문서(증빙 등)도 같은 서식을 쓰도록 시트 생성만 떼어냈다.
+   xlsxHouse 는 이 함수로 한 장을 만들어 바로 내려받는다. */
+function xlsxHouse(spec){
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, xsSheet(spec), spec.sheetName || 'Sheet1');
+  XLSX.writeFile(wb, spec.filename);
+}
+
+function xsSheet({ title, subtitle, summary, steps, columns, rows, totals, notes }){
   const aoa = [];        // 값
   const sty = [];        // 같은 좌표의 서식
   const push = (vals, styles) => { aoa.push(vals); sty.push(styles || []); };
@@ -6463,9 +6662,7 @@ function xlsxHouse({ filename, sheetName, title, subtitle, summary, steps, colum
   ws['!rows'] = aoa.map((_, R) => R === 0 ? { hpt: 22 } : (R === headRow ? { hpt: 20 } : {}));
   ws['!autofilter'] = { ref: XLSX.utils.encode_range(
       { s:{r:headRow,c:0}, e:{r: headRow + rows.length, c: W-1} }) };
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, sheetName || 'Sheet1');
-  XLSX.writeFile(wb, filename);
+  return ws;
 }
 
 /* ================================================================
@@ -10577,6 +10774,1101 @@ document.getElementById('it_item').addEventListener('change', updateInvAvail);
 document.getElementById('it_wh').addEventListener('change', updateInvAvail);
 document.getElementById('it_to').addEventListener('change', updateInvAvail);
 document.querySelectorAll('[data-inv-txn]').forEach(b => b.addEventListener('click', () => openInvTxn(b.dataset.invTxn)));
+
+/* ================================================================
+   기준 데이터 — Turn Over · 부품가격 · 대상 차대 목록  (2026-10-20)
+
+   지금까지 캠페인 검증은 포털 밖에서 로컬 Turn Over 파일을 읽어
+   돌렸다. 매니저가 포털 안에서 전부 끝내려면 기준 데이터가 DB 에
+   있어야 한다. 여기서 올리고, 검증 조건이 여기를 대조한다.
+   ================================================================ */
+
+/* Turn Over 리포트의 한글 헤더 → 컬럼. 헤더 이름이 조금씩 달라지므로
+   후보를 여러 개 둔다 (실측: '품목코드'/'부품번호' 양쪽 다 나온다). */
+const TO_MAP = [
+  ['ro_no',      ['RO번호','RO 번호','RO#']],
+  ['svc_type',   ['서비스타입','서비스 타입']],
+  ['in_date',    ['차량입고일','입고일']],
+  ['ro_date',    ['RO발행일','RO 발행일']],
+  ['stl_no',     ['정산번호']],
+  ['stl_line',   ['정산라인번호','정산 라인번호']],
+  ['claim_type', ['청구유형']],
+  ['claim_acct', ['청구계정']],
+  ['inv_no',     ['인보이스번호']],
+  ['inv_status', ['인보이스상태']],
+  ['inv_date',   ['인보이스완료일','인보이스 완료일']],
+  ['item_type',  ['품목유형']],
+  ['part_no',    ['품목코드','부품번호','품번']],
+  ['part_name',  ['품목명','부품명']],
+  ['qty',        ['품목수량','수량']],
+  ['retail',     ['품목소매가']],
+  ['retail_sum', ['품목소매가합계']],
+  ['sale_sum',   ['품목판매단가합계']],
+  ['split',      ['분할율','분할률']],
+  ['disc_code',  ['할인코드']],
+  ['vin',        ['차대번호','VIN']],
+  ['reg_date',   ['차량등록일','최초등록일']],
+  ['brand',      ['브랜드']],
+  ['model',      ['모델']],
+  ['dealer',     ['AS딜러','딜러']],
+  ['workshop',   ['AS지점','지점']],
+  ['customer',   ['고객명']],
+];
+const TO_TEXT = new Set(['ro_no','stl_no','inv_no','part_no','vin']);
+const TO_NUM  = new Set(['stl_line','qty','retail','retail_sum','sale_sum','split']);
+const TO_DATE = new Set(['in_date','ro_date','inv_date','reg_date']);
+const TO_CHUNK = 2000;        // 한 번에 보낼 행수. 더 키우면 413 이 난다.
+
+/* 엑셀 날짜는 숫자(1900 기준 일련번호)로 오기도 하고 문자열로 오기도 한다 */
+function xlDate(v){
+  if(v === null || v === undefined || v === '') return null;
+  if(v instanceof Date) return v.toISOString().slice(0,10);
+  if(typeof v === 'number'){
+    const d = new Date(Date.UTC(1899,11,30) + v*86400000);
+    return isNaN(d) ? null : d.toISOString().slice(0,10);
+  }
+  const s = String(v).trim().replace(/[./]/g,'-');
+  const m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  return m ? `${m[1]}-${String(m[2]).padStart(2,'0')}-${String(m[3]).padStart(2,'0')}` : null;
+}
+function xlNum(v){
+  if(v === null || v === undefined || v === '') return null;
+  const n = Number(String(v).replace(/,/g,''));
+  return isFinite(n) ? n : null;
+}
+/* 파일명 'Turn Over 리포트_20260701_20260731 (1).xlsx' → '202607' */
+function ymFromName(name){
+  const m = String(name).match(/(20\d{2})(\d{2})\d{2}[_-]/);
+  return m ? m[1] + m[2] : null;
+}
+
+function baseProgress(id, html){ const el = document.getElementById(id); if(el) el.innerHTML = html; }
+
+async function loadBaseData(){
+  await Promise.all([renderBaseMonths(), renderVinLists(), renderIqmStatus()]);
+}
+
+async function renderBaseMonths(){
+  const host = document.getElementById('baseMonths');
+  const [{ data: tm }, { data: pm }] = await Promise.all([
+    sb.from('turnover_months').select('*'),
+    sb.from('part_price_months').select('*'),
+  ]);
+  const months = new Map();
+  (tm||[]).forEach(r => months.set(r.ym, { ym:r.ym, to:r }));
+  (pm||[]).forEach(r => months.set(r.ym, { ...(months.get(r.ym)||{ym:r.ym}), pp:r }));
+  const rows = [...months.values()].sort((a,b) => b.ym.localeCompare(a.ym));
+  if(!rows.length){ host.innerHTML = '<div class="hint">아직 적재된 데이터가 없습니다.</div>'; return; }
+  host.innerHTML = `<div style="overflow-x:auto;"><table style="min-width:680px;"><thead><tr>
+      <th>월</th><th style="text-align:right;">Turn Over 행</th><th style="text-align:right;">부품 행</th>
+      <th style="text-align:right;">부품가격 품번</th><th>마지막 적재</th><th></th>
+    </tr></thead><tbody>
+    ${rows.map(r => `<tr>
+      <td><b>${r.ym.slice(0,4)}-${r.ym.slice(4)}</b></td>
+      <td style="text-align:right;">${r.to ? Number(r.to.lines).toLocaleString('ko-KR') : '<span class="hint">없음</span>'}</td>
+      <td style="text-align:right;">${r.to ? Number(r.to.parts).toLocaleString('ko-KR') : '—'}</td>
+      <td style="text-align:right;">${r.pp ? Number(r.pp.parts).toLocaleString('ko-KR') : '<span class="hint">없음</span>'}</td>
+      <td class="muted">${new Date(r.to?.loaded_at || r.pp?.loaded_at).toLocaleDateString('ko-KR')}</td>
+      <td style="text-align:right;">${r.to
+        ? `<button class="btn btn-ghost btn-sm to-del" data-ym="${r.ym}">TO 삭제</button>` : ''}</td>
+    </tr>`).join('')}</tbody></table></div>`;
+  host.querySelectorAll('.to-del').forEach(b => b.onclick = async () => {
+    if(!confirm(`${b.dataset.ym} Turn Over 를 삭제합니다.\n이 달이 걸린 캠페인은 검증을 다시 돌려야 합니다. 계속할까요?`)) return;
+    b.disabled = true;
+    const { error } = await sb.from('turnover_lines').delete().eq('ym', b.dataset.ym);
+    if(error){ alert('삭제 실패: ' + error.message); b.disabled = false; return; }
+    await logAudit('TO_DELETE','BASE',null,{ label: b.dataset.ym });
+    await renderBaseMonths();
+  });
+}
+
+/* ── Turn Over 적재 ────────────────────────────────────────────
+   브라우저에서 30MB 넘는 xlsx 를 파싱한다. 시트를 통째로 객체 배열로
+   바꾸면 메모리가 터지므로 헤더만 먼저 읽고 행 단위로 돌린다. */
+document.getElementById('toLoadBtn')?.addEventListener('click', async () => {
+  const files = [...(document.getElementById('toFile').files || [])];
+  const forceYm = document.getElementById('toYm').value.trim();
+  if(!files.length){ baseProgress('toProgress','<span style="color:var(--danger);">파일을 선택해주세요.</span>'); return; }
+  if(files.length > 1 && forceYm){
+    baseProgress('toProgress','<span style="color:var(--danger);">여러 파일을 올릴 때는 적재 월을 비워주세요 (파일명에서 읽습니다).</span>'); return; }
+  const btn = document.getElementById('toLoadBtn');
+  btn.disabled = true;
+  try{
+    for(const f of files){
+      const ym = forceYm || ymFromName(f.name);
+      if(!ym || !/^20\d{4}$/.test(ym)){
+        baseProgress('toProgress', `<span style="color:var(--danger);">${f.name} — 파일명에서 월을 읽지 못했습니다. 적재 월을 직접 입력해주세요.</span>`);
+        continue;
+      }
+      await loadTurnoverFile(f, ym);
+    }
+    await renderBaseMonths();
+  }catch(e){
+    baseProgress('toProgress', `<span style="color:var(--danger);">적재 실패: ${e.message || e}</span>`);
+  }finally{ btn.disabled = false; }
+});
+
+async function loadTurnoverFile(file, ym){
+  const P = h => baseProgress('toProgress', h);
+  P(`<b>${ym}</b> · ${file.name} 읽는 중...`);
+  const wb = XLSX.read(await file.arrayBuffer(), { type:'array', cellDates:true });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const aoa = XLSX.utils.sheet_to_json(ws, { header:1, raw:true, defval:null });
+  if(aoa.length < 2) throw new Error('빈 파일입니다.');
+
+  // 헤더 줄 찾기 — 'RO번호' 가 들어있는 첫 줄
+  let hi = aoa.findIndex(r => (r||[]).some(c => String(c||'').replace(/\s/g,'') === 'RO번호'));
+  if(hi < 0) hi = 0;
+  const head = (aoa[hi]||[]).map(c => String(c||'').replace(/\s/g,''));
+  const col = {};
+  TO_MAP.forEach(([key, names]) => {
+    const i = head.findIndex(h => names.some(n => h === n.replace(/\s/g,'')));
+    if(i >= 0) col[key] = i;
+  });
+  const missing = ['ro_no','item_type','claim_acct','sale_sum'].filter(k => col[k] === undefined);
+  if(missing.length) throw new Error('필수 열을 찾지 못했습니다: ' + missing.join(', '));
+
+  const total = aoa.length - hi - 1;
+  P(`<b>${ym}</b> · ${total.toLocaleString('ko-KR')}행 확인. 기존 ${ym} 데이터를 지우는 중...`);
+  const { error: delErr } = await sb.from('turnover_lines').delete().eq('ym', ym);
+  if(delErr) throw delErr;
+
+  let sent = 0, batch = [];
+  const flush = async () => {
+    if(!batch.length) return;
+    const { error } = await sb.from('turnover_lines').insert(batch);
+    if(error) throw error;
+    sent += batch.length; batch = [];
+    const pct = Math.round(sent / total * 100);
+    P(`<b>${ym}</b> 적재 중 — ${sent.toLocaleString('ko-KR')} / ${total.toLocaleString('ko-KR')}행 (${pct}%)
+       <div style="height:6px; background:var(--surface3); border-radius:3px; margin-top:6px; max-width:420px;">
+         <div style="height:6px; width:${pct}%; background:var(--accent); border-radius:3px;"></div></div>`);
+  };
+  for(let i = hi + 1; i < aoa.length; i++){
+    const r = aoa[i]; if(!r || r[col.ro_no] === null || r[col.ro_no] === undefined) continue;
+    const o = { ym };
+    for(const [key] of TO_MAP){
+      if(col[key] === undefined){ continue; }
+      const v = r[col[key]];
+      o[key] = TO_DATE.has(key) ? xlDate(v)
+             : TO_NUM.has(key)  ? xlNum(v)
+             : (v === null || v === undefined || v === '') ? null : String(v).trim();
+    }
+    batch.push(o);
+    if(batch.length >= TO_CHUNK) await flush();
+  }
+  await flush();
+
+  const { count } = await sb.from('turnover_lines')
+    .select('id', { count:'exact', head:true }).eq('ym', ym);
+  P(`<b>${ym}</b> 적재 완료 — 원본 ${total.toLocaleString('ko-KR')}행 → DB ${Number(count).toLocaleString('ko-KR')}행
+     <span class="hint">(다른 달 파일에 이미 들어있던 같은 정산라인은 중복으로 제외됩니다)</span>`);
+  await logAudit('TO_LOAD','BASE',null,{ label:`${ym} · ${count}행` });
+}
+
+/* ── 부품가격 마스터 적재 ─────────────────────────────────────── */
+const PP_MAP = [
+  ['part_no',   ['부품번호','품번','품목코드','PART NO','PARTNO']],
+  ['brand',     ['브랜드','BRAND']],
+  ['part_name', ['부품명','품목명','품명','DESCRIPTION']],
+  ['retail',    ['소비자가격','소비자가','소비자가격(부가세포함)','RETAIL']],
+  ['niv',       ['StockNIV','STOCKNIV','재고매입가','NIV']],
+  ['part_group',['품목군','그룹','GROUP']],
+];
+document.getElementById('ppLoadBtn')?.addEventListener('click', async () => {
+  const f  = document.getElementById('ppFile').files[0];
+  const ym = document.getElementById('ppYm').value.trim();
+  const P  = h => baseProgress('ppProgress', h);
+  if(!f || !/^20\d{4}$/.test(ym)){ P('<span style="color:var(--danger);">파일과 적용 월(YYYYMM)을 모두 입력해주세요.</span>'); return; }
+  const btn = document.getElementById('ppLoadBtn'); btn.disabled = true;
+  try{
+    P('읽는 중...');
+    const wb  = XLSX.read(await f.arrayBuffer(), { type:'array' });
+    const ws  = wb.Sheets[wb.SheetNames[0]];
+    const aoa = XLSX.utils.sheet_to_json(ws, { header:1, raw:true, defval:null });
+    let hi = aoa.findIndex(r => (r||[]).some(c => /부품번호|품번|품목코드/.test(String(c||''))));
+    if(hi < 0) hi = 0;
+    const head = (aoa[hi]||[]).map(c => String(c||'').replace(/\s/g,'').toUpperCase());
+    const col = {};
+    PP_MAP.forEach(([k, names]) => {
+      const i = head.findIndex(h => names.some(n => h === n.replace(/\s/g,'').toUpperCase()));
+      if(i >= 0) col[k] = i;
+    });
+    if(col.part_no === undefined || col.retail === undefined)
+      throw new Error('부품번호 / 소비자가격 열을 찾지 못했습니다.');
+    const total = aoa.length - hi - 1;
+    await sb.from('part_prices').delete().eq('ym', ym);
+    let sent = 0, batch = [], seen = new Set();
+    const flush = async () => {
+      if(!batch.length) return;
+      const { error } = await sb.from('part_prices').upsert(batch, { onConflict:'ym,part_no' });
+      if(error) throw error;
+      sent += batch.length; batch = [];
+      P(`적재 중 — ${sent.toLocaleString('ko-KR')} / ${total.toLocaleString('ko-KR')}`);
+    };
+    for(let i = hi+1; i < aoa.length; i++){
+      const r = aoa[i]; if(!r) continue;
+      const pn = r[col.part_no]; if(pn === null || pn === undefined || pn === '') continue;
+      const key = String(pn).trim(); if(seen.has(key)) continue; seen.add(key);
+      batch.push({ ym, part_no:key,
+        brand:      col.brand      !== undefined ? String(r[col.brand]||'').trim() || null : null,
+        part_name:  col.part_name  !== undefined ? String(r[col.part_name]||'').trim() || null : null,
+        retail:     xlNum(r[col.retail]),
+        niv:        col.niv        !== undefined ? xlNum(r[col.niv]) : null,
+        part_group: col.part_group !== undefined ? String(r[col.part_group]||'').trim() || null : null });
+      if(batch.length >= TO_CHUNK) await flush();
+    }
+    await flush();
+    P(`<b>${ym}</b> 부품가격 적재 완료 — ${sent.toLocaleString('ko-KR')}품번`);
+    await logAudit('PP_LOAD','BASE',null,{ label:`${ym} · ${sent}품번` });
+    await renderBaseMonths();
+  }catch(e){ P(`<span style="color:var(--danger);">적재 실패: ${e.message||e}</span>`); }
+  finally{ btn.disabled = false; }
+});
+
+/* ── 대상 차대 · 리콜 목록 ────────────────────────────────────── */
+document.getElementById('vlLoadBtn')?.addEventListener('click', async () => {
+  const name = document.getElementById('vlName').value.trim();
+  const kind = document.getElementById('vlKind').value;
+  const f    = document.getElementById('vlFile').files[0];
+  const P    = h => baseProgress('vlProgress', h);
+  if(!name || !f){ P('<span style="color:var(--danger);">목록 이름과 파일을 모두 입력해주세요.</span>'); return; }
+  const btn = document.getElementById('vlLoadBtn'); btn.disabled = true;
+  try{
+    const wb  = XLSX.read(await f.arrayBuffer(), { type:'array' });
+    const aoa = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header:1, raw:true, defval:null });
+    const rows = [], seen = new Set();
+    for(const r of aoa){
+      const v = String((r||[])[0] || '').trim().toUpperCase();
+      if(!/^[A-Z0-9]{11,17}$/.test(v)) continue;     // 헤더·빈줄 거르기
+      if(seen.has(v)) continue; seen.add(v);
+      rows.push({ vin:v, code: String((r||[])[1] || '').trim() || null,
+                          note: String((r||[])[2] || '').trim() || null });
+    }
+    if(!rows.length) throw new Error('차대번호를 한 건도 읽지 못했습니다. 첫 열에 차대번호가 있는지 확인해주세요.');
+    const { data: list, error } = await sb.from('campaign_vin_lists')
+      .insert({ name, kind, n: rows.length }).select('id').single();
+    if(error) throw error;
+    for(let i = 0; i < rows.length; i += TO_CHUNK){
+      const { error: e2 } = await sb.from('campaign_vin_rows')
+        .insert(rows.slice(i, i+TO_CHUNK).map(r => ({ ...r, list_id: list.id })));
+      if(e2) throw e2;
+      P(`등록 중 — ${Math.min(i+TO_CHUNK, rows.length).toLocaleString('ko-KR')} / ${rows.length.toLocaleString('ko-KR')}`);
+    }
+    P(`<b>${name}</b> 등록 완료 — 차대 ${rows.length.toLocaleString('ko-KR')}건`);
+    document.getElementById('vlName').value = ''; document.getElementById('vlFile').value = '';
+    await logAudit('VINLIST_LOAD','BASE',null,{ label:`${name} · ${rows.length}건` });
+    await renderVinLists();
+  }catch(e){ P(`<span style="color:var(--danger);">등록 실패: ${e.message||e}</span>`); }
+  finally{ btn.disabled = false; }
+});
+
+async function renderVinLists(){
+  const host = document.getElementById('vlList');
+  if(!host) return;
+  const { data } = await sb.from('campaign_vin_lists').select('*').order('created_at', { ascending:false });
+  if(!data || !data.length){ host.innerHTML = '<div class="hint">등록된 목록이 없습니다.</div>'; return; }
+  host.innerHTML = `<table><thead><tr><th>이름</th><th>종류</th><th style="text-align:right;">건수</th>
+      <th>등록일</th><th></th></tr></thead><tbody>
+    ${data.map(l => `<tr>
+      <td>${String(l.name).replace(/[<>]/g,'')}</td>
+      <td>${l.kind === 'RECALL' ? '리콜 대상' : '대상 차대'}</td>
+      <td style="text-align:right;">${Number(l.n).toLocaleString('ko-KR')}</td>
+      <td class="muted">${new Date(l.created_at).toLocaleDateString('ko-KR')}</td>
+      <td style="text-align:right;"><button class="btn btn-ghost btn-sm vl-del" data-id="${l.id}">삭제</button></td>
+    </tr>`).join('')}</tbody></table>`;
+  host.querySelectorAll('.vl-del').forEach(b => b.onclick = async () => {
+    if(!confirm('이 목록을 삭제합니다. 이 목록을 쓰는 검증 조건은 통과 처리됩니다. 계속할까요?')) return;
+    const { error } = await sb.from('campaign_vin_lists').delete().eq('id', b.dataset.id);
+    if(error){ alert('삭제 실패: ' + error.message); return; }
+    await renderVinLists();
+  });
+}
+
+/* ================================================================
+   캠페인 검증 조건 설정  (2026-10-20)
+
+   하계캠페인 검증 규칙은 파이썬 스크립트 안에 박혀 있었다
+   (2021-01-01 기준 30/20%, 정가 100만원, 캠페인DC 계정).
+   캠페인마다 규칙이 다르니 여기서 쌓는다.
+   조건 하나 = 검토 화면 대조표 한 줄. 그래서 화면에 보일 이름을
+   조건마다 같이 갖고 있는다.
+   ================================================================ */
+
+const COND_DEFS = {
+  REG_DATE_RATE: {
+    label: '차량등록일 기준 할인율',
+    desc : '등록일이 기준일 이전인 차와 이후인 차에 다른 지원율을 적용합니다. (하계캠페인 2021-01-01 · 30% / 20%)',
+    fields: [
+      { k:'cut',    t:'date', label:'기준일',        ph:'2021-01-01' },
+      { k:'before', t:'num',  label:'이전 할인율 (%)', ph:'30' },
+      { k:'after',  t:'num',  label:'이후 할인율 (%)', ph:'20' },
+      { k:'tol',    t:'num',  label:'허용 오차 (%p)',  ph:'0.5' },
+    ],
+  },
+  FIXED_RATE: {
+    label: '고정 할인율',
+    desc : '차량 구분 없이 하나의 할인율을 적용합니다.',
+    fields: [ { k:'rate', t:'num', label:'할인율 (%)', ph:'20' },
+              { k:'tol',  t:'num', label:'허용 오차 (%p)', ph:'0.5' } ],
+  },
+  PART_RETAIL_MIN: {
+    label: '부품 소비자가 하한',
+    desc : '할인 대상 부품의 정가 합계가 이 금액 이상이어야 대상입니다. (하계캠페인 100만원)',
+    fields: [ { k:'amount', t:'num',  label:'최소 금액 (원)', ph:'1000000' },
+              { k:'scope',  t:'sel',  label:'합산 단위', opts:[['RO','RO 단위'],['LINE','부품 1건']] } ],
+  },
+  PART_RETAIL_MAX: {
+    label: '부품 소비자가 상한',
+    desc : '이 금액을 넘는 건은 대상에서 제외하거나 확인 대상으로 표시합니다.',
+    fields: [ { k:'amount', t:'num', label:'최대 금액 (원)', ph:'5000000' } ],
+  },
+  PART_PRICE_MATCH: {
+    label: '소비자가 마스터 일치',
+    desc : '리테일러가 적은 소비자가가 그 달 부품가격 마스터와 같은지 봅니다. 부품가가 매월 바뀌므로 기준 월을 맞춰야 합니다.',
+    fields: [ { k:'tol', t:'num', label:'허용 오차 (원)', ph:'0' } ],
+  },
+  PART_IN_MASTER: {
+    label: '순정부품 여부',
+    desc : '부품가격 마스터에 없는 품번은 JLR 순정부품인지 확인할 수 없습니다.',
+    fields: [],
+  },
+  PART_NO: {
+    label: '대상 품번',
+    desc : '특정 품번만 대상이거나, 특정 품번을 제외할 때 씁니다. 쉼표나 줄바꿈으로 구분합니다.',
+    fields: [ { k:'mode', t:'sel',  label:'방식', opts:[['include','이 품번만 대상'],['exclude','이 품번은 제외']] },
+              { k:'list', t:'area', label:'품번 목록', ph:'28LR132077, LR123456' } ],
+  },
+  PART_GROUP: {
+    label: '대상 품목군',
+    desc : 'Product Hierarchy 접두어로 품목군을 지정합니다. (예: WTWTBWTB = Wear&Tear / Electricals / Batteries)',
+    fields: [ { k:'prefix', t:'area', label:'하이라키 접두어', ph:'WTWTBWTB' } ],
+  },
+  VIN_LIST: {
+    label: '대상 차대 목록',
+    desc : '기준 데이터에 올려둔 차대 목록과 대조합니다.',
+    fields: [ { k:'list_id', t:'vlist', label:'목록' },
+              { k:'mode',    t:'sel',   label:'방식', opts:[['include','목록에 있어야 대상'],['exclude','목록에 있으면 제외']] } ],
+  },
+  RECALL_CODE: {
+    label: '리콜 대상',
+    desc : '리콜 목록의 차대·리콜코드와 대조합니다. 리콜 업셀링 캠페인에 씁니다.',
+    fields: [ { k:'list_id', t:'vlist', label:'리콜 목록' },
+              { k:'codes',   t:'area',  label:'대상 리콜코드 (비우면 목록 전체)', ph:'H123, J456' } ],
+  },
+  CLAIM_ACCOUNT: {
+    label: '마감 청구계정',
+    desc : 'DMS 마감 시 어느 청구계정으로 잡혀 있어야 하는지 봅니다. (하계캠페인 "코리아청구(캠페인DC)")',
+    fields: [ { k:'require', t:'area', label:'필수 청구계정', ph:'코리아청구(캠페인DC)' },
+              { k:'retailer_side', t:'area', label:'리테일러 부담 계정 (분담 검증용)',
+                ph:'자가처리(일반/보증작업)\n내부비용처리\n프로모션비용청구' } ],
+  },
+  SHARE_BALANCE: {
+    label: '분담 균형',
+    desc : 'JLRK 부담과 리테일러 부담이 설정한 비율대로 마감됐는지 봅니다.',
+    fields: [ { k:'jlrk', t:'num', label:'JLRK 분담 (%)', ph:'50' },
+              { k:'tol',  t:'num', label:'허용 오차 (원)', ph:'10' } ],
+  },
+  CLAIM_TYPE: {
+    label: '청구유형',
+    desc : 'Turn Over 의 청구유형이 지정한 값인지 봅니다. (예: 일반)',
+    fields: [ { k:'require', t:'area', label:'대상 청구유형', ph:'일반' } ],
+  },
+  MODEL: {
+    label: '대상 모델 · 브랜드',
+    desc : '특정 모델이나 브랜드만 대상일 때 씁니다. 모델은 IQM 기준으로 판정하며 '
+         + 'IQM 에 없는 차대만 기존 기록값을 씁니다. L663 처럼 코드로 적는 것이 가장 안전합니다 '
+         + '(「New Range Rover L663」 처럼 이름과 코드가 어긋난 값이 있습니다).',
+    fields: [ { k:'brand', t:'text', label:'브랜드', ph:'Land Rover (비우면 전체)' },
+              { k:'model', t:'area', label:'모델', ph:'Defender\nDiscovery' } ],
+  },
+  NO_DUP_CLAIM: {
+    label: '타 캠페인 중복청구 금지',
+    desc : '같은 RO·차대·품번이 다른 캠페인에도 청구됐는지 교차 검증합니다. '
+         + '(예: Seasonal Parts 에서 청구한 브레이크 패드를 같은 기간 Summer Campaign 에도 청구)',
+    fields: [ { k:'types', t:'tlist', label:'비교할 캠페인' },
+              { k:'key',   t:'sel',   label:'중복 판정 키',
+                opts:[['RO_PART','RO + 품번'],['VIN_PART','차대 + 품번'],['RO','RO 전체'],['VIN','차대 전체']] } ],
+  },
+};
+const COND_ORDER = ['REG_DATE_RATE','FIXED_RATE','PART_RETAIL_MIN','PART_RETAIL_MAX',
+  'PART_PRICE_MATCH','PART_IN_MASTER','PART_NO','PART_GROUP','VIN_LIST','RECALL_CODE',
+  'CLAIM_ACCOUNT','CLAIM_TYPE','SHARE_BALANCE','MODEL','NO_DUP_CLAIM'];
+
+let rulesState = null;   // { type, rule, vlists, types }
+
+async function openRulesPanel(type){
+  const [{ data: rules }, { data: vlists }, { data: types }] = await Promise.all([
+    sb.from('campaign_rules').select('*').eq('type_id', type.id).is('round_id', null).limit(1),
+    sb.from('campaign_vin_lists').select('id, name, kind, n').order('created_at', { ascending:false }),
+    sb.from('settlement_types').select('id, code, name').eq('is_active', true).order('code'),
+  ]);
+  rulesState = {
+    type,
+    rule: (rules && rules[0]) || {
+      type_id: type.id, round_id: null, name: type.name,
+      basis:'in_date', period_from:null, period_to:null, grace:null,
+      price_ym:null, share_jlrk:50, conditions:[], is_active:true },
+    vlists: vlists || [], types: (types||[]).filter(t => t.id !== type.id),
+  };
+  document.getElementById('rulesPanelTitle').textContent = `검증 조건 — ${type.name}`;
+  document.getElementById('rulesMsg').textContent = '';
+  renderRules();
+  openPanel('rulesPanel');
+}
+
+function renderRules(){
+  const S = rulesState, r = S.rule;
+  const d = v => v ? String(v).slice(0,10) : '';
+  document.getElementById('rulesBody').innerHTML = `
+    <div class="hint" style="margin-bottom:14px;">
+      리테일러 청구서를 <b>Turn Over 마감 데이터</b>와 대조할 때 쓸 조건입니다.
+      조건 하나가 검토 화면 대조표의 한 줄로 그대로 나옵니다.
+    </div>
+
+    <div class="section-label">기간 · 기준</div>
+    <div class="row2">
+      <div class="field"><label>기간 판정 기준일</label>
+        <select id="r_basis">
+          <option value="in_date">차량입고일</option>
+          <option value="ro_date">RO 발행일</option>
+          <option value="inv_date">인보이스 완료일</option>
+        </select></div>
+      <div class="field"><label>부품가격 기준 월</label>
+        <input id="r_price_ym" placeholder="예: 202607 · 비우면 입고월 기준" value="${r.price_ym||''}"></div>
+    </div>
+    <div class="row3">
+      <div class="field"><label>캠페인 시작</label><input type="date" id="r_from" value="${d(r.period_from)}"></div>
+      <div class="field"><label>캠페인 종료</label><input type="date" id="r_to" value="${d(r.period_to)}"></div>
+      <div class="field"><label>청구 유예 (Grace)</label><input type="date" id="r_grace" value="${d(r.grace)}"></div>
+    </div>
+    <div class="field" style="max-width:220px;"><label>JLRK 분담율 (%)</label>
+      <input type="number" id="r_share" min="0" max="100" step="1" value="${r.share_jlrk ?? 50}"></div>
+
+    <div class="section-label">검증 조건</div>
+    <div id="condList"></div>
+    <div style="display:flex; gap:8px; align-items:center; margin-top:10px; flex-wrap:wrap;">
+      <select id="condPick" style="max-width:260px;">
+        ${COND_ORDER.map(k => `<option value="${k}">${COND_DEFS[k].label}</option>`).join('')}
+      </select>
+      <button class="btn btn-ghost btn-sm" id="condAdd">+ 조건 추가</button>
+    </div>`;
+  document.getElementById('r_basis').value = r.basis || 'in_date';
+  document.getElementById('condAdd').onclick = () => {
+    const k = document.getElementById('condPick').value;
+    S.rule.conditions = [...(S.rule.conditions||[]), { type:k, level:'ng' }];
+    collectRuleHead(); renderRules();
+  };
+  renderConds();
+}
+
+/* 조건 블록을 다시 그리기 전에 상단 입력값을 잃지 않게 걷어둔다 */
+function collectRuleHead(){
+  const g = id => document.getElementById(id)?.value || '';
+  const r = rulesState.rule;
+  r.basis       = g('r_basis') || 'in_date';
+  r.price_ym    = g('r_price_ym').trim() || null;
+  r.period_from = g('r_from') || null;
+  r.period_to   = g('r_to')   || null;
+  r.grace       = g('r_grace')|| null;
+  r.share_jlrk  = Number(g('r_share') || 50);
+}
+
+function renderConds(){
+  const S = rulesState, host = document.getElementById('condList');
+  const cs = S.rule.conditions || [];
+  if(!cs.length){
+    host.innerHTML = '<div class="hint">조건이 없습니다. 아래에서 골라 추가해주세요. '
+                   + '조건이 하나도 없으면 금액 대조(청구액 ↔ 마감액)만 수행합니다.</div>';
+    return;
+  }
+  host.innerHTML = cs.map((c, i) => {
+    const D = COND_DEFS[c.type];
+    if(!D) return '';
+    const fld = f => {
+      const v = c[f.k] ?? '';
+      if(f.t === 'sel')  return `<select data-ci="${i}" data-ck="${f.k}">
+          ${f.opts.map(([k,l]) => `<option value="${k}" ${v===k?'selected':''}>${l}</option>`).join('')}</select>`;
+      if(f.t === 'area') return `<textarea data-ci="${i}" data-ck="${f.k}" rows="2"
+          placeholder="${f.ph||''}" style="width:100%;">${String(v).replace(/[<>]/g,'')}</textarea>`;
+      if(f.t === 'vlist') return `<select data-ci="${i}" data-ck="${f.k}">
+          <option value="">— 선택 —</option>
+          ${S.vlists.map(l => `<option value="${l.id}" ${v===l.id?'selected':''}>${l.name} (${l.n}건)</option>`).join('')}</select>`;
+      if(f.t === 'tlist'){
+        const sel = Array.isArray(v) ? v : [];
+        return `<div style="display:flex; flex-wrap:wrap; gap:6px;">
+          ${S.types.map(t => `<label class="chip ${sel.includes(t.id)?'selected':''}" style="cursor:pointer;">
+             <input type="checkbox" data-ci="${i}" data-ck="${f.k}" value="${t.id}"
+                    ${sel.includes(t.id)?'checked':''} style="margin-right:5px;">${t.code}</label>`).join('')}</div>`;
+      }
+      return `<input type="${f.t==='date'?'date':f.t==='num'?'number':'text'}" step="any"
+          data-ci="${i}" data-ck="${f.k}" placeholder="${f.ph||''}" value="${String(v).replace(/"/g,'')}">`;
+    };
+    return `<div style="border:1px solid var(--border-soft); border-radius:6px; padding:12px 13px; margin-bottom:9px;">
+      <div style="display:flex; align-items:center; gap:8px;">
+        <b>${D.label}</b>
+        <select data-ci="${i}" data-ck="level" style="width:auto; padding:2px 6px; font-size:11.5px;">
+          <option value="ng" ${c.level!=='wn'?'selected':''}>불일치 시 검증실패</option>
+          <option value="wn" ${c.level==='wn'?'selected':''}>불일치 시 확인필요</option>
+        </select>
+        <button class="btn btn-ghost btn-sm cond-del" data-ci="${i}" style="margin-left:auto;">삭제</button>
+      </div>
+      <div class="hint" style="margin:6px 0 9px;">${D.desc}</div>
+      ${D.fields.length ? `<div class="${D.fields.length>2?'row3':'row2'}">
+        ${D.fields.map(f => `<div class="field"><label>${f.label}</label>${fld(f)}</div>`).join('')}
+      </div>` : ''}
+    </div>`;
+  }).join('');
+
+  host.querySelectorAll('[data-ci][data-ck]').forEach(el => {
+    const i = Number(el.dataset.ci), k = el.dataset.ck;
+    el.addEventListener('change', () => {
+      const c = rulesState.rule.conditions[i];
+      if(el.type === 'checkbox'){
+        const cur = Array.isArray(c[k]) ? c[k] : [];
+        c[k] = el.checked ? [...new Set([...cur, el.value])] : cur.filter(v => v !== el.value);
+        el.closest('label')?.classList.toggle('selected', el.checked);
+      } else c[k] = el.value;
+    });
+  });
+  host.querySelectorAll('.cond-del').forEach(b => b.onclick = () => {
+    collectRuleHead();
+    rulesState.rule.conditions.splice(Number(b.dataset.ci), 1);
+    renderRules();
+  });
+}
+
+document.getElementById('rulesSaveBtn')?.addEventListener('click', async () => {
+  if(!rulesState) return;
+  collectRuleHead();
+  const r = rulesState.rule, msg = document.getElementById('rulesMsg');
+  const btn = document.getElementById('rulesSaveBtn');
+  btn.disabled = true; msg.textContent = '저장 중...';
+  const row = {
+    type_id: r.type_id, round_id: null, name: r.name || rulesState.type.name,
+    basis: r.basis, period_from: r.period_from, period_to: r.period_to, grace: r.grace,
+    price_ym: r.price_ym, share_jlrk: r.share_jlrk,
+    conditions: r.conditions || [], is_active: true,
+    updated_at: new Date().toISOString(),
+  };
+  const q = r.id
+    ? sb.from('campaign_rules').update(row).eq('id', r.id).select('id')
+    : sb.from('campaign_rules').insert(row).select('id');
+  const { data, error } = await q;
+  btn.disabled = false;
+  if(error){ msg.innerHTML = `<span style="color:var(--danger);">저장 실패: ${error.message}</span>`; return; }
+  if(!data || !data.length){
+    msg.innerHTML = '<span style="color:var(--danger);">저장되지 않았습니다 (0건). 권한을 확인해주세요.</span>'; return; }
+  rulesState.rule.id = data[0].id;
+  msg.innerHTML = `<span style="color:var(--accent);">저장했습니다 · 조건 ${row.conditions.length}개</span>`;
+  await logAudit('CAMPAIGN_RULES','TYPE', r.type_id,
+    { label:`${rulesState.type.code} · 조건 ${row.conditions.length}개` });
+});
+
+/* ================================================================
+   IQM 차량 마스터 — 모델 정보의 최종 기준  (2026-10-21)
+
+   Turn Over 의 모델 값은 믿을 수 없다. 실측(FY27 Q1):
+     · 액세서리 줄 3,737건에 모델이 비어 있다 → Defender 가 ETC(7%)로
+       잡혀 인센티브가 반토막 난다
+     · 「New Range Rover L663」 처럼 이름과 코드가 어긋난 값이 27건
+   IQM 의 Vehicle line 은 「Defender (L663)」 형태라 코드까지 깔끔하다.
+
+   규칙 : 모델은 IQM 이 모든 것에 우선한다. IQM 에 없는 차대만 기존
+          기록값을 쓴다. 포털의 모든 로직이 modelOf() 를 거친다.
+   ================================================================ */
+
+const IQM_CHUNK = 2000;
+let iqmCache = null;          // vin → {line, code}
+
+/* 따옴표·쉼표가 섞인 CSV 를 한 줄씩 제대로 쪼갠다. 44MB 짜리라
+   정규식 한 방에 처리하면 메모리가 터진다. */
+function parseCsvLine(line){
+  const out = []; let cur = '', q = false;
+  for(let i = 0; i < line.length; i++){
+    const ch = line[i];
+    if(q){
+      if(ch === '"'){ if(line[i+1] === '"'){ cur += '"'; i++; } else q = false; }
+      else cur += ch;
+    } else if(ch === '"') q = true;
+    else if(ch === ','){ out.push(cur); cur = ''; }
+    else cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
+
+function iqmDate(v){
+  v = String(v || '').trim();
+  if(!v) return null;
+  let m = v.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if(m) return `${m[1]}-${m[2]}-${m[3]}`;
+  m = v.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);     // dd/mm/yyyy
+  if(m){
+    const y = m[3].length === 2 ? '20' + m[3] : m[3];
+    return `${y}-${String(m[2]).padStart(2,'0')}-${String(m[1]).padStart(2,'0')}`;
+  }
+  return null;
+}
+
+document.getElementById('iqmLoadBtn')?.addEventListener('click', async () => {
+  const f = document.getElementById('iqmFile').files[0];
+  const ym = (document.getElementById('iqmYm').value || '').trim()
+          || new Date().toISOString().slice(0,7).replace('-','');
+  const P = h => baseProgress('iqmProgress', h);
+  if(!f){ P('<span style="color:var(--danger);">파일을 선택해주세요.</span>'); return; }
+  const btn = document.getElementById('iqmLoadBtn'); btn.disabled = true;
+  try{
+    P('파일 읽는 중... (40MB 넘으면 수십 초 걸립니다)');
+    let text = await f.text();
+    if(text.charCodeAt(0) === 0xFEFF) text = text.slice(1);     // BOM
+    const lines = text.split(/\r?\n/);
+    text = null;                                                 // 메모리 반환
+    if(lines.length < 2) throw new Error('빈 파일입니다.');
+
+    const head = parseCsvLine(lines[0]).map(h => h.trim().replace(/^"|"$/g,''));
+    const ix = n => head.findIndex(h => h.toLowerCase() === n.toLowerCase());
+    const cVin = ix('VIN'), cLine = ix('Vehicle line');
+    if(cVin < 0 || cLine < 0)
+      throw new Error('VIN / Vehicle line 열을 찾지 못했습니다. IQM 차량 조회 결과 CSV 가 맞는지 확인해주세요.');
+    const col = {
+      platform: ix('Vehicle platform'), my: ix('MY'), body: ix('Body style'),
+      colour: ix('Colour'), engine: ix('Engine'), prod: ix('Production date'),
+      sold: ix('Sold date'), dealer: ix('Sales dealer'), fleet: ix('FLEET'),
+      fstat: ix('FLEET STATUS'), usage: ix('MAIN USAGE'), ftype: ix('FLEET TYPE'),
+    };
+    const g = (a, i) => (i >= 0 && i < a.length ? String(a[i] || '').trim() : '') || null;
+
+    let sent = 0, batch = [];
+    const seen = new Set();
+    const total = lines.length - 1;
+    const flush = async () => {
+      if(!batch.length) return;
+      const { error } = await sb.from('iqm_vehicles').upsert(batch, { onConflict:'vin' });
+      if(error) throw error;
+      sent += batch.length; batch = [];
+      const pct = Math.round(sent / total * 100);
+      P(`적재 중 — ${sent.toLocaleString('ko-KR')}대 (${pct}%)
+         <div style="height:6px; background:var(--surface3); border-radius:3px; margin-top:6px; max-width:420px;">
+           <div style="height:6px; width:${pct}%; background:var(--accent); border-radius:3px;"></div></div>`);
+    };
+    for(let i = 1; i < lines.length; i++){
+      if(!lines[i]) continue;
+      const a = parseCsvLine(lines[i]);
+      const vin = String(a[cVin] || '').trim().toUpperCase();
+      if(vin.length < 11 || seen.has(vin)) continue;
+      seen.add(vin);
+      const line = g(a, cLine);
+      const m = line && line.match(/\(([A-Za-z]\d{3})\)/);
+      batch.push({
+        vin, vehicle_line: line, model_code: m ? m[1].toUpperCase() : null,
+        platform: g(a, col.platform), model_year: g(a, col.my),
+        body_style: g(a, col.body), colour: g(a, col.colour), engine: g(a, col.engine),
+        prod_date: iqmDate(a[col.prod]), sold_date: iqmDate(a[col.sold]),
+        sales_dealer: g(a, col.dealer), fleet: g(a, col.fleet),
+        fleet_status: g(a, col.fstat), main_usage: g(a, col.usage),
+        fleet_type: g(a, col.ftype), src_ym: ym,
+      });
+      if(batch.length >= IQM_CHUNK) await flush();
+    }
+    await flush();
+    iqmCache = null;
+    P(`<b>IQM 적재 완료 — ${sent.toLocaleString('ko-KR')}대</b>
+       <span class="hint">이제 모든 검증에서 모델은 IQM 기준으로 판정됩니다.</span>`);
+    await logAudit('IQM_LOAD','BASE',null,{ label:`${ym} · ${sent}대` });
+    await renderIqmStatus();
+  }catch(e){
+    baseProgress('iqmProgress', `<span style="color:var(--danger);">적재 실패: ${e.message||e}</span>`);
+  }finally{ btn.disabled = false; }
+});
+
+async function renderIqmStatus(){
+  const host = document.getElementById('iqmStatus');
+  if(!host) return;
+  const { data, error } = await sb.from('iqm_status').select('*').maybeSingle();
+  if(error || !data || !data.vehicles){
+    host.innerHTML = '<div class="hint">아직 IQM 이 적재되지 않았습니다. '
+      + '적재 전에는 모델을 Turn Over 기록값으로만 판정하므로 '
+      + '<b>모델이 빈 차대는 Defender 라도 7% 로 잡힙니다.</b></div>';
+    return;
+  }
+  host.innerHTML = `<table style="max-width:560px;"><tbody>
+    <tr><td>등록 차량</td><td style="text-align:right;"><b>${Number(data.vehicles).toLocaleString('ko-KR')}대</b></td></tr>
+    <tr><td>모델명 있는 차량</td><td style="text-align:right;">${Number(data.with_line).toLocaleString('ko-KR')}대</td></tr>
+    <tr><td>모델 종류</td><td style="text-align:right;">${data.lines}종</td></tr>
+    <tr><td>기준 회차</td><td style="text-align:right;">${data.last_ym || '—'}</td></tr>
+    <tr><td>마지막 적재</td><td style="text-align:right;" class="muted">${
+      data.loaded_at ? new Date(data.loaded_at).toLocaleString('ko-KR') : '—'}</td></tr>
+  </tbody></table>`;
+}
+
+/* ── 모델 해석 — 포털 전체가 이걸 쓴다 ──────────────────────────
+   IQM 우선, 없으면 기존 기록값. DB 에도 같은 규칙의 resolve_model()
+   함수가 있다 (migration 048) — SQL 로 집계할 때는 그쪽을 쓴다. */
+async function loadIqmCache(vins){
+  const need = [...new Set((vins||[]).map(v => String(v||'').trim().toUpperCase()).filter(Boolean))];
+  if(!need.length) return (iqmCache = iqmCache || new Map());
+  if(!iqmCache) iqmCache = new Map();
+  const miss = need.filter(v => !iqmCache.has(v));
+  for(let i = 0; i < miss.length; i += 500){
+    const { data } = await sb.from('iqm_vehicles')
+      .select('vin, vehicle_line, model_code').in('vin', miss.slice(i, i+500));
+    (data||[]).forEach(r => iqmCache.set(r.vin, { line: r.vehicle_line, code: r.model_code }));
+  }
+  miss.forEach(v => { if(!iqmCache.has(v)) iqmCache.set(v, null); });
+  return iqmCache;
+}
+
+/* 모델명 — IQM 이 우선. 캐시에 없으면 기존값을 그대로 돌려준다. */
+function modelOf(vin, fallback){
+  const k = String(vin||'').trim().toUpperCase();
+  const hit = iqmCache && iqmCache.get(k);
+  return (hit && hit.line) || (fallback || '');
+}
+
+/* 모델 코드(L663 등) — IQM 이 우선, 없으면 기존값에서 긁어낸다.
+   「New Range Rover L663」 처럼 이름과 코드가 어긋난 값 때문에
+   이름이 아니라 코드로 판정해야 한다. */
+function modelCodeOf(vin, fallback){
+  const k = String(vin||'').trim().toUpperCase();
+  const hit = iqmCache && iqmCache.get(k);
+  if(hit && hit.code) return hit.code;
+  const m = String(fallback||'').match(/\b([A-Za-z]\d{3})\b/);
+  return m ? m[1].toUpperCase() : '';
+}
+
+/* IQM 에도 없고 기록값도 없는 차대 — 조용히 넘기면 안 된다.
+   7% 로 잘못 잡히므로 '확인 필요' 로 따로 보여준다. */
+function modelUnknown(vin, fallback){
+  return !modelOf(vin, fallback);
+}
+
+/* ================================================================
+   One DMS 증빙자료 (2026-10-21)
+
+   매니저가 회계 증빙으로 쓰는 묶음을 포털이 한 번에 만든다.
+   지금까지는 웅진 원본에 손으로 두 시트(Retailer Charge · 사용자별
+   월별 O)를 만들어 붙이고 계셨다. 그 두 장이 정확히 포털이 이미
+   갖고 있는 데이터다.
+
+   ★ 라이선스 유형은 관리자 전용이다. 이 파일은 매니저가 받는
+     증빙이라 유형이 들어가지만, 리테일러에게 나가는 정산서·화면
+     에는 절대 넣지 않는다 (onedms_licenses 는 RLS 로 관리자만 읽는다).
+   ================================================================ */
+
+/* 회차에 붙여둔 원본 파일 (웅진 발송본 등) */
+async function odsAttachments(round){
+  const list = (round.attachments || []);
+  return Array.isArray(list) ? list : [];
+}
+
+function odsAttachPanel(round){
+  const files = (round.attachments || []);
+  return `<div class="info-card" style="margin-bottom:12px;">
+    <div class="section-label" style="margin-top:0;">원본 파일 첨부 (증빙에 함께 묶입니다)</div>
+    <div class="hint">웅진에서 받은 운영비용 요약·상세, 라이선스 카운트 원본을 올려두시면
+      증빙 받을 때 같이 내려받습니다. 리테일러에게는 나가지 않습니다.</div>
+    <div style="display:flex; gap:8px; align-items:center; margin-top:10px; flex-wrap:wrap;">
+      <input type="file" id="odsFile" accept=".xlsx,.xls,.csv,.pdf" multiple>
+      <button class="btn btn-sm btn-ghost" id="odsUpBtn">올리기</button>
+      <span class="hint" id="odsUpMsg"></span>
+    </div>
+    ${files.length ? `<table style="margin-top:10px; max-width:720px;"><tbody>
+      ${files.map((f, i) => `<tr>
+        <td>${String(f.name||'').replace(/[<>]/g,'')}</td>
+        <td class="muted" style="text-align:right; width:110px;">${
+          f.size ? (f.size/1024).toLocaleString('ko-KR', {maximumFractionDigits:0}) + ' KB' : ''}</td>
+        <td class="muted" style="width:150px;">${f.at ? new Date(f.at).toLocaleDateString('ko-KR') : ''}</td>
+        <td style="text-align:right; width:70px;">
+          <button class="btn btn-ghost btn-sm ods-del" data-i="${i}">삭제</button></td>
+      </tr>`).join('')}</tbody></table>`
+      : '<div class="hint" style="margin-top:8px;">올려둔 원본이 없습니다.</div>'}
+  </div>`;
+}
+
+function odsBindAttach(round, type){
+  const up = document.getElementById('odsUpBtn');
+  if(up) up.onclick = async () => {
+    const files = [...(document.getElementById('odsFile').files || [])];
+    const msg = document.getElementById('odsUpMsg');
+    if(!files.length){ msg.textContent = '파일을 선택해주세요.'; return; }
+    up.disabled = true;
+    try{
+      const cur = [...(round.attachments || [])];
+      for(const f of files){
+        if(f.size > UPLOAD_LIMIT) throw new Error(`${f.name} 가 20MB 를 넘습니다.`);
+        msg.textContent = `${f.name} 올리는 중...`;
+        // 스토리지 키는 ASCII 만 받는다. 보여줄 이름은 따로 남긴다.
+        const path = `onedms-source/${round.id}/${Date.now()}-${storageSafeName(f.name)}`;
+        const { error } = await sb.storage.from('settlements').upload(path, f, { upsert:true });
+        if(error) throw error;
+        cur.push({ name:f.name, path, size:f.size, at:new Date().toISOString() });
+      }
+      const { data, error: uErr } = await sb.from('rounds')
+        .update({ attachments: cur }).eq('id', round.id).select('id');
+      if(uErr) throw uErr;
+      if(!data || !data.length) throw new Error('첨부 목록이 저장되지 않았습니다 (0건).');
+      await logAudit('ODS_ATTACH','ROUND',round.id,{ label:`원본 ${files.length}건` });
+      msg.textContent = '';
+      await renderRoundDetail();
+    }catch(e){
+      msg.innerHTML = `<span style="color:var(--danger);">${e.message||e}</span>`;
+    }finally{ up.disabled = false; }
+  };
+
+  document.querySelectorAll('.ods-del').forEach(b => b.onclick = async () => {
+    if(!confirm('이 원본 파일을 지울까요?')) return;
+    const cur = [...(round.attachments || [])];
+    const gone = cur.splice(Number(b.dataset.i), 1)[0];
+    if(gone?.path) await sb.storage.from('settlements').remove([gone.path]);
+    const { error } = await sb.from('rounds').update({ attachments: cur }).eq('id', round.id);
+    if(error){ alert('삭제 실패: ' + error.message); return; }
+    await renderRoundDetail();
+  });
+}
+
+/* ── 증빙 엑셀 ────────────────────────────────────────────────── */
+async function odsBuildEvidence(round, type){
+  const btn = document.getElementById('odsEviBtn');
+  const msg = document.getElementById('odsEviMsg');
+  if(btn){ btn.disabled = true; btn.textContent = '만드는 중...'; }
+  try{
+    const [{ data: claims }, { data: lics }] = await Promise.all([
+      sb.from('claims').select('*, retailers(code,name)').eq('round_id', round.id).order('created_at'),
+      sb.from('onedms_licenses').select('*').eq('round_id', round.id).order('retailer_code'),
+    ]);
+    const cfg = round.source_summary || {};
+    const months = cfg.month_labels || (claims?.[0]?.detail?.month_labels) || [];
+    const rate = cfg.rate || claims?.[0]?.detail?.rate || 0;
+    const wb = XLSX.utils.book_new();
+    const add = (name, spec) => XLSX.utils.book_append_sheet(wb, xsSheet(spec), name);
+
+    // ① 요약
+    const sumRows = (claims||[]).map(c => ({
+      code: c.retailers?.code || '', name: c.retailers?.name || '',
+      users: c.detail?.user_count || 0, um: c.detail?.user_months || 0,
+      amount: Number(c.approved_amount || 0),
+      vat: Number(c.detail?.vat || 0),
+      total: Number(c.approved_amount || 0) + Number(c.detail?.vat || 0),
+      confirmed: c.confirmed_at ? new Date(c.confirmed_at).toLocaleString('ko-KR') : '미확정',
+    }));
+    const T = k => sumRows.reduce((a, r) => a + (Number(r[k]) || 0), 0);
+    add('1. 요약', {
+      title: `One DMS License Fee · ${round.period_label} 정산 증빙`,
+      subtitle: `${months.join(' · ')} · 유저당 월단가 ${fmtWon(rate)} · 발행일 ${round.invoice_issue_date || '—'}`,
+      summary: [
+        { label:'리테일러', value: sumRows.length },
+        { label:'유저-MONTH', value: T('um') },
+        { label:'공급가액', value: T('amount') },
+        { label:'부가세', value: T('vat') },
+        { label:'합계', value: T('total') },
+      ],
+      steps: [
+        '■ 산출 방식',
+        `리테일러별 유저-MONTH 합계 × 유저당 월단가 ${fmtWon(rate)} = 공급가액`,
+        '유저-MONTH = 해당 분기 각 월에 라이선스가 할당된 사용자 수의 합',
+        ...(cfg.excluded?.length ? [`정산 제외 : ${cfg.excluded.join(' · ')}`] : []),
+      ],
+      columns: [
+        { key:'code', label:'리테일러', w:10 }, { key:'name', label:'법인명', w:20 },
+        { key:'users', label:'인원', w:8, type:'num' }, { key:'um', label:'유저-MONTH', w:12, type:'num' },
+        { key:'amount', label:'공급가액', w:14, type:'num' }, { key:'vat', label:'부가세', w:12, type:'num' },
+        { key:'total', label:'합계', w:14, type:'num' }, { key:'confirmed', label:'확정 일시', w:20 },
+      ],
+      rows: sumRows,
+      totals: { code:'합계', users:T('users'), um:T('um'), amount:T('amount'), vat:T('vat'), total:T('total') },
+      notes: ['※ 본 문서는 JLR Korea 내부 회계 증빙용입니다. 라이선스 유형 정보가 포함되어 있어 리테일러에게 제공하지 않습니다.'],
+    });
+
+    // ② Retailer Charge — 리테일러 × 유형 × 월별 수량
+    if(lics && lics.length){
+      const types = [...new Set(lics.flatMap(l => (l.types||[])
+        .map(t => String(t||'').trim().toUpperCase()).filter(Boolean)))].sort();
+      const key = (code, t) => code + '|' + t;
+      const grid = new Map();
+      lics.forEach(l => (l.types||[]).forEach((t, i) => {
+        const tt = String(t||'').trim().toUpperCase();
+        if(!tt) return;
+        const k = key(l.retailer_code || l.dealer_name, tt);
+        if(!grid.has(k)) grid.set(k, { code:l.retailer_code || '', dealer:l.dealer_name || '', type:tt, m:{} });
+        const g = grid.get(k);
+        const ml = (l.month_labels||[])[i] || months[i] || `${i+1}`;
+        g.m[ml] = (g.m[ml] || 0) + 1;
+      }));
+      const chargeRows = [...grid.values()]
+        .sort((a,b) => (a.code+a.type).localeCompare(b.code+b.type))
+        .map(g => ({ code:g.code, dealer:g.dealer, type:g.type,
+                     ...Object.fromEntries(months.map(m => [m, g.m[m] || 0])) }));
+      add('2. Retailer Charge', {
+        title: 'Retailer Charge — 리테일러 × 라이선스 유형 × 월별 수량',
+        subtitle: `${round.period_label} · ${months.join(' · ')}`,
+        steps: ['■ 리테일러별로 각 월에 어떤 라이선스가 몇 개 할당돼 있었는지입니다.',
+                '웅진 원본의 사용자 명단을 유형별로 집계한 값입니다.'],
+        columns: [
+          { key:'code', label:'리테일러', w:10 }, { key:'dealer', label:'딜러사', w:20 },
+          { key:'type', label:'라이선스 유형', w:14 },
+          ...months.map(m => ({ key:m, label:m, w:9, type:'num' })),
+        ],
+        rows: chargeRows,
+        totals: { code:'합계', ...Object.fromEntries(months.map(m =>
+          [m, chargeRows.reduce((a,r) => a + (r[m]||0), 0)])) },
+      });
+
+      // ③ 사용자 상세
+      add('3. 사용자 상세', {
+        title: '사용자별 라이선스 할당 내역',
+        subtitle: `${round.period_label} · 과금은 각 월에 유형이 할당된 사용자만 집계됩니다`,
+        columns: [
+          { key:'code', label:'리테일러', w:9 }, { key:'dealer', label:'딜러사', w:18 },
+          { key:'name', label:'사용자', w:12 }, { key:'login', label:'로그인 ID', w:28 },
+          { key:'role', label:'역할', w:20 }, { key:'first', label:'첫 로그인', w:12 },
+          { key:'status', label:'재직상태', w:10 }, { key:'retire', label:'퇴사일', w:12 },
+          ...months.map(m => ({ key:m, label:m, w:11, align:'center' })),
+          { key:'um', label:'과금 월수', w:10, type:'num' },
+        ],
+        rows: lics.map(l => ({
+          code:l.retailer_code || '', dealer:l.dealer_name || '', name:l.user_name || '',
+          login:l.login || '', role:l.role || '', first:l.first_login || '',
+          status:l.status || '', retire:l.retire || '',
+          ...Object.fromEntries((l.month_labels||months).map((m, i) => [m, (l.types||[])[i] || ''])),
+          um: l.months_active || 0,
+        })),
+        totals: { code:'합계', um: lics.reduce((a,l) => a + (l.months_active||0), 0) },
+      });
+    }
+
+    // ④ 리테일러별 정산서
+    for(const c of (claims || [])){
+      const d = c.detail || {};
+      const users = d.users || [];
+      const ml = d.month_labels || months;
+      add(`${c.retailers?.code || '?'} 정산서`.slice(0, 31), {
+        title: `${c.retailers?.name || ''} · One DMS License Fee`,
+        subtitle: `${round.period_label} · ${ml.join(' · ')}`,
+        summary: [
+          { label:'인원', value: users.length },
+          { label:'유저-MONTH', value: d.user_months || 0 },
+          { label:'공급가액', value: Number(c.approved_amount || 0) },
+          { label:'부가세', value: Number(d.vat || 0) },
+          { label:'합계', value: Number(c.approved_amount || 0) + Number(d.vat || 0) },
+        ],
+        steps: [
+          '■ 산출 과정',
+          `유저-MONTH ${(d.user_months||0).toLocaleString('ko-KR')} × 유저당 월단가 ${fmtWon(d.rate || rate)}`
+            + ` = ${fmtWon(c.approved_amount || 0)}`,
+          `확정 : ${c.confirmed_at ? new Date(c.confirmed_at).toLocaleString('ko-KR') : '미확정'}`,
+        ],
+        columns: [
+          { key:'name', label:'사용자', w:12 }, { key:'login', label:'로그인 ID', w:30 },
+          { key:'role', label:'역할', w:22 }, { key:'first', label:'첫 로그인', w:12 },
+          { key:'status', label:'재직상태', w:10 }, { key:'retire', label:'퇴사일', w:12 },
+          ...ml.map((m, i) => ({ key:'m'+i, label:m, w:8, align:'center' })),
+          { key:'um', label:'과금 월수', w:10, type:'num' },
+        ],
+        rows: users.map(u => ({
+          name:u.name, login:u.login, role:u.role, first:u.first,
+          status:u.status, retire:u.retire,
+          ...Object.fromEntries((u.flags||[]).map((f, i) => ['m'+i, f ? 'O' : ''])),
+          um: u.months_active || 0,
+        })),
+        totals: { name:'합계', um: d.user_months || 0 },
+      });
+    }
+
+    const fname = `One_DMS_${String(round.period_label).replace(/\s/g,'_')}_증빙.xlsx`;
+    XLSX.writeFile(wb, fname);
+
+    // 첨부해둔 웅진 원본은 따로 내려받게 링크를 띄운다 (엑셀에 끼워넣을 수 없다)
+    const atts = round.attachments || [];
+    if(atts.length && msg){
+      const links = [];
+      for(const a of atts){
+        const { data } = await sb.storage.from('settlements').createSignedUrl(a.path, 600);
+        if(data?.signedUrl) links.push(`<a href="${data.signedUrl}" download>${a.name}</a>`);
+      }
+      msg.innerHTML = `증빙 엑셀을 받았습니다. 첨부 원본은 따로 받으세요 — ${links.join(' · ')}
+        <span class="hint">(링크는 10분간 유효)</span>`;
+    } else if(msg){
+      msg.innerHTML = '증빙 엑셀을 받았습니다.'
+        + (atts.length ? '' : ' <span class="hint">웅진 원본을 올려두시면 같이 받으실 수 있습니다.</span>');
+    }
+    await logAudit('ODS_EVIDENCE','ROUND',round.id,{ label:`${round.period_label} 증빙 다운로드` });
+  }catch(e){
+    if(msg) msg.innerHTML = `<span style="color:var(--danger);">만들기 실패: ${e.message||e}</span>`;
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = '증빙자료 다운로드'; }
+  }
+}
+
+/* 확정 현황 인쇄 — jsPDF 류는 한글 폰트 임베딩이 까다로워 글자가 깨진다.
+   인쇄용 창을 띄우고 브라우저의 「PDF로 저장」 을 쓰는 쪽이 확실하다. */
+function odsPrintConfirm(round, type, claims){
+  const cfg = round.source_summary || {};
+  const rows = (claims || []).map(c => ({
+    code: c.retailers?.code || '', name: c.retailers?.name || '',
+    users: c.detail?.user_count || 0, um: c.detail?.user_months || 0,
+    amount: Number(c.approved_amount || 0),
+    at: c.confirmed_at ? new Date(c.confirmed_at).toLocaleString('ko-KR') : null,
+  })).sort((a, b) => a.code.localeCompare(b.code));
+  const done = rows.filter(r => r.at).length;
+  const sum = rows.reduce((a, r) => a + r.amount, 0);
+  const esc = v => String(v == null ? '' : v).replace(/[<>&]/g, m => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[m]));
+
+  const w = window.open('', '_blank', 'width=1000,height=760');
+  if(!w){ alert('팝업이 차단되었습니다. 이 사이트의 팝업을 허용해주세요.'); return; }
+  w.document.write(`<!doctype html><html lang="ko"><head><meta charset="utf-8">
+    <title>One DMS ${esc(round.period_label)} 리테일러 확정 현황</title>
+    <style>
+      @page { size: A4 landscape; margin: 14mm; }
+      body { font-family:"맑은 고딕","Malgun Gothic",sans-serif; color:#1a1a1a; margin:0; }
+      h1 { font-size:17px; margin:0 0 4px; }
+      .sub { font-size:11px; color:#6e7375; margin-bottom:14px; }
+      table { border-collapse:collapse; width:100%; font-size:11px; }
+      th { background:#3d4448; color:#fff; font-weight:600; padding:7px 8px; text-align:left; }
+      td { border-bottom:1px solid #e3e5e6; padding:6px 8px; }
+      .n { text-align:right; font-variant-numeric:tabular-nums; }
+      .c { text-align:center; }
+      tfoot td { background:#f4f5f5; font-weight:700; border-top:2px solid #3d4448; }
+      .ok { color:#2f7d52; font-weight:600; }
+      .no { color:#c0392b; font-weight:600; }
+      .foot { margin-top:16px; font-size:10px; color:#6e7375; }
+      @media print { .noprint { display:none; } }
+      .noprint { margin-bottom:12px; }
+      .btn { font:inherit; padding:7px 14px; border:1px solid #3d4448; background:#3d4448;
+             color:#fff; border-radius:5px; cursor:pointer; }
+    </style></head><body>
+    <div class="noprint"><button class="btn" onclick="window.print()">인쇄 / PDF로 저장</button></div>
+    <h1>One DMS License Fee · ${esc(round.period_label)} 리테일러 확정 현황</h1>
+    <div class="sub">
+      ${esc((cfg.month_labels || []).join(' · '))} ·
+      유저당 월단가 ${fmtWon(cfg.rate || 0)} ·
+      세금계산서 발행일 ${esc(round.invoice_issue_date || '—')} ·
+      확정 ${done} / ${rows.length}개사
+    </div>
+    <table><thead><tr>
+      <th>리테일러</th><th>법인명</th><th class="n">인원</th><th class="n">유저-MONTH</th>
+      <th class="n">청구금액</th><th class="c">확정</th><th>확정 일시</th>
+    </tr></thead><tbody>
+      ${rows.map(r => `<tr>
+        <td>${esc(r.code)}</td><td>${esc(r.name)}</td>
+        <td class="n">${r.users.toLocaleString('ko-KR')}명</td>
+        <td class="n">${r.um.toLocaleString('ko-KR')}</td>
+        <td class="n">${r.amount.toLocaleString('ko-KR')}원</td>
+        <td class="c ${r.at ? 'ok' : 'no'}">${r.at ? '확정' : '미확정'}</td>
+        <td>${esc(r.at || '—')}</td></tr>`).join('')}
+    </tbody><tfoot><tr>
+      <td colspan="2">합계</td>
+      <td class="n">${rows.reduce((a,r)=>a+r.users,0).toLocaleString('ko-KR')}명</td>
+      <td class="n">${rows.reduce((a,r)=>a+r.um,0).toLocaleString('ko-KR')}</td>
+      <td class="n">${sum.toLocaleString('ko-KR')}원</td>
+      <td class="c">${done}/${rows.length}</td><td></td>
+    </tr></tfoot></table>
+    <div class="foot">
+      출력 ${new Date().toLocaleString('ko-KR')} · JLR Korea 정산 포털<br>
+      본 문서는 리테일러가 포털에서 직접 [정산 확정] 을 누른 기록입니다. 확정 일시는 서버 기록 시각입니다.
+    </div></body></html>`);
+  w.document.close();
+}
 
 checkSession();
 </script>
