@@ -543,6 +543,26 @@
       </div>
 
       <div class="info-card" style="margin-bottom:14px;">
+        <div class="section-label" style="margin-top:0;">IQM 차량 마스터 — 모델 정보의 기준</div>
+        <div class="hint">
+          <b>모델은 IQM 이 모든 것에 우선합니다.</b> IQM 에 없는 차대만 기존 기록값을 씁니다.
+          Turn Over 의 모델 값은 비어 있거나(FY27 Q1 액세서리 3,737건) 이름과 코드가
+          어긋나는 경우가 있어(「New Range Rover L663」) 그대로 쓰면
+          <b>Defender 가 7% 로 잡혀 인센티브가 반토막</b> 납니다.
+          IQM 차량 조회 결과 CSV 를 그대로 올려주세요.
+        </div>
+        <div class="row2" style="max-width:620px; margin-top:10px;">
+          <div class="field"><label>IQM CSV</label>
+            <input type="file" id="iqmFile" accept=".csv"></div>
+          <div class="field"><label>기준 회차 (비우면 이번 달)</label>
+            <input type="text" id="iqmYm" placeholder="예: 202609"></div>
+        </div>
+        <button class="btn btn-sm" id="iqmLoadBtn">IQM 적재</button>
+        <div id="iqmProgress" style="margin-top:10px;"></div>
+        <div id="iqmStatus" style="margin-top:12px;"></div>
+      </div>
+
+      <div class="info-card" style="margin-bottom:14px;">
         <div class="section-label" style="margin-top:0;">Turn Over 적재</div>
         <div class="hint">
           월별 <b>Turn Over 리포트</b> xlsx 를 그대로 올리면 됩니다. 파일명에서 기간을 읽어 해당 월로 적재하고,
@@ -3285,6 +3305,9 @@ async function renderCampaignRoundDetail(round, type){
     sb.from('part_price_months').select('*')
   ]);
   const retById = new Map((rets||[]).map(r => [r.id, r]));
+  // 모델은 IQM 이 우선한다 — 화면에 뜨는 모델도, 조건 판정도 같은 기준을 써야 한다
+  await loadIqmCache((ros||[]).map(r => r.vin));
+  (ros||[]).forEach(r => { r.model = modelOf(r.vin, r.model); });
   campState = { round, type, cfg, ros: ros||[], retById, sel:new Set(), filter:'FAIL',
                 retailer:'', reason:'', months: months||[] };
   renderCampaign(months||[]);
@@ -10763,7 +10786,7 @@ function ymFromName(name){
 function baseProgress(id, html){ const el = document.getElementById(id); if(el) el.innerHTML = html; }
 
 async function loadBaseData(){
-  await Promise.all([renderBaseMonths(), renderVinLists()]);
+  await Promise.all([renderBaseMonths(), renderVinLists(), renderIqmStatus()]);
 }
 
 async function renderBaseMonths(){
@@ -11094,7 +11117,9 @@ const COND_DEFS = {
   },
   MODEL: {
     label: '대상 모델 · 브랜드',
-    desc : '특정 모델이나 브랜드만 대상일 때 씁니다. 포함되는 글자만 적으면 됩니다.',
+    desc : '특정 모델이나 브랜드만 대상일 때 씁니다. 모델은 IQM 기준으로 판정하며 '
+         + 'IQM 에 없는 차대만 기존 기록값을 씁니다. L663 처럼 코드로 적는 것이 가장 안전합니다 '
+         + '(「New Range Rover L663」 처럼 이름과 코드가 어긋난 값이 있습니다).',
     fields: [ { k:'brand', t:'text', label:'브랜드', ph:'Land Rover (비우면 전체)' },
               { k:'model', t:'area', label:'모델', ph:'Defender\nDiscovery' } ],
   },
@@ -11280,6 +11305,184 @@ document.getElementById('rulesSaveBtn')?.addEventListener('click', async () => {
   await logAudit('CAMPAIGN_RULES','TYPE', r.type_id,
     { label:`${rulesState.type.code} · 조건 ${row.conditions.length}개` });
 });
+
+/* ================================================================
+   IQM 차량 마스터 — 모델 정보의 최종 기준  (2026-10-21)
+
+   Turn Over 의 모델 값은 믿을 수 없다. 실측(FY27 Q1):
+     · 액세서리 줄 3,737건에 모델이 비어 있다 → Defender 가 ETC(7%)로
+       잡혀 인센티브가 반토막 난다
+     · 「New Range Rover L663」 처럼 이름과 코드가 어긋난 값이 27건
+   IQM 의 Vehicle line 은 「Defender (L663)」 형태라 코드까지 깔끔하다.
+
+   규칙 : 모델은 IQM 이 모든 것에 우선한다. IQM 에 없는 차대만 기존
+          기록값을 쓴다. 포털의 모든 로직이 modelOf() 를 거친다.
+   ================================================================ */
+
+const IQM_CHUNK = 2000;
+let iqmCache = null;          // vin → {line, code}
+
+/* 따옴표·쉼표가 섞인 CSV 를 한 줄씩 제대로 쪼갠다. 44MB 짜리라
+   정규식 한 방에 처리하면 메모리가 터진다. */
+function parseCsvLine(line){
+  const out = []; let cur = '', q = false;
+  for(let i = 0; i < line.length; i++){
+    const ch = line[i];
+    if(q){
+      if(ch === '"'){ if(line[i+1] === '"'){ cur += '"'; i++; } else q = false; }
+      else cur += ch;
+    } else if(ch === '"') q = true;
+    else if(ch === ','){ out.push(cur); cur = ''; }
+    else cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
+
+function iqmDate(v){
+  v = String(v || '').trim();
+  if(!v) return null;
+  let m = v.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if(m) return `${m[1]}-${m[2]}-${m[3]}`;
+  m = v.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);     // dd/mm/yyyy
+  if(m){
+    const y = m[3].length === 2 ? '20' + m[3] : m[3];
+    return `${y}-${String(m[2]).padStart(2,'0')}-${String(m[1]).padStart(2,'0')}`;
+  }
+  return null;
+}
+
+document.getElementById('iqmLoadBtn')?.addEventListener('click', async () => {
+  const f = document.getElementById('iqmFile').files[0];
+  const ym = (document.getElementById('iqmYm').value || '').trim()
+          || new Date().toISOString().slice(0,7).replace('-','');
+  const P = h => baseProgress('iqmProgress', h);
+  if(!f){ P('<span style="color:var(--danger);">파일을 선택해주세요.</span>'); return; }
+  const btn = document.getElementById('iqmLoadBtn'); btn.disabled = true;
+  try{
+    P('파일 읽는 중... (40MB 넘으면 수십 초 걸립니다)');
+    let text = await f.text();
+    if(text.charCodeAt(0) === 0xFEFF) text = text.slice(1);     // BOM
+    const lines = text.split(/\r?\n/);
+    text = null;                                                 // 메모리 반환
+    if(lines.length < 2) throw new Error('빈 파일입니다.');
+
+    const head = parseCsvLine(lines[0]).map(h => h.trim().replace(/^"|"$/g,''));
+    const ix = n => head.findIndex(h => h.toLowerCase() === n.toLowerCase());
+    const cVin = ix('VIN'), cLine = ix('Vehicle line');
+    if(cVin < 0 || cLine < 0)
+      throw new Error('VIN / Vehicle line 열을 찾지 못했습니다. IQM 차량 조회 결과 CSV 가 맞는지 확인해주세요.');
+    const col = {
+      platform: ix('Vehicle platform'), my: ix('MY'), body: ix('Body style'),
+      colour: ix('Colour'), engine: ix('Engine'), prod: ix('Production date'),
+      sold: ix('Sold date'), dealer: ix('Sales dealer'), fleet: ix('FLEET'),
+      fstat: ix('FLEET STATUS'), usage: ix('MAIN USAGE'), ftype: ix('FLEET TYPE'),
+    };
+    const g = (a, i) => (i >= 0 && i < a.length ? String(a[i] || '').trim() : '') || null;
+
+    let sent = 0, batch = [];
+    const seen = new Set();
+    const total = lines.length - 1;
+    const flush = async () => {
+      if(!batch.length) return;
+      const { error } = await sb.from('iqm_vehicles').upsert(batch, { onConflict:'vin' });
+      if(error) throw error;
+      sent += batch.length; batch = [];
+      const pct = Math.round(sent / total * 100);
+      P(`적재 중 — ${sent.toLocaleString('ko-KR')}대 (${pct}%)
+         <div style="height:6px; background:var(--surface3); border-radius:3px; margin-top:6px; max-width:420px;">
+           <div style="height:6px; width:${pct}%; background:var(--accent); border-radius:3px;"></div></div>`);
+    };
+    for(let i = 1; i < lines.length; i++){
+      if(!lines[i]) continue;
+      const a = parseCsvLine(lines[i]);
+      const vin = String(a[cVin] || '').trim().toUpperCase();
+      if(vin.length < 11 || seen.has(vin)) continue;
+      seen.add(vin);
+      const line = g(a, cLine);
+      const m = line && line.match(/\(([A-Za-z]\d{3})\)/);
+      batch.push({
+        vin, vehicle_line: line, model_code: m ? m[1].toUpperCase() : null,
+        platform: g(a, col.platform), model_year: g(a, col.my),
+        body_style: g(a, col.body), colour: g(a, col.colour), engine: g(a, col.engine),
+        prod_date: iqmDate(a[col.prod]), sold_date: iqmDate(a[col.sold]),
+        sales_dealer: g(a, col.dealer), fleet: g(a, col.fleet),
+        fleet_status: g(a, col.fstat), main_usage: g(a, col.usage),
+        fleet_type: g(a, col.ftype), src_ym: ym,
+      });
+      if(batch.length >= IQM_CHUNK) await flush();
+    }
+    await flush();
+    iqmCache = null;
+    P(`<b>IQM 적재 완료 — ${sent.toLocaleString('ko-KR')}대</b>
+       <span class="hint">이제 모든 검증에서 모델은 IQM 기준으로 판정됩니다.</span>`);
+    await logAudit('IQM_LOAD','BASE',null,{ label:`${ym} · ${sent}대` });
+    await renderIqmStatus();
+  }catch(e){
+    baseProgress('iqmProgress', `<span style="color:var(--danger);">적재 실패: ${e.message||e}</span>`);
+  }finally{ btn.disabled = false; }
+});
+
+async function renderIqmStatus(){
+  const host = document.getElementById('iqmStatus');
+  if(!host) return;
+  const { data, error } = await sb.from('iqm_status').select('*').maybeSingle();
+  if(error || !data || !data.vehicles){
+    host.innerHTML = '<div class="hint">아직 IQM 이 적재되지 않았습니다. '
+      + '적재 전에는 모델을 Turn Over 기록값으로만 판정하므로 '
+      + '<b>모델이 빈 차대는 Defender 라도 7% 로 잡힙니다.</b></div>';
+    return;
+  }
+  host.innerHTML = `<table style="max-width:560px;"><tbody>
+    <tr><td>등록 차량</td><td style="text-align:right;"><b>${Number(data.vehicles).toLocaleString('ko-KR')}대</b></td></tr>
+    <tr><td>모델명 있는 차량</td><td style="text-align:right;">${Number(data.with_line).toLocaleString('ko-KR')}대</td></tr>
+    <tr><td>모델 종류</td><td style="text-align:right;">${data.lines}종</td></tr>
+    <tr><td>기준 회차</td><td style="text-align:right;">${data.last_ym || '—'}</td></tr>
+    <tr><td>마지막 적재</td><td style="text-align:right;" class="muted">${
+      data.loaded_at ? new Date(data.loaded_at).toLocaleString('ko-KR') : '—'}</td></tr>
+  </tbody></table>`;
+}
+
+/* ── 모델 해석 — 포털 전체가 이걸 쓴다 ──────────────────────────
+   IQM 우선, 없으면 기존 기록값. DB 에도 같은 규칙의 resolve_model()
+   함수가 있다 (migration 048) — SQL 로 집계할 때는 그쪽을 쓴다. */
+async function loadIqmCache(vins){
+  const need = [...new Set((vins||[]).map(v => String(v||'').trim().toUpperCase()).filter(Boolean))];
+  if(!need.length) return (iqmCache = iqmCache || new Map());
+  if(!iqmCache) iqmCache = new Map();
+  const miss = need.filter(v => !iqmCache.has(v));
+  for(let i = 0; i < miss.length; i += 500){
+    const { data } = await sb.from('iqm_vehicles')
+      .select('vin, vehicle_line, model_code').in('vin', miss.slice(i, i+500));
+    (data||[]).forEach(r => iqmCache.set(r.vin, { line: r.vehicle_line, code: r.model_code }));
+  }
+  miss.forEach(v => { if(!iqmCache.has(v)) iqmCache.set(v, null); });
+  return iqmCache;
+}
+
+/* 모델명 — IQM 이 우선. 캐시에 없으면 기존값을 그대로 돌려준다. */
+function modelOf(vin, fallback){
+  const k = String(vin||'').trim().toUpperCase();
+  const hit = iqmCache && iqmCache.get(k);
+  return (hit && hit.line) || (fallback || '');
+}
+
+/* 모델 코드(L663 등) — IQM 이 우선, 없으면 기존값에서 긁어낸다.
+   「New Range Rover L663」 처럼 이름과 코드가 어긋난 값 때문에
+   이름이 아니라 코드로 판정해야 한다. */
+function modelCodeOf(vin, fallback){
+  const k = String(vin||'').trim().toUpperCase();
+  const hit = iqmCache && iqmCache.get(k);
+  if(hit && hit.code) return hit.code;
+  const m = String(fallback||'').match(/\b([A-Za-z]\d{3})\b/);
+  return m ? m[1].toUpperCase() : '';
+}
+
+/* IQM 에도 없고 기록값도 없는 차대 — 조용히 넘기면 안 된다.
+   7% 로 잘못 잡히므로 '확인 필요' 로 따로 보여준다. */
+function modelUnknown(vin, fallback){
+  return !modelOf(vin, fallback);
+}
 
 checkSession();
 </script>
