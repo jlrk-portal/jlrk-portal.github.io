@@ -2830,7 +2830,8 @@ async function renderEngineOilRoundDetail(round, type){
     const wrap = document.createElement('div');
     wrap.innerHTML = `
       <div class="row2" style="max-width:420px;">
-        <div class="field"><label>세금계산서 발행일 (바우처 Invoice Date)</label>
+        <div class="field"><label>${type?.requires_invoice
+          ? '세금계산서 발행일 (바우처 Invoice Date)' : '인보이스 Date (바우처)'}</label>
           <input type="date" id="eoIssueDate" value="${round.invoice_issue_date || new Date().toISOString().slice(0,10)}"></div>
       </div>
       <button class="btn" id="eoPublishBtn" disabled>리테일러에 정산내역 공지</button>
@@ -3005,7 +3006,7 @@ async function renderEngineOilRetailerCard(listEl, round, items){
   const card = document.createElement('div');
   card.className = 'claim-card';
 
-  const th = ['<th>지점</th>'];
+  const th = ['<th>지점</th>', '<th style="text-align:right;">건수</th>'];
   if(sRS) th.push('<th style="text-align:right;">사용반환금</th>','<th style="text-align:right;">Retailer Support</th>');
   if(sSI) th.push('<th style="text-align:right;">Sales Incentive</th>');
   if(sSP) th.push('<th style="text-align:right;">판매대금 JG</th>','<th style="text-align:right;">판매대금 LR</th>');
@@ -3018,7 +3019,9 @@ async function renderEngineOilRetailerCard(listEl, round, items){
     const inc  = w.incentive?.amount||0;
     const spj  = w.sp?.jg||0, spl = w.sp?.lr||0;
     const rowTot = (sRS?(cust+vme+cast):0) + (sSI?inc:0) + (sSP?(spj+spl):0);
-    const tds = [`<td>${w.code}</td>`];
+    // 리테일러는 재규어 몇 건 / 랜드로버 몇 건으로 나눠 볼 이유가 없다. 합쳐서 보여준다.
+    const cnt = (w.jg?.n||0) + (w.lr?.n||0);
+    const tds = [`<td>${w.code}</td>`, `<td style="text-align:right;">${cnt.toLocaleString('ko-KR')}건</td>`];
     if(sRS) tds.push(`<td style="text-align:right;">${won(cust)}</td>`,`<td style="text-align:right;">${won(vme+cast)}</td>`);
     if(sSI) tds.push(`<td style="text-align:right;">${won(inc)}</td>`);
     if(sSP) tds.push(`<td style="text-align:right;">${won(spj)}</td>`,`<td style="text-align:right;">${won(spl)}</td>`);
@@ -3027,7 +3030,8 @@ async function renderEngineOilRetailerCard(listEl, round, items){
   }).join('');
 
   const grandTot = (sRS?((d.customer||0)+(d.vme||0)+(d.castrol||0)):0) + (sSI?(d.incentive||0):0) + (sSP?((d.sp_jg||0)+(d.sp_lr||0)):0);
-  const tf = ['<td>합계</td>'];
+  const nTot = (d.workshops||[]).reduce((a,w) => a + (w.jg?.n||0) + (w.lr?.n||0), 0);
+  const tf = ['<td>합계</td>', `<td style="text-align:right;">${nTot.toLocaleString('ko-KR')}건</td>`];
   if(sRS) tf.push(`<td style="text-align:right;">${won(d.customer)}</td>`,`<td style="text-align:right;">${won((d.vme||0)+(d.castrol||0))}</td>`);
   if(sSI) tf.push(`<td style="text-align:right;">${won(d.incentive)}</td>`);
   if(sSP) tf.push(`<td style="text-align:right;">${won(d.sp_jg)}</td>`,`<td style="text-align:right;">${won(d.sp_lr)}</td>`);
@@ -3039,6 +3043,9 @@ async function renderEngineOilRetailerCard(listEl, round, items){
         <div class="claim-name">${round.settlement_types?.name||''} · ${round.period_label}</div>
         <div class="claim-sub">JLR Korea 산출 정산 · 확인만 하시면 됩니다
           · <span class="badge ${round.status==='PUBLISHED'?'badge-ap':'badge-off'}">${ROUND_STATUS_LABEL[round.status]||round.status}</span></div>
+        <div class="claim-sub" style="margin-top:4px;">
+          <b>${nTot.toLocaleString('ko-KR')}건 · ${won(grandTot)}</b>
+          ${round.invoice_issue_date ? ` · 인보이스 Date ${round.invoice_issue_date}` : ''}</div>
       </div>
       ${c.confirmed_at ? '<span class="badge badge-ap">확정완료</span>' : '<span class="badge badge-off">확인 대기</span>'}
     </div>
@@ -3046,14 +3053,62 @@ async function renderEngineOilRetailerCard(listEl, round, items){
       <thead><tr>${th.join('')}</tr></thead>
       <tbody>${wsRows}</tbody>
       <tfoot><tr style="font-weight:600;">${tf.join('')}</tr></tfoot>
-    </table></div>`;
+    </table></div>
+    <div style="margin-top:10px;">
+      <button class="btn btn-sm btn-ghost eo-xls-btn">엑셀 다운로드</button>
+    </div>`;
   d.total = grandTot;
+
+  card.querySelector('.eo-xls-btn').onclick = () => {
+    const cols = [{ key:'ws', label:'지점', w:14 }, { key:'n', label:'건수', w:9, type:'num' }];
+    if(sRS) cols.push({ key:'save', label:'사용반환금', w:16, type:'num' },
+                      { key:'supp', label:'Retailer Support', w:18, type:'num' });
+    if(sSI) cols.push({ key:'inc', label:'Sales Incentive', w:16, type:'num' });
+    if(sSP) cols.push({ key:'spj', label:'판매대금 JG', w:14, type:'num' },
+                      { key:'spl', label:'판매대금 LR', w:14, type:'num' });
+    cols.push({ key:'tot', label:'합계', w:16, type:'num' });
+    const rows = (d.workshops||[]).map(w => {
+      const cust=(w.jg?.customer||0)+(w.lr?.customer||0);
+      const vme =(w.jg?.vme||0)+(w.lr?.vme||0);
+      const cast=(w.jg?.castrol||0)+(w.lr?.castrol||0);
+      const inc = w.incentive?.amount||0, spj=w.sp?.jg||0, spl=w.sp?.lr||0;
+      return { ws:w.code, n:(w.jg?.n||0)+(w.lr?.n||0),
+               save:Math.round(cust), supp:Math.round(vme+cast), inc:Math.round(inc),
+               spj:Math.round(spj), spl:Math.round(spl),
+               tot:Math.round((sRS?(cust+vme+cast):0)+(sSI?inc:0)+(sSP?(spj+spl):0)) };
+    });
+    xlsxHouse({
+      filename: `${(round.settlement_types?.name||'정산').replace(/[\\/:*?"<>|]/g,'')}_${round.period_label}.xlsx`,
+      sheetName: '정산내역',
+      title: `${round.settlement_types?.name||''} · ${round.period_label}`,
+      subtitle: `JLR Korea 산출 · ${nTot.toLocaleString('ko-KR')}건 · ${won(grandTot)}`
+        + (round.invoice_issue_date ? ` · 인보이스 Date ${round.invoice_issue_date}` : ''),
+      summary: [
+        { label:'대상 건수', value: nTot },
+        { label:'정산 금액', value: Math.round(grandTot) },
+      ],
+      steps: [
+        '■ 산출 방식',
+        '엔진오일 패키지 쿠폰 클레임 중 전송 완료되고 아직 정산되지 않은 건을 지점별로 집계했습니다.',
+        '이미 정산된 건은 자동으로 제외되므로 중복 지급되지 않습니다.',
+      ],
+      columns: cols, rows,
+      totals: { ws:'합계', n:nTot,
+                save: rows.reduce((a,r)=>a+r.save,0), supp: rows.reduce((a,r)=>a+r.supp,0),
+                inc: rows.reduce((a,r)=>a+r.inc,0),
+                spj: rows.reduce((a,r)=>a+r.spj,0), spl: rows.reduce((a,r)=>a+r.spl,0),
+                tot: Math.round(grandTot) },
+      notes: ['※ 금액에 이견이 있으시면 확정 전에 JLR Korea 담당자에게 알려주시기 바랍니다.'],
+    });
+  };
 
   if(canConfirm){
     const w = document.createElement('div');
     w.style.marginTop = '12px';
     w.innerHTML = `<button class="btn btn-sm eo-confirm-btn">정산 확정</button>
-      <span class="hint" style="margin-left:8px;">확정하면 이 금액으로 세금계산서 발행 대상이 확정됩니다.</span>`;
+      <span class="hint" style="margin-left:8px;">${round.settlement_types?.requires_invoice
+        ? '확정하면 이 금액으로 세금계산서 발행 대상이 확정됩니다.'
+        : '확정하면 이 금액으로 정산됩니다. 세금계산서 발행 대상은 아닙니다.'}</span>`;
     w.querySelector('.eo-confirm-btn').addEventListener('click', async () => {
       if(!confirm(`정산 합계 ${won(d.total)} 을(를) 확정할까요? 확정 후에는 취소할 수 없습니다.`)) return;
       const { data: upd, error } = await sb.from('claims')
