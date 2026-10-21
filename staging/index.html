@@ -930,6 +930,12 @@
         </select>
       </div>
     </div>
+    <div class="field" id="r_ym_wrap" style="display:none;">
+      <label>정산 월</label>
+      <input id="r_period_ym" type="month">
+      <div class="hint">월단위로 도는 정산유형입니다. 이 값으로 회차를 구분하고 정렬합니다.
+        기간 라벨에 <code>2026-09</code> 나 <code>9월</code> 이 있으면 자동으로 채워집니다.</div>
+    </div>
     <div class="hint">예산 집행 집계 기준입니다. 기간 라벨을 "FY27 Q1" 형식으로 입력하면 자동으로 채워집니다.</div>
     <div class="field"><label>청구 마감일시</label><input id="r_claim_due_at" type="datetime-local"></div>
     <div class="hint" id="r_ar_hint" style="display:none; color:var(--accent-ar);">
@@ -6443,7 +6449,10 @@ async function loadRounds(){
       openRoundDetail(r.id);
     });
     tr.innerHTML = `
-      <td>${r.period_label}${r.fiscal_year?`<div class="hint">${r.fiscal_year}${r.fiscal_quarter?' '+r.fiscal_quarter:''}</div>`:''}</td>
+      <td>${r.period_label}${(r.fiscal_year || r.period_ym)
+        ? `<div class="hint">${r.fiscal_year || ''}${r.fiscal_quarter ? ' ' + r.fiscal_quarter : ''}${
+            r.period_ym ? (r.fiscal_year ? ' · ' : '') + r.period_ym.slice(0,4) + '-' + r.period_ym.slice(4) : ''}</div>`
+        : ''}</td>
       <td class="muted">${r.settlement_types?.name || '—'}</td>
       <td><span class="badge ${isAR?'badge-ar':'badge-ap'}">${r.settlement_types?.direction||''}</span></td>
       <td><span class="badge ${r.status==='DRAFT'?'badge-off':(isAR?'badge-ar':'badge-ap')}">${ROUND_STATUS_LABEL[r.status]||r.status}</span></td>
@@ -6485,13 +6494,41 @@ function updateRoundPanelForType(){
 document.getElementById('r_type_id').addEventListener('change', updateRoundPanelForType);
 
 // 기간 라벨("FY27 Q1")에서 회계연도·분기를 자동 추출
+/* 월단위 유형이면 '정산 월' 칸을 띄운다. 라벨에서 읽어낼 수 있으면 채워준다.
+   '2026-09' · '202609' 는 그대로, 'FY27 Q2 9월' 처럼 월만 있으면 회계연도로 연도를 민다
+   (JLR 회계연도는 4월 시작이라 1~3월은 다음 해다). */
+function syncRoundYm(){
+  const t = activeTypes.find(x => x.id === document.getElementById('r_type_id').value);
+  const monthly = t?.period === 'MONTHLY';
+  const wrap = document.getElementById('r_ym_wrap');
+  if(wrap) wrap.style.display = monthly ? '' : 'none';
+  if(!monthly) return;
+  const el = document.getElementById('r_period_ym');
+  if(!el || el.value) return;                      // 이미 고른 값은 안 건드린다
+  const v = document.getElementById('r_period_label').value || '';
+  let m = v.match(/\b(20\d{2})[-.\/]?(0[1-9]|1[0-2])\b/);
+  if(m){ el.value = `${m[1]}-${m[2]}`; return; }
+  m = v.match(/(\d{1,2})\s*월/);
+  const fy = (v.match(/FY\s?(\d{2})/i) || [])[1];
+  if(m && fy){
+    const mm = Number(m[1]);
+    if(mm >= 1 && mm <= 12){
+      // FY27 = 2026-04 ~ 2027-03
+      const base = 2000 + Number(fy) - 1;
+      el.value = `${mm >= 4 ? base : base + 1}-${String(mm).padStart(2,'0')}`;
+    }
+  }
+}
+
 document.getElementById('r_period_label').addEventListener('input', (e) => {
   const v = e.target.value;
   const fy = v.match(/FY\s?(\d{2,4})/i);
   const q = v.match(/\bQ([1-4])\b/i);
   if(fy) document.getElementById('r_fiscal_year').value = 'FY' + fy[1];
   if(q) document.getElementById('r_fiscal_quarter').value = 'Q' + q[1];
+  syncRoundYm();
 });
+document.getElementById('r_type_id').addEventListener('change', syncRoundYm);
 
 document.getElementById('saveRoundBtn').addEventListener('click', async () => {
   const type_id = document.getElementById('r_type_id').value;
@@ -6500,10 +6537,17 @@ document.getElementById('saveRoundBtn').addEventListener('click', async () => {
   const fiscal_quarter = document.getElementById('r_fiscal_quarter').value || null;
   const claim_due_at = document.getElementById('r_claim_due_at').value;
   if(!type_id || !period_label){ alert('정산 유형과 기간 라벨은 필수입니다.'); return; }
+  // 월단위 유형은 정산 월을 받는다 ('2026-09' → '202609')
+  const tSel = activeTypes.find(x => x.id === type_id);
+  const ymRaw = document.getElementById('r_period_ym')?.value || '';
+  const period_ym = tSel?.period === 'MONTHLY' ? (ymRaw.replace('-', '') || null) : null;
+  if(tSel?.period === 'MONTHLY' && !period_ym){
+    alert('월단위 정산유형입니다. 정산 월을 선택해주세요.'); return;
+  }
   const { error } = await sb.from('rounds').insert({
     type_id, period_label,
     claim_due_at: claim_due_at ? new Date(claim_due_at).toISOString() : null,
-    fiscal_year, fiscal_quarter,
+    fiscal_year, fiscal_quarter, period_ym,
     status: 'DRAFT'
   });
   if(error){ alert('생성 실패: ' + error.message); return; }
