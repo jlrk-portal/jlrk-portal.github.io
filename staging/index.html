@@ -431,7 +431,10 @@
     <section id="view-roundDetail" style="display:none;">
       <span class="back-link" id="backToRounds">← 회차 목록으로</span>
       <div class="info-card">
-        <div class="page-title" id="rd_title">—</div>
+        <div style="display:flex; align-items:flex-start; gap:12px; flex-wrap:wrap;">
+          <div class="page-title" id="rd_title" style="flex:1; min-width:240px;">—</div>
+          <button class="btn btn-sm btn-ghost" id="rd_notice_btn">공지용 요약</button>
+        </div>
         <div class="info-grid">
           <div class="info-item"><div class="k">상태</div><div class="v" id="rd_status">—</div></div>
           <div class="info-item"><div class="k">방향 / 청구단위</div><div class="v" id="rd_meta">—</div></div>
@@ -1887,6 +1890,8 @@ document.querySelectorAll('#adminNav .nav-item[data-nav]').forEach(item => {
   item.addEventListener('click', () => switchView(item.dataset.nav));
 });
 document.getElementById('backToRounds').addEventListener('click', () => switchView('rounds'));
+/* 공지용 요약 — 유형과 무관하게 회차 데이터에서 직접 뽑아 별도 창에 그린다 */
+document.getElementById('rd_notice_btn').addEventListener('click', openNoticeSummary);
 
 /* ---------- 패널 공통 ---------- */
 const overlay = document.getElementById('overlay');
@@ -11998,6 +12003,165 @@ function odsPrintConfirm(round, type, claims){
       본 문서는 리테일러가 포털에서 직접 [정산 확정] 을 누른 기록입니다. 확정 일시는 서버 기록 시각입니다.
     </div></body></html>`);
   w.document.close();
+}
+
+/* ================================================================
+   공지용 요약 (2026-10-21)
+
+   매니저가 정산을 포털에 등록한 뒤, 리테일러에게 "포털에 올렸으니
+   확인하라" 고 따로 메일을 보낸다. 그때 붙일 캡처 한 장이 필요하다.
+
+   회차 상세 화면은 유형마다 생김새가 다르지만(One DMS·엔진오일·P&D·
+   캠페인·일반), 공지에 필요한 것은 어느 유형이든 같다 —
+   무엇을 / 언제까지 / 리테일러별로 몇 건 얼마냐.
+   그래서 화면을 건드리지 않고, 회차 데이터에서 직접 뽑아 별도 창에
+   깨끗하게 그린다. 어느 유형에서 눌러도 똑같이 동작한다.
+   ================================================================ */
+
+async function openNoticeSummary(){
+  if(!currentRoundId) return;
+  const { data: round } = await sb.from('rounds')
+    .select('*, settlement_types(*)').eq('id', currentRoundId).single();
+  if(!round){ alert('회차를 불러오지 못했습니다.'); return; }
+  const type = round.settlement_types || {};
+  const { data: claims } = await sb.from('claims')
+    .select('*, retailers(code,name), workshops(code,name)')
+    .eq('round_id', currentRoundId).order('created_at');
+
+  /* 리테일러 단위로 묶는다. 지점단위 유형이면 지점 수를 같이 센다. */
+  const byRt = new Map();
+  (claims||[]).forEach(c => {
+    const k = c.retailer_id || c.id;
+    if(!byRt.has(k)) byRt.set(k, {
+      code: c.retailers?.code || '', name: c.retailers?.name || '',
+      ws: new Set(), n: 0, amount: 0, confirmed: 0, submitted: 0, lines: 0,
+    });
+    const g = byRt.get(k);
+    g.n++;
+    if(c.workshops?.code) g.ws.add(c.workshops.code);
+    // 확정금액이 있으면 그것을, 없으면 청구금액을 쓴다
+    g.amount += Number(c.approved_amount ?? c.claimed_amount ?? 0);
+    if(c.confirmed_at) g.confirmed++;
+    if(['SUBMITTED','APPROVED'].includes(c.status)) g.submitted++;
+    // 유형별로 '건수' 의 의미가 다르다 — detail 에 담긴 실제 건수를 쓴다
+    const d = c.detail || {};
+    g.lines += Number(d.lines ?? d.user_count ?? d.count ?? 0)
+            || (d.workshops ? (d.workshops||[]).reduce((a,w) =>
+                 a + (w.jg?.n||0) + (w.lr?.n||0) + (w.incentive?.count||0), 0) : 0);
+  });
+  const rows = [...byRt.values()].sort((a,b) => a.code.localeCompare(b.code));
+  const T = {
+    n: rows.reduce((a,r) => a + r.n, 0),
+    amount: rows.reduce((a,r) => a + r.amount, 0),
+    confirmed: rows.reduce((a,r) => a + r.confirmed, 0),
+    lines: rows.reduce((a,r) => a + r.lines, 0),
+  };
+  const hasLines = T.lines > 0;
+  const isAR = type.direction === 'AR';
+
+  const dt = v => v ? new Date(v).toLocaleString('ko-KR',
+    { year:'numeric', month:'long', day:'numeric', hour:'2-digit', minute:'2-digit' }) : null;
+  const esc = v => String(v == null ? '' : v).replace(/[<>&]/g, m => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[m]));
+  const won = n => Math.round(n||0).toLocaleString('ko-KR') + '원';
+
+  /* 머리말에 쓸 날짜 — 유형에 따라 의미가 다르다 */
+  const meta = [];
+  if(round.claim_due_at)   meta.push(['청구 마감', dt(round.claim_due_at)]);
+  if(round.confirm_due_at) meta.push(['확정 기한', dt(round.confirm_due_at)]);
+  if(round.invoice_issue_date)
+    meta.push([type.requires_invoice ? '세금계산서 발행일' : '인보이스 Date', round.invoice_issue_date]);
+
+  const w = window.open('', '_blank', 'width=980,height=820');
+  if(!w){ alert('팝업이 차단되었습니다. 이 사이트의 팝업을 허용해주세요.'); return; }
+  w.document.write(`<!doctype html><html lang="ko"><head><meta charset="utf-8">
+  <title>${esc(type.name)} ${esc(round.period_label)} 공지용 요약</title>
+  <style>
+    @page { size: A4; margin: 14mm; }
+    body { font-family:"맑은 고딕","Malgun Gothic",sans-serif; color:#1a1a1a;
+           margin:0; padding:26px 30px; background:#fff; }
+    .wrap { max-width:860px; }
+    .eyebrow { font-size:11px; letter-spacing:.08em; color:#6e7375; text-transform:uppercase; }
+    h1 { font-size:19px; margin:6px 0 2px; }
+    .sub { font-size:12px; color:#6e7375; margin-bottom:18px; }
+    .meta { display:flex; flex-wrap:wrap; gap:0 28px; font-size:12px; margin-bottom:18px; }
+    .meta div { padding:3px 0; }
+    .meta b { color:#3d4448; font-weight:600; }
+    .kpi { display:flex; gap:10px; margin-bottom:18px; }
+    .kpi div { flex:1; border:1px solid #e3e5e6; border-radius:8px; padding:12px 14px; }
+    .kpi .k { font-size:11px; color:#6e7375; }
+    .kpi .v { font-size:20px; font-weight:700; margin-top:3px; }
+    table { border-collapse:collapse; width:100%; font-size:12.5px; }
+    th { background:#3d4448; color:#fff; font-weight:600; padding:8px 10px; text-align:left; }
+    td { border-bottom:1px solid #e9ebec; padding:7px 10px; }
+    .n { text-align:right; font-variant-numeric:tabular-nums; }
+    .c { text-align:center; }
+    tfoot td { background:#f4f5f5; font-weight:700; border-top:2px solid #3d4448; }
+    .foot { margin-top:16px; font-size:11px; color:#6e7375; line-height:1.7; }
+    .noprint { margin-bottom:16px; display:flex; gap:8px; }
+    .btn { font:inherit; font-size:12.5px; padding:7px 14px; border:1px solid #3d4448;
+           background:#3d4448; color:#fff; border-radius:5px; cursor:pointer; }
+    .btn.g { background:#fff; color:#3d4448; }
+    @media print { .noprint { display:none; } body { padding:0; } }
+  </style></head><body><div class="wrap">
+  <div class="noprint">
+    <button class="btn" onclick="window.print()">인쇄 / PDF 저장</button>
+    <button class="btn g" id="cp">표 내용 복사</button>
+    <span style="font-size:11.5px;color:#6e7375;align-self:center;">
+      이 창을 그대로 캡처해 메일에 붙이시면 됩니다</span>
+  </div>
+
+  <div class="eyebrow">JLR KOREA 정산 포털</div>
+  <h1>${esc(type.name)} · ${esc(round.period_label)}</h1>
+  <div class="sub">${isAR ? 'JLR Korea 가 청구하는 건입니다' : 'JLR Korea 가 지급하는 건입니다'}
+    · 상태 ${esc(ROUND_STATUS_LABEL[round.status] || round.status)}</div>
+
+  ${meta.length ? `<div class="meta">${meta.map(([k,v]) =>
+      `<div><b>${esc(k)}</b> &nbsp;${esc(v)}</div>`).join('')}</div>` : ''}
+
+  <div class="kpi">
+    <div><div class="k">대상 리테일러</div><div class="v">${rows.length}개사</div></div>
+    ${hasLines ? `<div><div class="k">대상 건수</div><div class="v">${T.lines.toLocaleString('ko-KR')}건</div></div>` : ''}
+    <div><div class="k">${isAR ? '청구 금액' : '정산 금액'}</div><div class="v">${won(T.amount)}</div></div>
+    <div><div class="k">확정</div><div class="v">${T.confirmed} / ${T.n}</div></div>
+  </div>
+
+  <table><thead><tr>
+    <th>리테일러</th><th>법인명</th>
+    ${rows.some(r => r.ws.size) ? '<th class="c">지점</th>' : ''}
+    ${hasLines ? '<th class="n">건수</th>' : ''}
+    <th class="n">${isAR ? '청구 금액' : '정산 금액'}</th><th class="c">확정</th>
+  </tr></thead><tbody>
+    ${rows.map(r => `<tr>
+      <td>${esc(r.code)}</td><td>${esc(r.name)}</td>
+      ${rows.some(x => x.ws.size) ? `<td class="c">${r.ws.size || '—'}</td>` : ''}
+      ${hasLines ? `<td class="n">${r.lines.toLocaleString('ko-KR')}</td>` : ''}
+      <td class="n">${won(r.amount)}</td>
+      <td class="c">${r.confirmed >= r.n && r.n ? '확정' : '대기'}</td></tr>`).join('')}
+  </tbody><tfoot><tr>
+    <td colspan="${2 + (rows.some(r => r.ws.size) ? 1 : 0)}">합계</td>
+    ${hasLines ? `<td class="n">${T.lines.toLocaleString('ko-KR')}</td>` : ''}
+    <td class="n">${won(T.amount)}</td><td class="c">${T.confirmed}/${T.n}</td>
+  </tr></tfoot></table>
+
+  <div class="foot">
+    포털에서 직접 확인하실 수 있습니다 — <b>${location.origin}${location.pathname}</b><br>
+    금액에 이견이 있으시면 확정 전에 JLR Korea 담당자에게 알려주시기 바랍니다.<br>
+    출력 ${new Date().toLocaleString('ko-KR')}
+  </div></div>
+  <script>
+    document.getElementById('cp').onclick = function(){
+      var t = ${JSON.stringify(
+        [`${type.name} · ${round.period_label}`,
+         ...meta.map(([k,v]) => `${k}: ${v}`),
+         '',
+         ...rows.map(r => `${r.code} ${r.name}  ${hasLines ? r.lines.toLocaleString('ko-KR')+'건  ' : ''}${won(r.amount)}`),
+         `합계  ${hasLines ? T.lines.toLocaleString('ko-KR')+'건  ' : ''}${won(T.amount)}`].join('\\n'))};
+      navigator.clipboard.writeText(t).then(function(){ 
+        var b=document.getElementById('cp'); b.textContent='복사됨'; setTimeout(function(){b.textContent='표 내용 복사';},1500); });
+    };
+  <\/script></body></html>`);
+  w.document.close();
+  await logAudit('NOTICE_SUMMARY','ROUND', currentRoundId, { label: `${type.name} · ${round.period_label}` });
 }
 
 checkSession();
