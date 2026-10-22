@@ -2364,7 +2364,22 @@ function _eoCell(row, idx){
 }
 
 // ── CouponClaim 원본 → 지점×브랜드 집계 (전송 & 미정산만) ──
-async function parseEngineOilCoupon(buf, type){
+/* 기정산 지문 — 중복청구 거르는 기준.
+   ⚠ 고치고 있는 회차의 기록은 빼야 한다. 안 빼면 같은 원본을 다시 올렸을 때
+      전 행이 '이미 정산됨' 으로 걸러져 0건이 되고, 이미 공지된 운영 회차의
+      금액이 통째로 날아간다. (2026-10-22)
+   round_id 가 비어 있는 과거 백필분은 반드시 남긴다 — neq 만 쓰면 NULL 행이
+   통째로 빠져 과거 이력과의 중복을 못 잡는다. */
+async function eoKnownHashes(type, roundId){
+  const rows = await sbAll(() => {
+    let q = sb.from('settled_records').select('dedup_hash').eq('type_id', type.id);
+    if(roundId) q = q.or(`round_id.is.null,round_id.neq.${roundId}`);
+    return q;
+  }, '기정산 이력');
+  return new Set(rows.map(r => r.dedup_hash));
+}
+
+async function parseEngineOilCoupon(buf, type, roundId){
   const P = eo3vParams(type);
   const wb = xsFixBook(XLSX.read(buf, { type:'array', cellDates:true }));
   const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header:1, defval:'' });
@@ -2377,14 +2392,7 @@ async function parseEngineOilCoupon(buf, type){
   const iRef = c['쿠폰사용 참조번호'], iSite = c['지점'] ?? c['지점명'];
 
   // 기정산 지문
-  const known = new Set();
-  for(let from=0;;from+=1000){
-    const { data, error } = await sb.from('settled_records')
-      .select('dedup_hash').eq('type_id', type.id).range(from, from+999);
-    if(error) throw new Error('기정산 이력 조회 실패: ' + error.message);
-    (data||[]).forEach(r => known.add(r.dedup_hash));
-    if(!data || data.length < 1000) break;
-  }
+  const known = await eoKnownHashes(type, roundId);
 
   const byWs = new Map();     // code → { jg:{n,customer,vme,castrol}, lr:{...} }
   // 리테일러가 엑셀로 받을 때 '자기 것만' 원본 행이 들어가야 한다.
@@ -2454,7 +2462,7 @@ function eoPreset(type){
 const isEnginePreset = (type) => !!eoPreset(type);
 
 // ── 쿠폰북정산내역 원본 → 지점별 인센티브 (판매 − 환불) + dedup(차대번호+쿠폰북ID) ──
-async function parseEngineOilSales(buf, type){
+async function parseEngineOilSales(buf, type, roundId){
   const wb = xsFixBook(XLSX.read(buf, { type:'array', cellDates:true }));
   const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header:1, defval:'' });
   const hdr = eo3vFindHeader(rows, ['유형','지점명']);
@@ -2469,16 +2477,7 @@ async function parseEngineOilSales(buf, type){
   const iSnm  = hdr.map['판매자명'] ?? hdr.map['판매자'];
 
   // 기정산 지문 (type 있을 때만)
-  const known = new Set();
-  if(type?.id){
-    for(let from=0;;from+=1000){
-      const { data, error } = await sb.from('settled_records')
-        .select('dedup_hash').eq('type_id', type.id).range(from, from+999);
-      if(error) throw new Error('기정산 이력 조회 실패: ' + error.message);
-      (data||[]).forEach(r => known.add(r.dedup_hash));
-      if(!data || data.length < 1000) break;
-    }
-  }
+  const known = type?.id ? await eoKnownHashes(type, roundId) : new Set();
 
   const byWs = new Map();     // code → { sale, refund }
   const bySeller = new Map(); // code|sid|name → { code, site, sid, name, sale, refund }
@@ -2540,7 +2539,7 @@ async function parseEngineOilSales(buf, type){
 // ── 쿠폰북정산내역 원본 → 지점별 판매대금 (AR: 리테일러 → JLRK 입금) ──
 //   Σ 가격(VAT) over 유형 ∈ {판매, 환불, 반품} (환불/반품 음수, 반품은 원본에 이미 안분됨)
 //   브랜드 = 차대번호 3번째 자리 = 'L' → LR, 아니면 JG
-async function parseEngineOilSalesPayment(buf, type){
+async function parseEngineOilSalesPayment(buf, type, roundId){
   const wb = xsFixBook(XLSX.read(buf, { type:'array', cellDates:true }));
   const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header:1, defval:'' });
   const hdr = eo3vFindHeader(rows, ['유형','지점명','차대번호']);
@@ -2550,16 +2549,7 @@ async function parseEngineOilSalesPayment(buf, type){
   const iPrice = hdr.map['가격 (VAT)'] ?? hdr.map['가격(VAT)'] ?? hdr.map['가격'];
   if(iPrice === undefined) throw new Error("가격 (VAT) 컬럼을 찾지 못했습니다.");
 
-  const known = new Set();
-  if(type?.id){
-    for(let from=0;;from+=1000){
-      const { data, error } = await sb.from('settled_records')
-        .select('dedup_hash').eq('type_id', type.id).range(from, from+999);
-      if(error) throw new Error('기정산 이력 조회 실패: ' + error.message);
-      (data||[]).forEach(r => known.add(r.dedup_hash));
-      if(!data || data.length < 1000) break;
-    }
-  }
+  const known = type?.id ? await eoKnownHashes(type, roundId) : new Set();
 
   const byWs = new Map();   // code → { jg, lr, n }
   const unmatched = new Map();
@@ -2670,9 +2660,10 @@ async function renderEngineOilSection(round, type, claims){
     const out = document.getElementById('eoResult');
     out.innerHTML = '<div class="hint">분석 중...</div>';
     try{
-      const coupon = cf ? await parseEngineOilCoupon(await cf.arrayBuffer(), type) : null;
-      const sales  = (sf && wantSales) ? await parseEngineOilSales(await sf.arrayBuffer(), type) : null;
-      const sp     = (sf && wantSp)    ? await parseEngineOilSalesPayment(await sf.arrayBuffer(), type) : null;
+      // 회차를 같이 넘긴다 — 이 회차 자기 기록을 '기정산' 으로 보면 안 된다
+      const coupon = cf ? await parseEngineOilCoupon(await cf.arrayBuffer(), type, round.id) : null;
+      const sales  = (sf && wantSales) ? await parseEngineOilSales(await sf.arrayBuffer(), type, round.id) : null;
+      const sp     = (sf && wantSp)    ? await parseEngineOilSalesPayment(await sf.arrayBuffer(), type, round.id) : null;
       window.__eo3v = { coupon, sales, sp, round_id: round.id, preset: eo.key };
       out.innerHTML = renderEngineOilPreview(coupon, sales, type, sp);
     } catch(err){
