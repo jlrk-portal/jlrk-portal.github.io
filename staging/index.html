@@ -2615,7 +2615,7 @@ async function renderEngineOilSection(round, type, claims){
                판매자별 건수가 따라 움직입니다. 금액 총액은 바뀌지 않습니다.</div></div>` : '')
         + sellerBlocksHtml(groups, eo3vParams(type).INCENTIVE_UNIT, false, true);
       bindSellerBlocks(box, groups, {
-        byId: new Map(lines.map(L => [L.id, L])), refresh: drawSel });
+        byId: new Map(lines.map(L => [String(L.id), L])), refresh: drawSel });
     };
     drawSel().then(() => host.appendChild(box));
   }
@@ -3257,7 +3257,7 @@ async function renderEngineOilRetailerCard(listEl, round, items){
                  저장해서 공유하시면 판매자들이 자기 판매건을 바로 확인할 수 있습니다</span>
              </div>`;
         bindSellerBlocks(box, groups, {
-          byId: new Map(lines.map(L => [L.id, L])), refresh: draw });
+          byId: new Map(lines.map(L => [String(L.id), L])), refresh: draw });
         const pb = box.querySelector('.eo-pdf-btn');
         if(pb) pb.onclick = () => openSellerNoticePdf(round, groups,
           myRetailer?.name || c.retailers?.name || '');
@@ -12766,31 +12766,41 @@ function bindSellerBlocks(host, groups, opts){
 
   // 관리자 — 승인 / 반려
   host.querySelectorAll('.ln-ok').forEach(b => b.onclick = async () => {
-    const L = opts.byId.get(b.dataset.id);
+    const L = opts.byId.get(String(b.dataset.id));
+    if(!L){ alert('이 건을 찾지 못했습니다. 새로고침 후 다시 시도해주세요.'); return; }
     if(!confirm(`이 건의 판매자를 바꿉니다.\n\n${L.customer || ''} ${L.car_no || ''}\n`
               + `${L.seller_name} → ${L.req_seller}\n\n금액은 그대로입니다. 승인할까요?`)) return;
     b.disabled = true;
     const { data: { user } } = await sb.auth.getUser();
-    const { error } = await sb.from('engineoil_lines').update({
+    const { data, error } = await sb.from('engineoil_lines').update({
       prev_seller: L.seller_name, seller_name: L.req_seller, req_status: 'APPROVED',
       decided_at: new Date().toISOString(), decided_by: user?.id || null,
     }).eq('id', L.id).select('id');
-    if(error){ alert('승인 실패: ' + error.message); b.disabled = false; return; }
+    if(error || !data?.length){
+      alert(error ? '승인 실패: ' + error.message
+                  : '승인이 반영되지 않았습니다 (0건). 권한을 확인해주세요.');
+      b.disabled = false; return;
+    }
     await logAudit('EO_LINE_SELLER_APPROVE','ROUND', L.round_id,
       { label: `${L.workshop_code} ${L.seller_name} → ${L.req_seller}` });
     await opts.refresh();
   });
   host.querySelectorAll('.ln-no').forEach(b => b.onclick = async () => {
-    const L = opts.byId.get(b.dataset.id);
+    const L = opts.byId.get(String(b.dataset.id));
+    if(!L){ alert('이 건을 찾지 못했습니다. 새로고침 후 다시 시도해주세요.'); return; }
     const note = prompt('반려 사유를 적어주세요. 리테일러에게 그대로 보입니다.', '');
     if(note === null) return;
     b.disabled = true;
     const { data: { user } } = await sb.auth.getUser();
-    const { error } = await sb.from('engineoil_lines').update({
+    const { data, error } = await sb.from('engineoil_lines').update({
       req_status: 'REJECTED', decide_note: note || null,
       decided_at: new Date().toISOString(), decided_by: user?.id || null,
     }).eq('id', L.id).select('id');
-    if(error){ alert('반려 실패: ' + error.message); b.disabled = false; return; }
+    if(error || !data?.length){
+      alert(error ? '반려 실패: ' + error.message
+                  : '반려가 반영되지 않았습니다 (0건). 권한을 확인해주세요.');
+      b.disabled = false; return;
+    }
     await opts.refresh();
   });
 }
