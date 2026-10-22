@@ -2957,6 +2957,63 @@ async function renderEngineOilRoundDetail(round, type){
   const vs = document.getElementById('voucherSection');
   if(round.status === 'PUBLISHED'){
     const allDone = total > 0 && confirmed === total;
+    // 확정 기한 — P&D 와 같은 방식. 기한이 있어야 리테일러 화면에
+    // 'OO까지 확정해 주십시오' 와 기한 경과 표시가 뜬다.
+    const dueAt = round.confirm_due_at ? new Date(round.confirm_due_at) : null;
+    const over = dueAt && dueAt < new Date();
+    const wrap = document.createElement('div');
+    wrap.className = 'info-card';
+    wrap.innerHTML = `
+      <div class="section-label" style="margin-top:0;">정산 확정 기한</div>
+      <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap;">
+        <div class="field" style="margin:0;"><label style="font-size:11px;">기한</label>
+          <input type="datetime-local" id="eoDue" value="${dueAt
+            ? new Date(dueAt.getTime() - new Date().getTimezoneOffset()*60000)
+                .toISOString().slice(0,16) : ''}"></div>
+        <button class="btn btn-sm btn-ghost" id="eoDueSave">기한 저장 · 안내</button>
+        <span class="hint" style="align-self:center;">
+          ${dueAt ? `현재 <b>${dueAt.toLocaleString('ko-KR')}</b>` : '아직 설정되지 않았습니다'}
+          ${over ? '<span class="badge badge-ar" style="margin-left:6px;">기한 경과</span>' : ''}
+          · 확정 ${confirmed} / ${total}</span>
+      </div>
+      <div class="hint" style="margin-top:8px;">기한이 지나도 시스템이 저절로 닫지는 않습니다.
+        기한 뒤에 아래 [전체 확정 완료 처리] 로 마감하시면 됩니다.</div>`;
+    vs.appendChild(wrap);
+    const ds = wrap.querySelector('#eoDueSave');
+    ds.addEventListener('click', async () => {
+      const v = wrap.querySelector('#eoDue').value;
+      if(!v){ alert('기한을 선택해주세요.'); return; }
+      ds.disabled = true;
+      const iso = new Date(v).toISOString();
+      const { data, error } = await sb.from('rounds')
+        .update({ confirm_due_at: iso }).eq('id', round.id).select('id');
+      if(error || !data?.length){
+        alert(error ? '저장 실패: ' + error.message : '저장되지 않았습니다 (0건).');
+        ds.disabled = false; return;
+      }
+      if(confirm('기한을 저장했습니다. 리테일러에게 안내 메일을 발송 대기함에 넣을까요?')){
+        const ids = [...new Set((claims||[]).map(c => c.retailer_id))];
+        const { data: rr } = await sb.from('retailers').select('id, code, name, email').in('id', ids);
+        for(const rt of (rr||[])){
+          const to = splitEmails(rt.email).filter(e => !/placeholder@example\.com/i.test(e));
+          if(!to.length) continue;
+          await sendEmail(to, `[JLRK 정산] ${type.name} · ${round.period_label} 정산 확정 기한 안내`,
+            emailShell('정산 확정 기한 안내', `
+              <p>${rt.name} 담당자님,</p>
+              <p>${type.name} (${round.period_label}) 정산 내역에 대한 <b>확정 기한</b>을 안내드립니다.</p>
+              <table style="${EMAIL_STYLE}border-collapse:collapse;">
+                <tr><td style="padding:4px 12px 4px 0;color:#666;">확정 기한</td>
+                    <td><b style="color:#c0392b;">${new Date(iso).toLocaleString('ko-KR')}</b></td></tr>
+              </table>
+              <p style="margin-top:16px;">기한까지 포털에서 [정산 확정] 을 눌러주십시오.
+                <b>기한이 지나면 확정하신 것으로 보고 마감됩니다.</b></p>`),
+            { kind:'EO_DUE', retailer: rt.code, period: round.period_label });
+        }
+        alert('안내 메일을 발송 대기함에 넣었습니다. 메일 발송 대기함에서 보내주세요.');
+      }
+      await renderRoundDetail();
+    });
+
     const b = document.createElement('button');
     b.className = 'btn'; b.textContent = allDone ? '전체 확정 완료 처리' : `전체 확정 완료 처리 (미확인 ${total-confirmed}곳 강제 포함)`;
     b.addEventListener('click', () => finalizeEngineOilRound(round, type));
@@ -3140,6 +3197,9 @@ async function renderEngineOilRetailerCard(listEl, round, items){
   const c = items[0];
   const d = c.detail || {};
   const uidSel = 'sel' + String(c.id).slice(0, 8);
+  // 확정 기한 — 있으면 머리말에 띄우고, 지났으면 표시한다 (P&D 와 같은 규칙)
+  const eoDue = round.confirm_due_at ? new Date(round.confirm_due_at) : null;
+  const eoOver = eoDue && eoDue < new Date();
   const won = (n) => fmtWon(Math.round(n||0));
   const canConfirm = round.status === 'PUBLISHED' && !c.confirmed_at;
   const eo = eoPreset(round.settlement_types) || { comps:['saveback','support','incentive'] };
@@ -3191,7 +3251,9 @@ async function renderEngineOilRetailerCard(listEl, round, items){
           · <span class="badge ${round.status==='PUBLISHED'?'badge-ap':'badge-off'}">${ROUND_STATUS_LABEL[round.status]||round.status}</span></div>
         <div class="claim-sub" style="margin-top:4px; margin-left:18px;">
           ${nTot.toLocaleString('ko-KR')}건${round.invoice_issue_date
-            ? ` · ${round.settlement_types?.requires_invoice ? '세금계산서' : '바우처'} 발행일 ${round.invoice_issue_date}` : ''}</div>
+            ? ` · ${round.settlement_types?.requires_invoice ? '세금계산서' : '바우처'} 발행일 ${round.invoice_issue_date}` : ''}
+          ${eoDue ? ` · 확정 기한 <b>${eoDue.toLocaleString('ko-KR')}</b>${
+            eoOver ? '<span class="badge badge-ar" style="margin-left:4px;">기한 경과</span>' : ''}` : ''}</div>
       </div>
       ${c.confirmed_at ? '<span class="badge badge-ap">확정완료</span>' : '<span class="badge badge-off">확인 대기</span>'}
     </div>
@@ -3215,6 +3277,13 @@ async function renderEngineOilRetailerCard(listEl, round, items){
       </div>
     </div>
     <div id="${uidSel}-body" style="display:none;">
+      ${eoDue && !c.confirmed_at ? `<div class="hint" style="margin:10px 0 0; padding:8px 10px;
+          background:${eoOver ? '#fdecea' : '#fff4e5'}; border-radius:6px;
+          color:${eoOver ? 'var(--danger,#c0392b)' : '#8a6d00'};">
+          ${eoOver
+            ? '확정 기한이 지났습니다. 회신이 없어 확정된 것으로 처리됩니다. 이견이 있으시면 JLR Korea 담당자에게 연락해 주십시오.'
+            : `<b>${eoDue.toLocaleString('ko-KR')}</b> 까지 [정산 확정] 을 눌러주십시오.
+               기한이 지나면 확정하신 것으로 보고 마감됩니다.`}</div>` : ''}
       <div style="overflow-x:auto;"><table style="margin-top:10px;">
         <thead><tr>${th.join('')}</tr></thead>
         <tbody>${wsRows}</tbody>
