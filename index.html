@@ -1219,6 +1219,21 @@ function matchWorkshop(label){
   return null;
 }
 
+/* 회차에 지금 걸려 있는 '마감' 이 무엇인지 고른다.
+   엔진오일처럼 리테일러 청구가 없는 유형은 claim_due_at 이 비어 있다.
+   그래서 claim_due_at 만 보면 확정 기한을 걸어놔도 목록에 '—' 로 나왔다.
+   (2026-10-23 지적) */
+function roundDue(r, isAR){
+  const S = r.status;
+  if(S === 'OPEN')      return { at: r.claim_due_at, tag: '청구', live: true };
+  if(S === 'DRAFT')     return { at: r.claim_due_at, tag: '청구', live: false };
+  if(isAR && r.dispute_due_at)
+                        return { at: r.dispute_due_at, tag: '이의', live: S === 'PUBLISHED' };
+  if(r.confirm_due_at)  return { at: r.confirm_due_at, tag: '확정',
+                                 live: ['PUBLISHED','OPEN'].includes(S) };
+  return { at: r.claim_due_at, tag: '청구', live: false };
+}
+
 // 마감 임박 배지
 function dDayBadge(dueAt, active){
   if(!dueAt || !active) return '';
@@ -5402,7 +5417,8 @@ async function loadDashboard(){
       const total = cs.length;
       const pct = total ? Math.round(done/total*100) : 0;
       const sum = cs.reduce((s,c) => s + Number(c.approved_amount||0), 0);
-      const due = isAR ? r.dispute_due_at : r.claim_due_at;
+      const dd = roundDue(r, isAR);
+      const due = dd.at;
       const overdue = due && new Date(due) < new Date();
       const tr = document.createElement('tr');
       tr.className = 'clickable';
@@ -5415,7 +5431,9 @@ async function loadDashboard(){
              <div style="height:4px;background:var(--surface3);border-radius:2px;margin-top:4px;overflow:hidden;">
                <div style="height:100%;width:${pct}%;background:${pct===100?'var(--accent)':'var(--accent-ar)'};"></div>
              </div>` : '—'}</td>
-        <td class="muted" ${overdue?'style="color:var(--danger);"':''}>${due ? new Date(due).toLocaleDateString('ko-KR') : '—'}${overdue?' (경과)':''}</td>
+        <td class="muted" ${overdue?'style="color:var(--danger);"':''}>${due
+          ? `<span class="hint" style="margin-right:4px;">${dd.tag}</span>${new Date(due).toLocaleDateString('ko-KR')}`
+          : '—'}${overdue?' (경과)':''}</td>
         <td>${sum ? fmtWon(sum) : '—'}</td>`;
       tb.appendChild(tr);
     });
@@ -6838,7 +6856,10 @@ document.getElementById('saveWorkshopBtn').addEventListener('click', async () =>
   await loadRetailersAdmin();
 });
 
+/* 겹쳐 불리면 줄이 두 벌로 찍힌다 — 마지막 호출만 그리게 토큰을 둔다 */
+let roundsRun = 0;
 async function loadRounds(){
+  const myRun = ++roundsRun;
   const { data, error } = await sb.from('rounds')
     .select('*, settlement_types(name, code, direction, claim_unit)')
     .order('created_at', { ascending:false });
@@ -6897,12 +6918,22 @@ async function loadRounds(){
   }
   emptyState.style.display='none'; document.getElementById('roundsTable').style.display='table';
 
+  // 회차마다 count 를 두 번 돌리면 24회차에 48번 왕복한다. 한 번에 받아 센다.
+  const cnt = new Map();
+  const cs = await sbAll(() => sb.from('claims').select('round_id, status')
+    .in('round_id', rows.map(r => r.id)), '회차별 청구');
+  cs.forEach(c => {
+    if(!cnt.has(c.round_id)) cnt.set(c.round_id, { total:0, submitted:0 });
+    const x = cnt.get(c.round_id); x.total++;
+    if(['SUBMITTED','APPROVED'].includes(c.status)) x.submitted++;
+  });
+  if(myRun !== roundsRun) return;   // 그 사이 새로 불렸으면 그리지 않는다
+
   for(const r of rows){
-    const { count: total } = await sb.from('claims').select('id', {count:'exact', head:true}).eq('round_id', r.id);
-    const { count: submitted } = await sb.from('claims').select('id', {count:'exact', head:true}).eq('round_id', r.id).in('status', ['SUBMITTED','APPROVED']);
+    const { total = 0, submitted = 0 } = cnt.get(r.id) || {};
     const isAR = r.settlement_types?.direction === 'AR';
-    const due = isAR ? r.dispute_due_at : r.claim_due_at;
-    const activeForDday = isAR ? r.status === 'PUBLISHED' : r.status === 'OPEN';
+    const dd = roundDue(r, isAR);
+    const due = dd.at;
     const tr = document.createElement('tr');
     tr.className = 'clickable';
     tr.addEventListener('click', (e) => {
@@ -6917,8 +6948,10 @@ async function loadRounds(){
       <td class="muted">${r.settlement_types?.name || '—'}</td>
       <td><span class="badge ${isAR?'badge-ar':'badge-ap'}">${r.settlement_types?.direction||''}</span></td>
       <td><span class="badge ${r.status==='DRAFT'?'badge-off':(isAR?'badge-ar':'badge-ap')}">${ROUND_STATUS_LABEL[r.status]||r.status}</span></td>
-      <td class="muted">${due ? new Date(due).toLocaleDateString('ko-KR') : '—'} ${dDayBadge(due, activeForDday)}</td>
-      <td>${total ? `${submitted||0} / ${total}` : '—'}</td>
+      <td class="muted">${due
+        ? `<span class="hint" style="margin-right:4px;">${dd.tag}</span>${new Date(due).toLocaleDateString('ko-KR')}`
+        : '—'} ${dDayBadge(due, dd.live)}</td>
+      <td>${total ? `${submitted} / ${total}` : '—'}</td>
       <td><button class="btn btn-ghost btn-sm dup-round-btn">복제</button></td>`;
     tbody.appendChild(tr);
   }
