@@ -2617,7 +2617,7 @@ async function renderEngineOilSection(round, type, claims){
       bindSellerBlocks(box, groups, {
         byId: new Map(lines.map(L => [String(L.id), L])), refresh: drawSel });
     };
-    drawSel().then(() => host.appendChild(box));
+    drawSel().then(() => host.insertBefore(box, card));
   }
   const card = document.createElement('div');
   card.className = 'info-card';
@@ -2901,6 +2901,129 @@ function eo3vBuildBreakdown(coupon, sales, allWs, type, sp){
   return { retailers, grand, settle, unmatched };
 }
 
+/* 리테일러 확정 현황 — P&D(pndConfirmPanel) 와 같은 한 덩어리 박스.
+   머리 띠 · 표 · 금액 요약 · 아래 띠 순서를 그대로 쓴다. */
+function eoConfirmPanel(round, type, claims, confirmed, total){
+  const eo = eoPreset(type);
+  const s = round.source_summary || {};
+  const due = round.confirm_due_at ? new Date(round.confirm_due_at) : null;
+  const over = due && due < new Date();
+  const allDone = total > 0 && confirmed === total;
+  const vCount = eo.comps.length;
+
+  const sumParts = [];
+  if(eo.comps.includes('saveback'))     sumParts.push(`사용반환금 <b>${fmtWon(s.grand?.customer)}</b>`);
+  if(eo.comps.includes('support'))      sumParts.push(`Retailer Support <b>${fmtWon((s.grand?.vme||0)+(s.grand?.castrol||0))}</b>`);
+  if(eo.comps.includes('incentive'))    sumParts.push(`Sales Incentive <b>${fmtWon(s.grand?.incentive)}</b>`);
+  if(eo.comps.includes('salespayment')) sumParts.push(`판매대금 <b>${fmtWon((s.grand?.sp_jg||0)+(s.grand?.sp_lr||0))}</b> (JG ${fmtWon(s.grand?.sp_jg)} / LR ${fmtWon(s.grand?.sp_lr)})`);
+
+  const rows = (claims||[]).slice().sort((a,b) =>
+      ((a.retailers?.code||'')+(a.retailers?.name||''))
+        .localeCompare((b.retailers?.code||'')+(b.retailers?.name||'')))
+    .map(c => `<tr>
+      <td>${c.retailers?.code||''} ${c.retailers?.name||''}</td>
+      <td style="text-align:right;">${fmtWon(c.approved_amount)}</td>
+      <td style="text-align:center;">${c.confirmed_at
+        ? '<span class="badge badge-ap">확정</span>'
+        : '<span class="badge badge-warn">대기</span>'}</td>
+      <td class="muted">${c.confirmed_at ? new Date(c.confirmed_at).toLocaleString('ko-KR') : '—'}</td>
+    </tr>`).join('');
+
+  let foot = '';
+  if(round.status === 'PUBLISHED'){
+    foot = `<div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;
+         padding:10px 12px; border-top:1px solid var(--surface3);">
+      <div class="field" style="margin:0;"><label style="font-size:11px;">정산 확정 기한</label>
+        <input type="datetime-local" id="eoDue" value="${due
+          ? new Date(due.getTime() - new Date().getTimezoneOffset()*60000).toISOString().slice(0,16)
+          : ''}"></div>
+      <button class="btn btn-sm btn-ghost" id="eoDueSave">기한 저장 · 안내</button>
+      <button class="btn btn-sm" id="eoFinalize" style="margin-left:auto;">${allDone
+        ? '전체 확정 완료 처리'
+        : `전체 확정 완료 처리 (미확인 ${total-confirmed}곳 강제 포함)`}</button>
+    </div>`;
+  } else if(['CONFIRMED','VOUCHERED'].includes(round.status)){
+    foot = `<div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+         padding:10px 12px; border-top:1px solid var(--surface3);">
+      <button class="btn btn-sm btn-ghost" id="eoReopen">원본 다시 올리기 (DRAFT로)</button>
+      <button class="btn btn-sm" id="eoVoucher" style="margin-left:auto;">${round.status === 'VOUCHERED'
+        ? '바우처 다시 생성' : '바우처 생성'}${vCount>1 ? ` (${vCount}개 파일)` : ''}</button>
+    </div>`;
+  }
+
+  return `<div style="border:1px solid var(--surface3); border-radius:6px;
+       overflow:hidden; margin-bottom:12px;">
+    <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+         padding:9px 12px; background:var(--surface2); border-bottom:1px solid var(--surface3);">
+      <span style="font-weight:600;">리테일러 확정 현황
+        <span class="${allDone ? '' : 'hint'}" style="margin-left:6px;">${confirmed} / ${total}개사</span></span>
+      <span class="hint" style="margin-left:auto;">확정 기한
+        <b>${due ? due.toLocaleString('ko-KR') : '미설정'}</b>
+        ${over ? '<span class="badge badge-ar" style="margin-left:6px;">기한 경과</span>' : ''}</span>
+    </div>
+    <div style="overflow-x:auto;"><table style="min-width:560px;"><thead><tr>
+      <th>리테일러</th><th style="text-align:right;">정산 합계</th>
+      <th style="text-align:center;">확정</th><th>확정 일시</th>
+    </tr></thead><tbody>${rows}</tbody></table></div>
+    ${sumParts.length ? `<div class="hint" style="padding:9px 12px;
+      border-top:1px solid var(--surface3);">${sumParts.join(' · ')}</div>` : ''}
+    ${foot}
+  </div>`;
+}
+
+/* 위 박스의 버튼을 묶는다 (P&D 의 pndBindConfirm 과 같은 역할) */
+function eoBindConfirm(round, type, claims, host){
+  const save = host.querySelector('#eoDueSave');
+  if(save) save.onclick = async () => {
+    const v = host.querySelector('#eoDue').value;
+    if(!v){ alert('기한을 선택해주세요.'); return; }
+    save.disabled = true;
+    const iso = new Date(v).toISOString();
+    const { data, error } = await sb.from('rounds')
+      .update({ confirm_due_at: iso }).eq('id', round.id).select('id');
+    if(error || !data?.length){
+      alert(error ? '저장 실패: ' + error.message : '저장되지 않았습니다 (0건).');
+      save.disabled = false; return;
+    }
+    if(confirm('기한을 저장했습니다. 리테일러에게 안내 메일을 발송 대기함에 넣을까요?')){
+      const ids = [...new Set((claims||[]).map(c => c.retailer_id))];
+      const { data: rr } = await sb.from('retailers').select('id, code, name, email').in('id', ids);
+      for(const rt of (rr||[])){
+        const to = splitEmails(rt.email).filter(e => !/placeholder@example\.com/i.test(e));
+        if(!to.length) continue;
+        await sendEmail(to, `[JLRK 정산] ${type.name} · ${round.period_label} 정산 확정 기한 안내`,
+          emailShell('정산 확정 기한 안내', `
+            <p>${rt.name} 담당자님,</p>
+            <p>${type.name} (${round.period_label}) 정산 내역에 대한 <b>확정 기한</b>을 안내드립니다.</p>
+            <table style="${EMAIL_STYLE}border-collapse:collapse;">
+              <tr><td style="padding:4px 12px 4px 0;color:#666;">확정 기한</td>
+                  <td><b style="color:#c0392b;">${new Date(iso).toLocaleString('ko-KR')}</b></td></tr>
+            </table>
+            <p style="margin-top:16px;">기한까지 포털에서 [정산 확정] 을 눌러주십시오.
+              <b>기한이 지나면 확정하신 것으로 보고 마감됩니다.</b></p>`),
+          { kind:'EO_DUE', retailer: rt.code, period: round.period_label });
+      }
+      alert('안내 메일을 발송 대기함에 넣었습니다. 메일 발송 대기함에서 보내주세요.');
+    }
+    await renderRoundDetail();
+  };
+
+  const fin = host.querySelector('#eoFinalize');
+  if(fin) fin.onclick = () => finalizeEngineOilRound(round, type);
+
+  const vb = host.querySelector('#eoVoucher');
+  if(vb) vb.onclick = () => generateEngineOilVouchers(round, type);
+
+  const re = host.querySelector('#eoReopen');
+  if(re) re.onclick = async () => {
+    if(!confirm('DRAFT로 되돌리면 이번 회차 기정산 기록이 삭제되고 리테일러 확정도 초기화됩니다. 계속할까요?')) return;
+    await sb.from('settled_records').delete().eq('round_id', round.id);
+    await sb.from('claims').delete().eq('round_id', round.id);
+    await sb.from('rounds').update({ status:'DRAFT', source_summary:null }).eq('id', round.id);
+    await renderRoundDetail();
+  };
+}
+
 async function renderEngineOilRoundDetail(round, type){
   const eo = eoPreset(type);
   document.getElementById('claimsTable').style.display = 'none';
@@ -2918,32 +3041,47 @@ async function renderEngineOilRoundDetail(round, type){
   const total = claims?.length || 0;
   document.getElementById('rd_progress').textContent = total ? `확정 ${confirmed} / ${total}` : '공지 전';
 
-  const actions = document.getElementById('rd_actions');
   ['rd_actions','reviewSection','invoiceSection','voucherSection'].forEach(id => {
     const el = document.getElementById(id); if(el) el.innerHTML = '';
   });
 
-  // 공지 뒤에도 원본을 다시 올려 정정할 수 있어야 한다.
+  // P&D 와 같은 구조로 간다. rd_actions(.action-row) 는 가로 한 줄짜리 flex 라
+  // 블록을 넣으면 나란히 찌그러진다 — 비워두고 reviewSection 에 세로로 쌓는다.
+  const host = document.getElementById('reviewSection');
+
+  // ① 리테일러 확정 현황 — 공지 뒤부터
+  if(round.status !== 'DRAFT'){
+    const panel = document.createElement('div');
+    panel.innerHTML = eoConfirmPanel(round, type, claims, confirmed, total);
+    host.appendChild(panel);
+    eoBindConfirm(round, type, claims || [], panel);
+  }
+
+  // ② 판매자별 · 건별 내역  ③ 원본 업로드 카드 (공지 뒤에는 접힘)
+  await renderEngineOilSection(round, type, claims);
+
+  // 인보이스 Date 와 공지 버튼은 '업로드' 에 딸린 것이니 그 카드 안에 둔다.
   // 바우처가 나간 뒤에는 열지 않는다.
   const canUpload = ['DRAFT','PUBLISHED'].includes(round.status);
   const isRepub = round.status === 'PUBLISHED';
   if(canUpload){
     const wrap = document.createElement('div');
+    wrap.style.marginTop = '14px';
     wrap.innerHTML = `
-      <div class="row2" style="max-width:420px;">
-        <div class="field"><label>${type?.requires_invoice
-          ? '세금계산서 발행일 (바우처 Invoice Date)' : '인보이스 Date (바우처)'}</label>
+      <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap;">
+        <div class="field" style="margin:0; max-width:230px;"><label>${type?.requires_invoice
+          ? '세금계산서 발행일' : '인보이스 Date (바우처)'}</label>
           <input type="date" id="eoIssueDate" value="${round.invoice_issue_date || new Date().toISOString().slice(0,10)}"></div>
+        <button class="btn" id="eoPublishBtn" disabled>${isRepub
+          ? '다시 계산해서 정정 공지' : '리테일러에 정산내역 공지'}</button>
       </div>
-      <button class="btn" id="eoPublishBtn" disabled>${isRepub
-        ? '다시 계산해서 정정 공지' : '리테일러에 정산내역 공지'}</button>
-      <div class="hint" style="margin-top:6px;">${isRepub
+      <div class="hint" style="margin-top:8px;">${isRepub
         ? '이미 공지된 회차입니다. 원본을 다시 올리면 새로 계산합니다. '
           + '<b>금액이 그대로인 리테일러의 확정은 유지</b>되고, 금액이 바뀐 곳에만 다시 통지합니다.'
         : '원본을 올려 미리보기가 나온 뒤 활성화됩니다.'}</div>`;
-    actions.appendChild(wrap);
-    document.getElementById('eoPublishBtn').addEventListener('click', () => publishEngineOilRound(round, type));
-    await renderEngineOilSection(round, type, claims);
+    (document.getElementById('eoUpBody') || host).appendChild(wrap);
+    wrap.querySelector('#eoPublishBtn')
+      .addEventListener('click', () => publishEngineOilRound(round, type));
     // 미리보기 계산이 끝나면 공지 버튼 활성화
     const needKey = eo.src === 'sales' ? 'sales' : (eo.src === 'sp' ? 'sp' : 'coupon');
     const obs = setInterval(() => {
@@ -2951,114 +3089,6 @@ async function renderEngineOilRoundDetail(round, type){
       if(!btn){ clearInterval(obs); return; }
       btn.disabled = !(window.__eo3v && window.__eo3v.round_id === round.id && window.__eo3v[needKey]);
     }, 800);
-    // ⚠ DRAFT 일 때만 여기서 끝낸다. 공지된 회차에서 return 하면 아래의
-    //   확정 현황·확정 기한·전체 확정 완료 처리·바우처가 통째로 안 그려진다.
-    if(round.status === 'DRAFT') return;
-  }
-
-  // PUBLISHED 이후 — 리테일러 확정 현황
-  const s = round.source_summary || {};
-  const card = document.createElement('div');
-  card.className = 'info-card';
-  const rows = (claims||[]).map(c => `
-    <tr><td>${c.retailers?.code||''} ${c.retailers?.name||''}</td>
-      <td style="text-align:right;">${fmtWon(c.approved_amount)}</td>
-      <td>${c.confirmed_at ? `<span class="badge badge-ap">확정 ${fmtDate(c.confirmed_at)}</span>` : '<span class="badge badge-off">확인 대기</span>'}</td>
-    </tr>`).join('');
-  const sumParts = [];
-  if(eo.comps.includes('saveback')) sumParts.push(`사용반환금 ${fmtWon(s.grand?.customer)}`);
-  if(eo.comps.includes('support'))  sumParts.push(`Retailer Support ${fmtWon((s.grand?.vme||0)+(s.grand?.castrol||0))}`);
-  if(eo.comps.includes('incentive')) sumParts.push(`Sales Incentive ${fmtWon(s.grand?.incentive)}`);
-  if(eo.comps.includes('salespayment')) sumParts.push(`판매대금 ${fmtWon((s.grand?.sp_jg||0)+(s.grand?.sp_lr||0))} (JG ${fmtWon(s.grand?.sp_jg)} / LR ${fmtWon(s.grand?.sp_lr)})`);
-  card.innerHTML = `
-    <div class="section-label" style="margin-top:0;">리테일러 확정 현황 (${confirmed}/${total})</div>
-    <table><thead><tr><th>리테일러</th><th style="text-align:right;">정산 합계</th><th>상태</th></tr></thead><tbody>${rows}</tbody></table>
-    <div class="hint" style="margin-top:8px;">${sumParts.join(' · ')}</div>`;
-  document.getElementById('reviewSection').appendChild(card);
-
-  const vCount = eo.comps.length;
-  // 확정·바우처는 '맨 위' 에 둔다. 아래쪽 voucherSection 에 있으면 안 보인다.
-  // actions 안에서도 업로드 카드보다 앞에 오게 맨 앞에 꽂는다.
-  const vs = document.createElement('div');
-  actions.insertBefore(vs, actions.firstChild);
-  if(round.status === 'PUBLISHED'){
-    // 확정 기한 — P&D 와 같은 방식. 기한이 있어야 리테일러 화면에
-    // 'OO까지 확정해 주십시오' 와 기한 경과 표시가 뜬다.
-    const dueAt = round.confirm_due_at ? new Date(round.confirm_due_at) : null;
-    const over = dueAt && dueAt < new Date();
-    const wrap = document.createElement('div');
-    wrap.className = 'info-card';
-    wrap.innerHTML = `
-      <div class="section-label" style="margin-top:0;">정산 확정 기한</div>
-      <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap;">
-        <div class="field" style="margin:0;"><label style="font-size:11px;">기한</label>
-          <input type="datetime-local" id="eoDue" value="${dueAt
-            ? new Date(dueAt.getTime() - new Date().getTimezoneOffset()*60000)
-                .toISOString().slice(0,16) : ''}"></div>
-        <button class="btn btn-sm btn-ghost" id="eoDueSave">기한 저장 · 안내</button>
-        <span class="hint" style="align-self:center;">
-          ${dueAt ? `현재 <b>${dueAt.toLocaleString('ko-KR')}</b>` : '아직 설정되지 않았습니다'}
-          ${over ? '<span class="badge badge-ar" style="margin-left:6px;">기한 경과</span>' : ''}
-          · 확정 ${confirmed} / ${total}</span>
-      </div>
-      <div class="hint" style="margin-top:8px;">기한이 지나도 시스템이 저절로 닫지는 않습니다.
-        기한 뒤에 아래 [전체 확정 완료 처리] 로 마감하시면 됩니다.</div>`;
-    vs.appendChild(wrap);
-    const ds = wrap.querySelector('#eoDueSave');
-    ds.addEventListener('click', async () => {
-      const v = wrap.querySelector('#eoDue').value;
-      if(!v){ alert('기한을 선택해주세요.'); return; }
-      ds.disabled = true;
-      const iso = new Date(v).toISOString();
-      const { data, error } = await sb.from('rounds')
-        .update({ confirm_due_at: iso }).eq('id', round.id).select('id');
-      if(error || !data?.length){
-        alert(error ? '저장 실패: ' + error.message : '저장되지 않았습니다 (0건).');
-        ds.disabled = false; return;
-      }
-      if(confirm('기한을 저장했습니다. 리테일러에게 안내 메일을 발송 대기함에 넣을까요?')){
-        const ids = [...new Set((claims||[]).map(c => c.retailer_id))];
-        const { data: rr } = await sb.from('retailers').select('id, code, name, email').in('id', ids);
-        for(const rt of (rr||[])){
-          const to = splitEmails(rt.email).filter(e => !/placeholder@example\.com/i.test(e));
-          if(!to.length) continue;
-          await sendEmail(to, `[JLRK 정산] ${type.name} · ${round.period_label} 정산 확정 기한 안내`,
-            emailShell('정산 확정 기한 안내', `
-              <p>${rt.name} 담당자님,</p>
-              <p>${type.name} (${round.period_label}) 정산 내역에 대한 <b>확정 기한</b>을 안내드립니다.</p>
-              <table style="${EMAIL_STYLE}border-collapse:collapse;">
-                <tr><td style="padding:4px 12px 4px 0;color:#666;">확정 기한</td>
-                    <td><b style="color:#c0392b;">${new Date(iso).toLocaleString('ko-KR')}</b></td></tr>
-              </table>
-              <p style="margin-top:16px;">기한까지 포털에서 [정산 확정] 을 눌러주십시오.
-                <b>기한이 지나면 확정하신 것으로 보고 마감됩니다.</b></p>`),
-            { kind:'EO_DUE', retailer: rt.code, period: round.period_label });
-        }
-        alert('안내 메일을 발송 대기함에 넣었습니다. 메일 발송 대기함에서 보내주세요.');
-      }
-      await renderRoundDetail();
-    });
-
-    const allDone = total > 0 && confirmed === total;
-    const b = document.createElement('button');
-    b.className = 'btn'; b.textContent = allDone ? '전체 확정 완료 처리' : `전체 확정 완료 처리 (미확인 ${total-confirmed}곳 강제 포함)`;
-    b.addEventListener('click', () => finalizeEngineOilRound(round, type));
-    vs.appendChild(b);
-  } else if(['CONFIRMED','VOUCHERED'].includes(round.status)){
-    const b = document.createElement('button');
-    b.className = 'btn'; b.textContent = (round.status === 'VOUCHERED' ? '바우처 다시 생성' : '바우처 생성') + (vCount>1?` (${vCount}개 파일)`:'');
-    b.addEventListener('click', () => generateEngineOilVouchers(round, type));
-    vs.appendChild(b);
-    const re = document.createElement('button');
-    re.className = 'btn btn-ghost'; re.style.marginLeft = '8px'; re.textContent = '원본 다시 올리기 (DRAFT로)';
-    re.addEventListener('click', async () => {
-      if(!confirm('DRAFT로 되돌리면 이번 회차 기정산 기록이 삭제되고 리테일러 확정도 초기화됩니다. 계속할까요?')) return;
-      await sb.from('settled_records').delete().eq('round_id', round.id);
-      await sb.from('claims').delete().eq('round_id', round.id);
-      await sb.from('rounds').update({ status:'DRAFT', source_summary:null }).eq('id', round.id);
-      await renderRoundDetail();
-    });
-    vs.appendChild(re);
   }
 }
 
