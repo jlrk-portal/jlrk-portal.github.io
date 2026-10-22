@@ -2351,9 +2351,35 @@ function eo3vFindHeader(rows, required){
   return null;
 }
 function eo3vNum(v){ return Number(String(v ?? '').replace(/,/g,'')) || 0; }
+/* 원본 셀을 사람이 읽는 문자열로. 날짜는 'YYYY-MM-DD HH:MM' 까지만 남긴다. */
+function _eoCell(row, idx){
+  if(idx === undefined) return '';
+  const v = row[idx];
+  if(v === null || v === undefined || v === '') return '';
+  if(v instanceof Date){
+    const p = n => String(n).padStart(2,'0');
+    return `${v.getFullYear()}-${p(v.getMonth()+1)}-${p(v.getDate())} ${p(v.getHours())}:${p(v.getMinutes())}`;
+  }
+  return String(v).trim();
+}
 
 // ── CouponClaim 원본 → 지점×브랜드 집계 (전송 & 미정산만) ──
-async function parseEngineOilCoupon(buf, type){
+/* 기정산 지문 — 중복청구 거르는 기준.
+   ⚠ 고치고 있는 회차의 기록은 빼야 한다. 안 빼면 같은 원본을 다시 올렸을 때
+      전 행이 '이미 정산됨' 으로 걸러져 0건이 되고, 이미 공지된 운영 회차의
+      금액이 통째로 날아간다. (2026-10-22)
+   round_id 가 비어 있는 과거 백필분은 반드시 남긴다 — neq 만 쓰면 NULL 행이
+   통째로 빠져 과거 이력과의 중복을 못 잡는다. */
+async function eoKnownHashes(type, roundId){
+  const rows = await sbAll(() => {
+    let q = sb.from('settled_records').select('dedup_hash').eq('type_id', type.id);
+    if(roundId) q = q.or(`round_id.is.null,round_id.neq.${roundId}`);
+    return q;
+  }, '기정산 이력');
+  return new Set(rows.map(r => r.dedup_hash));
+}
+
+async function parseEngineOilCoupon(buf, type, roundId){
   const P = eo3vParams(type);
   const wb = xsFixBook(XLSX.read(buf, { type:'array', cellDates:true }));
   const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header:1, defval:'' });
@@ -2366,16 +2392,12 @@ async function parseEngineOilCoupon(buf, type){
   const iRef = c['쿠폰사용 참조번호'], iSite = c['지점'] ?? c['지점명'];
 
   // 기정산 지문
-  const known = new Set();
-  for(let from=0;;from+=1000){
-    const { data, error } = await sb.from('settled_records')
-      .select('dedup_hash').eq('type_id', type.id).range(from, from+999);
-    if(error) throw new Error('기정산 이력 조회 실패: ' + error.message);
-    (data||[]).forEach(r => known.add(r.dedup_hash));
-    if(!data || data.length < 1000) break;
-  }
+  const known = await eoKnownHashes(type, roundId);
 
   const byWs = new Map();     // code → { jg:{n,customer,vme,castrol}, lr:{...} }
+  // 리테일러가 엑셀로 받을 때 '자기 것만' 원본 행이 들어가야 한다.
+  // 지금까지 집계만 하고 행을 버리고 있었다. (2026-10-22)
+  const lines = [];
   const blank = () => ({ n:0, customer:0, vme:0, castrol:0 });
   const targetHashes = [];
   let nTarget=0, nExcluded=0, nDup=0, nBadKey=0;
@@ -2408,8 +2430,20 @@ async function parseEngineOilCoupon(buf, type){
     a.castrol  += P.CASTROL_PER;
     a.vme      += total * (1 - P.CUSTOMER_RATE) - P.CASTROL_PER;
     nTarget++; targetHashes.push({ hash, code, keys:[vin, String(row[iRef] ?? ''), cpn], amount: total });
+    lines.push({
+      kind:'COUPON', workshop_code: code, site_name: site,
+      coupon_no: cpn, ref_no: String(row[iRef] ?? '').trim(),
+      claim_status: String(row[iStatus] ?? '').trim(),
+      used_at: _eoCell(row, c['사용일자']), sent_at: _eoCell(row, c['클레임전송일자']),
+      customer: _eoCell(row, c['고객명']), car_no: _eoCell(row, c['차량번호']), vin,
+      parts_amt: eo3vNum(row[c['부품금액']]), labour_amt: eo3vNum(row[c['공임금액']]),
+      total_amt: total,
+      saveback: Math.round(total * P.CUSTOMER_RATE),
+      castrol: P.CASTROL_PER,
+      vme: Math.round(total * (1 - P.CUSTOMER_RATE) - P.CASTROL_PER),
+    });
   }
-  return { byWs, targetHashes, nTarget, nExcluded, nDup, nBadKey, unmatched };
+  return { byWs, lines, targetHashes, nTarget, nExcluded, nDup, nBadKey, unmatched };
 }
 
 // ── 쿠폰북정산내역 원본 → 지점별 인센티브 (판매 − 환불) × 단가 ──
@@ -2428,7 +2462,7 @@ function eoPreset(type){
 const isEnginePreset = (type) => !!eoPreset(type);
 
 // ── 쿠폰북정산내역 원본 → 지점별 인센티브 (판매 − 환불) + dedup(차대번호+쿠폰북ID) ──
-async function parseEngineOilSales(buf, type){
+async function parseEngineOilSales(buf, type, roundId){
   const wb = xsFixBook(XLSX.read(buf, { type:'array', cellDates:true }));
   const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header:1, defval:'' });
   const hdr = eo3vFindHeader(rows, ['유형','지점명']);
@@ -2443,19 +2477,11 @@ async function parseEngineOilSales(buf, type){
   const iSnm  = hdr.map['판매자명'] ?? hdr.map['판매자'];
 
   // 기정산 지문 (type 있을 때만)
-  const known = new Set();
-  if(type?.id){
-    for(let from=0;;from+=1000){
-      const { data, error } = await sb.from('settled_records')
-        .select('dedup_hash').eq('type_id', type.id).range(from, from+999);
-      if(error) throw new Error('기정산 이력 조회 실패: ' + error.message);
-      (data||[]).forEach(r => known.add(r.dedup_hash));
-      if(!data || data.length < 1000) break;
-    }
-  }
+  const known = type?.id ? await eoKnownHashes(type, roundId) : new Set();
 
   const byWs = new Map();     // code → { sale, refund }
   const bySeller = new Map(); // code|sid|name → { code, site, sid, name, sale, refund }
+  const bookLines = [];
   const unmatched = new Map();
   const targetHashes = [];
   const seen = new Set();
@@ -2492,19 +2518,28 @@ async function parseEngineOilSales(buf, type){
     let sg = bySeller.get(sk);
     if(!sg){ sg = { code, site, sid, name: snm, sale:0, refund:0 }; bySeller.set(sk, sg); }
     if(t === '판매') sg.sale++; else sg.refund++;
+    bookLines.push({
+      kind:'BOOK', workshop_code: code, site_name: site,
+      book_id: cb, book_type: t, vin,
+      car_no: _eoCell(row, hdr.map['차량번호']), customer: _eoCell(row, hdr.map['고객명']),
+      product: _eoCell(row, hdr.map['상품명']), base_ym: _eoCell(row, hdr.map['기준월']),
+      seller_id: sid, seller_name: snm,
+      used_at: _eoCell(row, hdr.map['발급/환불일시']),
+      total_amt: iPrice !== undefined ? (Number(String(row[iPrice]).replace(/,/g,'')) || 0) : 0,
+    });
     if(hash){
       const amt = iPrice !== undefined ? (Number(String(row[iPrice]).replace(/,/g,'')) || 0) : 0;
       targetHashes.push({ hash, code, keys:[vin, cb, t], amount: amt });
     }
   }
-  return { byWs, bySeller: [...bySeller.values()], unmatched, targetHashes,
+  return { byWs, bySeller: [...bySeller.values()], lines: bookLines, unmatched, targetHashes,
            nDup, nAlready, nTarget: targetHashes.length };
 }
 
 // ── 쿠폰북정산내역 원본 → 지점별 판매대금 (AR: 리테일러 → JLRK 입금) ──
 //   Σ 가격(VAT) over 유형 ∈ {판매, 환불, 반품} (환불/반품 음수, 반품은 원본에 이미 안분됨)
 //   브랜드 = 차대번호 3번째 자리 = 'L' → LR, 아니면 JG
-async function parseEngineOilSalesPayment(buf, type){
+async function parseEngineOilSalesPayment(buf, type, roundId){
   const wb = xsFixBook(XLSX.read(buf, { type:'array', cellDates:true }));
   const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header:1, defval:'' });
   const hdr = eo3vFindHeader(rows, ['유형','지점명','차대번호']);
@@ -2514,16 +2549,7 @@ async function parseEngineOilSalesPayment(buf, type){
   const iPrice = hdr.map['가격 (VAT)'] ?? hdr.map['가격(VAT)'] ?? hdr.map['가격'];
   if(iPrice === undefined) throw new Error("가격 (VAT) 컬럼을 찾지 못했습니다.");
 
-  const known = new Set();
-  if(type?.id){
-    for(let from=0;;from+=1000){
-      const { data, error } = await sb.from('settled_records')
-        .select('dedup_hash').eq('type_id', type.id).range(from, from+999);
-      if(error) throw new Error('기정산 이력 조회 실패: ' + error.message);
-      (data||[]).forEach(r => known.add(r.dedup_hash));
-      if(!data || data.length < 1000) break;
-    }
-  }
+  const known = type?.id ? await eoKnownHashes(type, roundId) : new Set();
 
   const byWs = new Map();   // code → { jg, lr, n }
   const unmatched = new Map();
@@ -2569,20 +2595,36 @@ async function renderEngineOilSection(round, type, claims){
     box.className = 'info-card';
     box.style.marginTop = '12px';
     const drawSel = async () => {
-      const rows = await loadSellerRows(round.id, null);
-      box.innerHTML = '<div class="section-label" style="margin-top:0;">판매자별 내역 · 수정 요청</div>'
-                    + sellerTableAdmin(rows);
-      bindSellerDecide(box, rows, drawSel);
+      const lines = await loadIncentiveLines(round.id, null);
+      const groups = groupBySeller(lines, eo3vParams(type).INCENTIVE_UNIT);
+      const nReq = lines.filter(L => L.req_status === 'REQUESTED').length;
+      // 제목은 sellerBlocksHtml 이 건수·금액과 함께 넣는다 (여기서 또 넣으면 두 번 찍힘)
+      box.innerHTML = (nReq ? `<div class="info-card" style="margin-bottom:10px; border-color:#e0b050;
+             background:#fff8ec;"><b>판매자 수정 요청 ${nReq}건</b>
+             <div class="hint" style="margin-top:4px;">승인하면 그 건의 판매자가 바뀌고
+               판매자별 건수가 따라 움직입니다. 금액 총액은 바뀌지 않습니다.</div></div>` : '')
+        + sellerBlocksHtml(groups, eo3vParams(type).INCENTIVE_UNIT, false, true);
+      bindSellerBlocks(box, groups, {
+        byId: new Map(lines.map(L => [String(L.id), L])), refresh: drawSel });
     };
-    drawSel().then(() => host.appendChild(box));
+    drawSel().then(() => host.insertBefore(box, card));
   }
   const card = document.createElement('div');
   card.className = 'info-card';
   const wantCoupon = eo.src === 'coupon' || eo.src === 'both';
   const wantSales  = eo.src === 'sales'  || eo.src === 'both';
   const wantSp     = eo.src === 'sp';
+  // 공지된 뒤에는 접어둔다 — 다시 계산할 일이 없으면 펼칠 이유가 없다
+  const upOpen = round.status === 'DRAFT';
   card.innerHTML = `
-    <div class="section-label" style="margin-top:0;">원본 업로드 — ${eo.label} (시스템 산출)</div>
+    <div class="section-label" style="margin-top:0; cursor:pointer; display:flex;
+         align-items:center; gap:8px;" id="eoUpToggle">
+      <span id="eoUpCaret" style="color:var(--muted,#7a8699);">${upOpen ? '－' : '＋'}</span>
+      <span>원본 업로드 — ${eo.label} (시스템 산출)</span>
+      ${upOpen ? '' : '<span class="hint" style="margin:0; text-transform:none;'
+        + ' letter-spacing:0; font-weight:400;">다시 계산하려면 펼치세요</span>'}
+    </div>
+    <div id="eoUpBody" style="display:${upOpen ? 'block' : 'none'};">
     <div class="hint">
       리테일러 입력이 없는 유형입니다. 관리자가 원본을 올리면 시스템이 자동 계산합니다.<br>
       ${wantCoupon ? '쿠폰 클레임: <b>클레임상태=전송</b> AND 아직 정산되지 않은 건만. 중복키: 차대번호+참조번호+쿠폰번호.<br>' : ''}
@@ -2595,8 +2637,20 @@ async function renderEngineOilSection(round, type, claims){
       ${(wantSales || wantSp) ? `<div class="field"><label>쿠폰북 정산내역 원본</label>
         <input type="file" id="eoSales" accept=".xlsx,.xls"></div>` : ''}
     </div>
-    <div id="eoResult"></div>`;
+    <div id="eoResult"></div>
+    </div>`;
   host.appendChild(card);
+
+  // 머리말을 눌러 펼치고 접는다
+  const upT = card.querySelector('#eoUpToggle');
+  if(upT) upT.addEventListener('click', () => {
+    const body = card.querySelector('#eoUpBody');
+    const caret = card.querySelector('#eoUpCaret');
+    if(!body) return;
+    const open = body.style.display !== 'none';
+    body.style.display = open ? 'none' : 'block';
+    if(caret) caret.textContent = open ? '＋' : '－';
+  });
 
   const run = async () => {
     const cf = wantCoupon ? document.getElementById('eoCoupon')?.files[0] : null;
@@ -2606,9 +2660,10 @@ async function renderEngineOilSection(round, type, claims){
     const out = document.getElementById('eoResult');
     out.innerHTML = '<div class="hint">분석 중...</div>';
     try{
-      const coupon = cf ? await parseEngineOilCoupon(await cf.arrayBuffer(), type) : null;
-      const sales  = (sf && wantSales) ? await parseEngineOilSales(await sf.arrayBuffer(), type) : null;
-      const sp     = (sf && wantSp)    ? await parseEngineOilSalesPayment(await sf.arrayBuffer(), type) : null;
+      // 회차를 같이 넘긴다 — 이 회차 자기 기록을 '기정산' 으로 보면 안 된다
+      const coupon = cf ? await parseEngineOilCoupon(await cf.arrayBuffer(), type, round.id) : null;
+      const sales  = (sf && wantSales) ? await parseEngineOilSales(await sf.arrayBuffer(), type, round.id) : null;
+      const sp     = (sf && wantSp)    ? await parseEngineOilSalesPayment(await sf.arrayBuffer(), type, round.id) : null;
       window.__eo3v = { coupon, sales, sp, round_id: round.id, preset: eo.key };
       out.innerHTML = renderEngineOilPreview(coupon, sales, type, sp);
     } catch(err){
@@ -2837,6 +2892,134 @@ function eo3vBuildBreakdown(coupon, sales, allWs, type, sp){
   return { retailers, grand, settle, unmatched };
 }
 
+/* 리테일러 확정 현황 — P&D(pndConfirmPanel) 와 같은 한 덩어리 박스.
+   머리 띠 · 표 · 금액 요약 · 아래 띠 순서를 그대로 쓴다. */
+function eoConfirmPanel(round, type, claims, confirmed, total){
+  const eo = eoPreset(type);
+  const s = round.source_summary || {};
+  const due = round.confirm_due_at ? new Date(round.confirm_due_at) : null;
+  const over = due && due < new Date();
+  const allDone = total > 0 && confirmed === total;
+  const vCount = eo.comps.length;
+
+  const sumParts = [];
+  // 청구 합계가 정답이다. source_summary.grand 는 비어 있는 회차가 있다.
+  const claimSum = (claims||[]).reduce((a,c) => a + Number(c.approved_amount || 0), 0);
+  sumParts.push(`정산 합계 <b>${fmtWon(claimSum)}</b>`);
+  if(eo.comps.includes('saveback'))     sumParts.push(`사용반환금 <b>${fmtWon(s.grand?.customer)}</b>`);
+  if(eo.comps.includes('support'))      sumParts.push(`Retailer Support <b>${fmtWon((s.grand?.vme||0)+(s.grand?.castrol||0))}</b>`);
+  if(eo.comps.includes('incentive'))    sumParts.push(`Sales Incentive <b>${fmtWon(s.grand?.incentive)}</b>`);
+  if(eo.comps.includes('salespayment')) sumParts.push(`판매대금 <b>${fmtWon((s.grand?.sp_jg||0)+(s.grand?.sp_lr||0))}</b> (JG ${fmtWon(s.grand?.sp_jg)} / LR ${fmtWon(s.grand?.sp_lr)})`);
+  // grand 가 비어 0원만 늘어놓는 일이 없게 — 값이 있는 것만 남긴다
+  const sumShow = sumParts.filter((p,i) => i === 0 || !/>0원</.test(p));
+
+  const rows = (claims||[]).slice().sort((a,b) =>
+      ((a.retailers?.code||'')+(a.retailers?.name||''))
+        .localeCompare((b.retailers?.code||'')+(b.retailers?.name||'')))
+    .map(c => `<tr>
+      <td>${c.retailers?.code||''} ${c.retailers?.name||''}</td>
+      <td style="text-align:right;">${fmtWon(c.approved_amount)}</td>
+      <td style="text-align:center;">${c.confirmed_at
+        ? '<span class="badge badge-ap">확정</span>'
+        : '<span class="badge badge-warn">대기</span>'}</td>
+      <td class="muted">${c.confirmed_at ? new Date(c.confirmed_at).toLocaleString('ko-KR') : '—'}</td>
+    </tr>`).join('');
+
+  let foot = '';
+  if(round.status === 'PUBLISHED'){
+    foot = `<div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;
+         padding:10px 12px; border-top:1px solid var(--surface3);">
+      <div class="field" style="margin:0;"><label style="font-size:11px;">정산 확정 기한</label>
+        <input type="datetime-local" id="eoDue" value="${due
+          ? new Date(due.getTime() - new Date().getTimezoneOffset()*60000).toISOString().slice(0,16)
+          : ''}"></div>
+      <button class="btn btn-sm btn-ghost" id="eoDueSave">기한 저장 · 안내</button>
+      <button class="btn btn-sm" id="eoFinalize" style="margin-left:auto;">${allDone
+        ? '전체 확정 완료 처리'
+        : `전체 확정 완료 처리 (미확인 ${total-confirmed}곳 강제 포함)`}</button>
+    </div>`;
+  } else if(['CONFIRMED','VOUCHERED'].includes(round.status)){
+    foot = `<div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+         padding:10px 12px; border-top:1px solid var(--surface3);">
+      <button class="btn btn-sm btn-ghost" id="eoReopen">원본 다시 올리기 (DRAFT로)</button>
+      <button class="btn btn-sm" id="eoVoucher" style="margin-left:auto;">${round.status === 'VOUCHERED'
+        ? '바우처 다시 생성' : '바우처 생성'}${vCount>1 ? ` (${vCount}개 파일)` : ''}</button>
+    </div>`;
+  }
+
+  return `<div style="border:1px solid var(--surface3); border-radius:6px;
+       overflow:hidden; margin-bottom:12px;">
+    <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+         padding:9px 12px; background:var(--surface2); border-bottom:1px solid var(--surface3);">
+      <span style="font-weight:600;">리테일러 확정 현황
+        <span class="${allDone ? '' : 'hint'}" style="margin-left:6px;">${confirmed} / ${total}개사</span></span>
+      <span class="hint" style="margin-left:auto;">확정 기한
+        <b>${due ? due.toLocaleString('ko-KR') : '미설정'}</b>
+        ${over ? '<span class="badge badge-ar" style="margin-left:6px;">기한 경과</span>' : ''}</span>
+    </div>
+    <div style="overflow-x:auto;"><table style="min-width:560px;"><thead><tr>
+      <th>리테일러</th><th style="text-align:right;">정산 합계</th>
+      <th style="text-align:center;">확정</th><th>확정 일시</th>
+    </tr></thead><tbody>${rows}</tbody></table></div>
+    ${sumShow.length ? `<div class="hint" style="padding:9px 12px;
+      border-top:1px solid var(--surface3);">${sumShow.join(' · ')}</div>` : ''}
+    ${foot}
+  </div>`;
+}
+
+/* 위 박스의 버튼을 묶는다 (P&D 의 pndBindConfirm 과 같은 역할) */
+function eoBindConfirm(round, type, claims, host){
+  const save = host.querySelector('#eoDueSave');
+  if(save) save.onclick = async () => {
+    const v = host.querySelector('#eoDue').value;
+    if(!v){ alert('기한을 선택해주세요.'); return; }
+    save.disabled = true;
+    const iso = new Date(v).toISOString();
+    const { data, error } = await sb.from('rounds')
+      .update({ confirm_due_at: iso }).eq('id', round.id).select('id');
+    if(error || !data?.length){
+      alert(error ? '저장 실패: ' + error.message : '저장되지 않았습니다 (0건).');
+      save.disabled = false; return;
+    }
+    if(confirm('기한을 저장했습니다. 리테일러에게 안내 메일을 발송 대기함에 넣을까요?')){
+      const ids = [...new Set((claims||[]).map(c => c.retailer_id))];
+      const { data: rr } = await sb.from('retailers').select('id, code, name, email').in('id', ids);
+      for(const rt of (rr||[])){
+        const to = splitEmails(rt.email).filter(e => !/placeholder@example\.com/i.test(e));
+        if(!to.length) continue;
+        await sendEmail(to, `[JLRK 정산] ${type.name} · ${round.period_label} 정산 확정 기한 안내`,
+          emailShell('정산 확정 기한 안내', `
+            <p>${rt.name} 담당자님,</p>
+            <p>${type.name} (${round.period_label}) 정산 내역에 대한 <b>확정 기한</b>을 안내드립니다.</p>
+            <table style="${EMAIL_STYLE}border-collapse:collapse;">
+              <tr><td style="padding:4px 12px 4px 0;color:#666;">확정 기한</td>
+                  <td><b style="color:#c0392b;">${new Date(iso).toLocaleString('ko-KR')}</b></td></tr>
+            </table>
+            <p style="margin-top:16px;">기한까지 포털에서 [정산 확정] 을 눌러주십시오.
+              <b>기한이 지나면 확정하신 것으로 보고 마감됩니다.</b></p>`),
+          { kind:'EO_DUE', retailer: rt.code, period: round.period_label });
+      }
+      alert('안내 메일을 발송 대기함에 넣었습니다. 메일 발송 대기함에서 보내주세요.');
+    }
+    await renderRoundDetail();
+  };
+
+  const fin = host.querySelector('#eoFinalize');
+  if(fin) fin.onclick = () => finalizeEngineOilRound(round, type);
+
+  const vb = host.querySelector('#eoVoucher');
+  if(vb) vb.onclick = () => generateEngineOilVouchers(round, type);
+
+  const re = host.querySelector('#eoReopen');
+  if(re) re.onclick = async () => {
+    if(!confirm('DRAFT로 되돌리면 이번 회차 기정산 기록이 삭제되고 리테일러 확정도 초기화됩니다. 계속할까요?')) return;
+    await sb.from('settled_records').delete().eq('round_id', round.id);
+    await sb.from('claims').delete().eq('round_id', round.id);
+    await sb.from('rounds').update({ status:'DRAFT', source_summary:null }).eq('id', round.id);
+    await renderRoundDetail();
+  };
+}
+
 async function renderEngineOilRoundDetail(round, type){
   const eo = eoPreset(type);
   document.getElementById('claimsTable').style.display = 'none';
@@ -2854,24 +3037,47 @@ async function renderEngineOilRoundDetail(round, type){
   const total = claims?.length || 0;
   document.getElementById('rd_progress').textContent = total ? `확정 ${confirmed} / ${total}` : '공지 전';
 
-  const actions = document.getElementById('rd_actions');
   ['rd_actions','reviewSection','invoiceSection','voucherSection'].forEach(id => {
     const el = document.getElementById(id); if(el) el.innerHTML = '';
   });
 
-  if(round.status === 'DRAFT'){
+  // P&D 와 같은 구조로 간다. rd_actions(.action-row) 는 가로 한 줄짜리 flex 라
+  // 블록을 넣으면 나란히 찌그러진다 — 비워두고 reviewSection 에 세로로 쌓는다.
+  const host = document.getElementById('reviewSection');
+
+  // ① 리테일러 확정 현황 — 공지 뒤부터
+  if(round.status !== 'DRAFT'){
+    const panel = document.createElement('div');
+    panel.innerHTML = eoConfirmPanel(round, type, claims, confirmed, total);
+    host.appendChild(panel);
+    eoBindConfirm(round, type, claims || [], panel);
+  }
+
+  // ② 판매자별 · 건별 내역  ③ 원본 업로드 카드 (공지 뒤에는 접힘)
+  await renderEngineOilSection(round, type, claims);
+
+  // 인보이스 Date 와 공지 버튼은 '업로드' 에 딸린 것이니 그 카드 안에 둔다.
+  // 바우처가 나간 뒤에는 열지 않는다.
+  const canUpload = ['DRAFT','PUBLISHED'].includes(round.status);
+  const isRepub = round.status === 'PUBLISHED';
+  if(canUpload){
     const wrap = document.createElement('div');
+    wrap.style.marginTop = '14px';
     wrap.innerHTML = `
-      <div class="row2" style="max-width:420px;">
-        <div class="field"><label>${type?.requires_invoice
-          ? '세금계산서 발행일 (바우처 Invoice Date)' : '인보이스 Date (바우처)'}</label>
+      <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap;">
+        <div class="field" style="margin:0; max-width:230px;"><label>${type?.requires_invoice
+          ? '세금계산서 발행일' : '인보이스 Date (바우처)'}</label>
           <input type="date" id="eoIssueDate" value="${round.invoice_issue_date || new Date().toISOString().slice(0,10)}"></div>
+        <button class="btn" id="eoPublishBtn" disabled>${isRepub
+          ? '다시 계산해서 정정 공지' : '리테일러에 정산내역 공지'}</button>
       </div>
-      <button class="btn" id="eoPublishBtn" disabled>리테일러에 정산내역 공지</button>
-      <div class="hint" style="margin-top:6px;">원본 2개를 올려 미리보기가 나온 뒤 활성화됩니다.</div>`;
-    actions.appendChild(wrap);
-    document.getElementById('eoPublishBtn').addEventListener('click', () => publishEngineOilRound(round, type));
-    await renderEngineOilSection(round, type, claims);
+      <div class="hint" style="margin-top:8px;">${isRepub
+        ? '이미 공지된 회차입니다. 원본을 다시 올리면 새로 계산합니다. '
+          + '<b>금액이 그대로인 리테일러의 확정은 유지</b>되고, 금액이 바뀐 곳에만 다시 통지합니다.'
+        : '원본을 올려 미리보기가 나온 뒤 활성화됩니다.'}</div>`;
+    (document.getElementById('eoUpBody') || host).appendChild(wrap);
+    wrap.querySelector('#eoPublishBtn')
+      .addEventListener('click', () => publishEngineOilRound(round, type));
     // 미리보기 계산이 끝나면 공지 버튼 활성화
     const needKey = eo.src === 'sales' ? 'sales' : (eo.src === 'sp' ? 'sp' : 'coupon');
     const obs = setInterval(() => {
@@ -2879,52 +3085,6 @@ async function renderEngineOilRoundDetail(round, type){
       if(!btn){ clearInterval(obs); return; }
       btn.disabled = !(window.__eo3v && window.__eo3v.round_id === round.id && window.__eo3v[needKey]);
     }, 800);
-    return;
-  }
-
-  // PUBLISHED 이후 — 리테일러 확정 현황
-  const s = round.source_summary || {};
-  const card = document.createElement('div');
-  card.className = 'info-card';
-  const rows = (claims||[]).map(c => `
-    <tr><td>${c.retailers?.code||''} ${c.retailers?.name||''}</td>
-      <td style="text-align:right;">${fmtWon(c.approved_amount)}</td>
-      <td>${c.confirmed_at ? `<span class="badge badge-ap">확정 ${fmtDate(c.confirmed_at)}</span>` : '<span class="badge badge-off">확인 대기</span>'}</td>
-    </tr>`).join('');
-  const sumParts = [];
-  if(eo.comps.includes('saveback')) sumParts.push(`사용반환금 ${fmtWon(s.grand?.customer)}`);
-  if(eo.comps.includes('support'))  sumParts.push(`Retailer Support ${fmtWon((s.grand?.vme||0)+(s.grand?.castrol||0))}`);
-  if(eo.comps.includes('incentive')) sumParts.push(`Sales Incentive ${fmtWon(s.grand?.incentive)}`);
-  if(eo.comps.includes('salespayment')) sumParts.push(`판매대금 ${fmtWon((s.grand?.sp_jg||0)+(s.grand?.sp_lr||0))} (JG ${fmtWon(s.grand?.sp_jg)} / LR ${fmtWon(s.grand?.sp_lr)})`);
-  card.innerHTML = `
-    <div class="section-label" style="margin-top:0;">리테일러 확정 현황 (${confirmed}/${total})</div>
-    <table><thead><tr><th>리테일러</th><th style="text-align:right;">정산 합계</th><th>상태</th></tr></thead><tbody>${rows}</tbody></table>
-    <div class="hint" style="margin-top:8px;">${sumParts.join(' · ')}</div>`;
-  document.getElementById('reviewSection').appendChild(card);
-
-  const vCount = eo.comps.length;
-  const vs = document.getElementById('voucherSection');
-  if(round.status === 'PUBLISHED'){
-    const allDone = total > 0 && confirmed === total;
-    const b = document.createElement('button');
-    b.className = 'btn'; b.textContent = allDone ? '전체 확정 완료 처리' : `전체 확정 완료 처리 (미확인 ${total-confirmed}곳 강제 포함)`;
-    b.addEventListener('click', () => finalizeEngineOilRound(round, type));
-    vs.appendChild(b);
-  } else if(['CONFIRMED','VOUCHERED'].includes(round.status)){
-    const b = document.createElement('button');
-    b.className = 'btn'; b.textContent = (round.status === 'VOUCHERED' ? '바우처 다시 생성' : '바우처 생성') + (vCount>1?` (${vCount}개 파일)`:'');
-    b.addEventListener('click', () => generateEngineOilVouchers(round, type));
-    vs.appendChild(b);
-    const re = document.createElement('button');
-    re.className = 'btn btn-ghost'; re.style.marginLeft = '8px'; re.textContent = '원본 다시 올리기 (DRAFT로)';
-    re.addEventListener('click', async () => {
-      if(!confirm('DRAFT로 되돌리면 이번 회차 기정산 기록이 삭제되고 리테일러 확정도 초기화됩니다. 계속할까요?')) return;
-      await sb.from('settled_records').delete().eq('round_id', round.id);
-      await sb.from('claims').delete().eq('round_id', round.id);
-      await sb.from('rounds').update({ status:'DRAFT', source_summary:null }).eq('id', round.id);
-      await renderRoundDetail();
-    });
-    vs.appendChild(re);
   }
 }
 
@@ -3003,6 +3163,23 @@ async function publishEngineOilRound(round, type){
       }
     }
 
+    // 원본 행 — 리테일러 엑셀에 '자기 것만' 들어간다
+    const rawLines = [...(eo.coupon?.lines || []), ...(eo.sales?.lines || [])];
+    if(rawLines.length){
+      const wsByCode2 = new Map((allWs||[]).map(w => [w.code, w]));
+      await sb.from('engineoil_lines').delete().eq('round_id', round.id);
+      const payload = rawLines.map(L => {
+        const w = wsByCode2.get(L.workshop_code);
+        return { ...L, round_id: round.id,
+                 retailer_id: w?.retailer_id || null,
+                 retailer_code: w?.retailers?.code || '' };
+      });
+      for(let i = 0; i < payload.length; i += 500){
+        const { error: lErr } = await sb.from('engineoil_lines').insert(payload.slice(i, i+500));
+        if(lErr) throw new Error('원본 행 저장 실패: ' + lErr.message);
+      }
+    }
+
     const cSrc = eo.coupon || eo.sales || eo.sp;
     const summary = {
       preset: type.source_config?.preset || 'ENGINE_OIL_3V', computed_at: new Date().toISOString(),
@@ -3061,10 +3238,20 @@ async function finalizeEngineOilRound(round, type){
 }
 
 /* ---------- 리테일러 화면: Engine Oil 정산내역 확인 카드 (프리셋별 컬럼) ---------- */
+/* 지점 한 줄의 '건수'. 쿠폰(사용반환금)은 jg+lr, 인센티브는 incentive.count.
+   ⚠ 키 이름이 count 다. 예전에 n 으로 읽어 전부 0 으로 보였다. (2026-10-22) */
+function eoRowCount(w, isCoupon){
+  if(isCoupon) return (w.jg?.count ?? w.jg?.n ?? 0) + (w.lr?.count ?? w.lr?.n ?? 0);
+  return w.incentive?.count ?? 0;
+}
+
 async function renderEngineOilRetailerCard(listEl, round, items){
   const c = items[0];
   const d = c.detail || {};
   const uidSel = 'sel' + String(c.id).slice(0, 8);
+  // 확정 기한 — 있으면 머리말에 띄우고, 지났으면 표시한다 (P&D 와 같은 규칙)
+  const eoDue = round.confirm_due_at ? new Date(round.confirm_due_at) : null;
+  const eoOver = eoDue && eoDue < new Date();
   const won = (n) => fmtWon(Math.round(n||0));
   const canConfirm = round.status === 'PUBLISHED' && !c.confirmed_at;
   const eo = eoPreset(round.settlement_types) || { comps:['saveback','support','incentive'] };
@@ -3088,7 +3275,8 @@ async function renderEngineOilRetailerCard(listEl, round, items){
     const spj  = w.sp?.jg||0, spl = w.sp?.lr||0;
     const rowTot = (sRS?(cust+vme+cast):0) + (sSI?inc:0) + (sSP?(spj+spl):0);
     // 리테일러는 재규어 몇 건 / 랜드로버 몇 건으로 나눠 볼 이유가 없다. 합쳐서 보여준다.
-    const cnt = (w.jg?.n||0) + (w.lr?.n||0);
+    // ⚠ 키는 count 다 (n 아님). 쿠폰 유형은 jg+lr, 인센티브 유형은 incentive.count.
+    const cnt = eoRowCount(w, sRS);
     const tds = [`<td>${w.code}</td>`, `<td style="text-align:right;">${cnt.toLocaleString('ko-KR')}건</td>`];
     if(sRS) tds.push(`<td style="text-align:right;">${won(cust)}</td>`,`<td style="text-align:right;">${won(vme+cast)}</td>`);
     if(sSI) tds.push(`<td style="text-align:right;">${won(inc)}</td>`);
@@ -3098,7 +3286,7 @@ async function renderEngineOilRetailerCard(listEl, round, items){
   }).join('');
 
   const grandTot = (sRS?((d.customer||0)+(d.vme||0)+(d.castrol||0)):0) + (sSI?(d.incentive||0):0) + (sSP?((d.sp_jg||0)+(d.sp_lr||0)):0);
-  const nTot = (d.workshops||[]).reduce((a,w) => a + (w.jg?.n||0) + (w.lr?.n||0), 0);
+  const nTot = (d.workshops||[]).reduce((a,w) => a + eoRowCount(w, sRS), 0);
   const tf = ['<td>합계</td>', `<td style="text-align:right;">${nTot.toLocaleString('ko-KR')}건</td>`];
   if(sRS) tf.push(`<td style="text-align:right;">${won(d.customer)}</td>`,`<td style="text-align:right;">${won((d.vme||0)+(d.castrol||0))}</td>`);
   if(sSI) tf.push(`<td style="text-align:right;">${won(d.incentive)}</td>`);
@@ -3106,41 +3294,97 @@ async function renderEngineOilRetailerCard(listEl, round, items){
   tf.push(`<td style="text-align:right;color:var(--accent-ap);">${won(grandTot)}</td>`);
 
   card.innerHTML = `
-    <div class="claim-head">
+    <div class="claim-head" style="cursor:pointer;" data-eo-toggle="${uidSel}">
       <div>
-        <div class="claim-name">${round.settlement_types?.name||''} · ${round.period_label}</div>
-        <div class="claim-sub">JLR Korea 산출 정산 · 확인만 하시면 됩니다
+        <div class="claim-name">
+          <span style="display:inline-block; width:18px; color:var(--muted,#7a8699);" id="${uidSel}-caret">＋</span>
+          ${round.settlement_types?.name||''} · ${round.period_label}</div>
+        <div class="claim-sub" style="margin-left:18px;">JLR Korea 산출 정산 · 확인만 하시면 됩니다
           · <span class="badge ${round.status==='PUBLISHED'?'badge-ap':'badge-off'}">${ROUND_STATUS_LABEL[round.status]||round.status}</span></div>
-        <div class="claim-sub" style="margin-top:4px;">
-          <b>${nTot.toLocaleString('ko-KR')}건 · ${won(grandTot)}</b>
-          ${round.invoice_issue_date ? ` · 인보이스 Date ${round.invoice_issue_date}` : ''}</div>
+        <div class="claim-sub" style="margin-top:4px; margin-left:18px;">
+          ${nTot.toLocaleString('ko-KR')}건${round.invoice_issue_date
+            ? ` · ${round.settlement_types?.requires_invoice ? '세금계산서' : '바우처'} 발행일 ${round.invoice_issue_date}` : ''}
+          ${eoDue ? ` · 확정 기한 <b>${eoDue.toLocaleString('ko-KR')}</b>${
+            eoOver ? '<span class="badge badge-ar" style="margin-left:4px;">기한 경과</span>' : ''}` : ''}</div>
       </div>
       ${c.confirmed_at ? '<span class="badge badge-ap">확정완료</span>' : '<span class="badge badge-off">확인 대기</span>'}
     </div>
-    <div style="overflow-x:auto;"><table style="margin-top:10px;">
-      <thead><tr>${th.join('')}</tr></thead>
-      <tbody>${wsRows}</tbody>
-      <tfoot><tr style="font-weight:600;">${tf.join('')}</tr></tfoot>
-    </table></div>
-    <div id="${uidSel}"></div>
-    <div style="margin-top:10px;">
-      <button class="btn btn-sm btn-ghost eo-xls-btn">엑셀 다운로드</button>
+    <div class="eo-bar" style="display:flex; align-items:center; gap:18px; flex-wrap:wrap; margin:10px 0 0;
+                padding:10px 12px; background:var(--surface2); border-radius:6px;">
+      <div><div class="hint">대상 건수</div>
+        <div style="font-weight:600;">${nTot.toLocaleString('ko-KR')}건</div></div>
+      ${sRS ? `<div><div class="hint">사용반환금</div>
+        <div style="font-weight:600;">${won(d.customer)}</div></div>
+      <div><div class="hint">Retailer Support</div>
+        <div style="font-weight:600;">${won((d.vme||0)+(d.castrol||0))}</div></div>` : ''}
+      ${sSI ? `<div><div class="hint">Sales Incentive</div>
+        <div style="font-weight:600;">${won(d.incentive)}</div></div>` : ''}
+      ${sSP ? `<div><div class="hint">판매대금</div>
+        <div style="font-weight:600;">${won((d.sp_jg||0)+(d.sp_lr||0))}</div></div>` : ''}
+      <div><div class="hint">정산 금액</div>
+        <div style="font-weight:700; font-size:16px; color:var(--accent);">${won(grandTot)}</div></div>
+      <div style="margin-left:auto; display:flex; gap:8px;">
+        <button class="btn btn-sm btn-ghost eo-xls-btn">엑셀 다운로드</button>
+        ${canConfirm ? '<button class="btn btn-sm eo-confirm-btn">정산 확정</button>' : ''}
+      </div>
+    </div>
+    <div id="${uidSel}-body" style="display:none;">
+      ${eoDue && !c.confirmed_at ? `<div class="hint" style="margin:10px 0 0; padding:8px 10px;
+          background:${eoOver ? '#fdecea' : '#fff4e5'}; border-radius:6px;
+          color:${eoOver ? 'var(--danger,#c0392b)' : '#8a6d00'};">
+          ${eoOver
+            ? '확정 기한이 지났습니다. 회신이 없어 확정된 것으로 처리됩니다. 이견이 있으시면 JLR Korea 담당자에게 연락해 주십시오.'
+            : `<b>${eoDue.toLocaleString('ko-KR')}</b> 까지 [정산 확정] 을 눌러주십시오.
+               기한이 지나면 확정하신 것으로 보고 마감됩니다.`}</div>` : ''}
+      <div style="overflow-x:auto;"><table style="margin-top:10px;">
+        <thead><tr>${th.join('')}</tr></thead>
+        <tbody>${wsRows}</tbody>
+        <tfoot><tr style="font-weight:600;">${tf.join('')}</tr></tfoot>
+      </table></div>
+      <div id="${uidSel}"></div>
     </div>`;
+
+  // 접힌 상태로 시작한다 (One DMS·픽업딜리버리와 같은 규칙)
+  const eoHead = card.querySelector('[data-eo-toggle]');
+  if(eoHead) eoHead.addEventListener('click', (ev) => {
+    if(ev.target.closest('button')) return;      // 버튼 누른 건 토글 아님
+    const body = document.getElementById(uidSel + '-body');
+    const caret = document.getElementById(uidSel + '-caret');
+    if(!body) return;
+    const open = body.style.display !== 'none';
+    body.style.display = open ? 'none' : 'block';
+    if(caret) caret.textContent = open ? '＋' : '－';
+  });
   d.total = grandTot;
 
   /* 판매자별 내역 — Sales Incentive 를 쓰는 유형에서만. 수정 요청도 여기서 보낸다.
      (공지 전에는 행이 없으므로 아무것도 안 그린다) */
   if(sSI){
-    (async () => {
-      const box = document.getElementById(uidSel);
-      if(!box) return;
+    // ⚠ card 는 아직 문서에 붙기 전이다. card 안에서 찾아야 한다.
+    const box = card.querySelector('#' + uidSel);
+    if(box){
       const draw = async () => {
-        const rows = await loadSellerRows(round.id, c.retailer_id);
-        box.innerHTML = sellerTableRetailer(rows, !c.confirmed_at);
-        bindSellerRequest(box, draw);
+        const lines = await loadIncentiveLines(round.id, c.retailer_id);
+        if(!lines.length){
+          box.innerHTML = '<div class="hint" style="margin-top:12px;">판매자별 내역이 아직 없습니다. '
+            + 'JLR Korea 가 원본을 다시 올리면 표시됩니다.</div>';
+          return;
+        }
+        const groups = groupBySeller(lines, EO3V.INCENTIVE_UNIT);
+        box.innerHTML = sellerBlocksHtml(groups, EO3V.INCENTIVE_UNIT, !c.confirmed_at, false)
+          + `<div style="margin-top:10px;">
+               <button class="btn btn-sm btn-ghost eo-pdf-btn">판매자별 PDF 저장 (사내 공지용)</button>
+               <span class="hint" style="margin-left:8px;">
+                 저장해서 공유하시면 판매자들이 자기 판매건을 바로 확인할 수 있습니다</span>
+             </div>`;
+        bindSellerBlocks(box, groups, {
+          byId: new Map(lines.map(L => [String(L.id), L])), refresh: draw });
+        const pb = box.querySelector('.eo-pdf-btn');
+        if(pb) pb.onclick = () => openSellerNoticePdf(round, groups,
+          myRetailer?.name || c.retailers?.name || '');
       };
-      await draw();
-    })();
+      draw();
+    }
   }
 
   card.querySelector('.eo-xls-btn').onclick = () => {
@@ -3156,14 +3400,23 @@ async function renderEngineOilRetailerCard(listEl, round, items){
       const vme =(w.jg?.vme||0)+(w.lr?.vme||0);
       const cast=(w.jg?.castrol||0)+(w.lr?.castrol||0);
       const inc = w.incentive?.amount||0, spj=w.sp?.jg||0, spl=w.sp?.lr||0;
-      return { ws:w.code, n:(w.jg?.n||0)+(w.lr?.n||0),
+      return { ws:w.code, n:eoRowCount(w, sRS),
                save:Math.round(cust), supp:Math.round(vme+cast), inc:Math.round(inc),
                spj:Math.round(spj), spl:Math.round(spl),
                tot:Math.round((sRS?(cust+vme+cast):0)+(sSI?inc:0)+(sSP?(spj+spl):0)) };
     });
-    xlsxHouse({
-      filename: `${(round.settlement_types?.name||'정산').replace(/[\\/:*?"<>|]/g,'')}_${round.period_label}.xlsx`,
-      sheetName: '정산내역',
+    buildEoRetailerXlsx({
+      round, claim: c, cols, rows, nTot, grandTot, won,
+      fname: `${(round.settlement_types?.name||'정산').replace(/[\\/:*?"<>|]/g,'')}_${round.period_label}.xlsx`,
+    });
+  };
+
+  /* 엑셀 — 요약 / 판매자별 / 내 로우데이터.
+     매니저 지시(2026-10-22): 리테일러가 받는 파일에 '자기 것만' 원본 행이
+     그대로 들어가야 한다. 집계만 있으면 금액 근거를 확인할 수 없다. */
+  async function buildEoRetailerXlsx({ round, claim, cols, rows, nTot, grandTot, won, fname }){
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, xsSheet({
       title: `${round.settlement_types?.name||''} · ${round.period_label}`,
       subtitle: `JLR Korea 산출 · ${nTot.toLocaleString('ko-KR')}건 · ${won(grandTot)}`
         + (round.invoice_issue_date ? ` · 인보이스 Date ${round.invoice_issue_date}` : ''),
@@ -3183,17 +3436,86 @@ async function renderEngineOilRetailerCard(listEl, round, items){
                 spj: rows.reduce((a,r)=>a+r.spj,0), spl: rows.reduce((a,r)=>a+r.spl,0),
                 tot: Math.round(grandTot) },
       notes: ['※ 금액에 이견이 있으시면 확정 전에 JLR Korea 담당자에게 알려주시기 바랍니다.'],
-    });
-  };
+    }), '1. 정산내역');
+
+    // 판매자별 (Sales Incentive 를 쓰는 유형만)
+    const sel = await loadSellerRows(round.id, claim.retailer_id);
+    if(sel.length){
+      XLSX.utils.book_append_sheet(wb, xsSheet({
+        title: '판매자별 내역',
+        subtitle: `${round.period_label} · 실제 판매자가 다르면 포털에서 [수정 요청] 해주세요`,
+        columns: [
+          { key:'ws', label:'지점', w:18 }, { key:'name', label:'판매자', w:12 },
+          { key:'sale', label:'판매', w:8, type:'num' }, { key:'refund', label:'환불', w:8, type:'num' },
+          { key:'cnt', label:'최종', w:8, type:'num' }, { key:'amt', label:'인센티브', w:14, type:'num' },
+          { key:'req', label:'수정요청', w:16 },
+        ],
+        rows: sel.map(r => ({ ws:r.workshop_name || r.workshop_code, name:r.seller_name,
+          sale:r.sale, refund:r.refund, cnt:r.cnt, amt:Number(r.amount||0),
+          req: r.req_status === 'REQUESTED' ? `→ ${r.req_name} (요청중)`
+             : r.req_status === 'APPROVED'  ? `반영됨${r.prev_name ? ' (이전 '+r.prev_name+')' : ''}`
+             : r.req_status === 'REJECTED'  ? '요청 반려' : '' })),
+        totals: { ws:'합계', cnt: sel.reduce((a,r)=>a+(r.cnt||0),0),
+                  amt: sel.reduce((a,r)=>a+Number(r.amount||0),0) },
+      }), '2. 판매자별');
+    }
+
+    // 내 로우데이터 — RLS 로 자기 리테일러 행만 돌아온다
+    const lines = await sbAll(() => sb.from('engineoil_lines').select('*')
+      .eq('round_id', round.id).order('workshop_code').order('used_at'), '엑셀 원본');
+    const cp = (lines||[]).filter(L => L.kind === 'COUPON');
+    const bk = (lines||[]).filter(L => L.kind === 'BOOK');
+    if(cp.length){
+      XLSX.utils.book_append_sheet(wb, xsSheet({
+        title: '쿠폰 클레임 원본 (우리 지점분)',
+        subtitle: `${round.period_label} · ${cp.length.toLocaleString('ko-KR')}건 · 이번 정산에 포함된 건만`,
+        steps: ['■ 금액 산출', '사용반환금 = 총금액 × 80% · Castrol = 건당 21,000원',
+                'Retailer Support = 총금액 × 20% − Castrol'],
+        columns: [
+          { key:'ws', label:'지점', w:16 }, { key:'coupon_no', label:'쿠폰번호', w:16 },
+          { key:'ref_no', label:'참조번호', w:16 }, { key:'used_at', label:'사용일자', w:18 },
+          { key:'sent_at', label:'클레임전송일자', w:18 }, { key:'customer', label:'고객명', w:10 },
+          { key:'car_no', label:'차량번호', w:12 }, { key:'vin', label:'차대번호', w:20 },
+          { key:'parts_amt', label:'부품금액', w:13, type:'num' },
+          { key:'labour_amt', label:'공임금액', w:13, type:'num' },
+          { key:'total_amt', label:'총금액', w:13, type:'num' },
+          { key:'saveback', label:'사용반환금', w:13, type:'num' },
+          { key:'vme', label:'VME', w:12, type:'num' },
+          { key:'castrol', label:'Castrol', w:11, type:'num' },
+        ],
+        rows: cp.map(L => ({ ...L, ws: L.site_name || L.workshop_code })),
+        totals: { ws:'합계',
+          parts_amt: cp.reduce((a,L)=>a+Number(L.parts_amt||0),0),
+          labour_amt: cp.reduce((a,L)=>a+Number(L.labour_amt||0),0),
+          total_amt: cp.reduce((a,L)=>a+Number(L.total_amt||0),0),
+          saveback: cp.reduce((a,L)=>a+Number(L.saveback||0),0),
+          vme: cp.reduce((a,L)=>a+Number(L.vme||0),0),
+          castrol: cp.reduce((a,L)=>a+Number(L.castrol||0),0) },
+      }), '3. 쿠폰 클레임 원본');
+    }
+    if(bk.length){
+      XLSX.utils.book_append_sheet(wb, xsSheet({
+        title: '쿠폰북 원본 (우리 지점분)',
+        subtitle: `${round.period_label} · ${bk.length.toLocaleString('ko-KR')}건 · 판매·환불만 (반품 제외)`,
+        columns: [
+          { key:'ws', label:'지점', w:16 }, { key:'base_ym', label:'기준월', w:10 },
+          { key:'book_type', label:'유형', w:8 }, { key:'book_id', label:'쿠폰북ID', w:16 },
+          { key:'used_at', label:'발급/환불일시', w:18 }, { key:'customer', label:'고객명', w:10 },
+          { key:'car_no', label:'차량번호', w:12 }, { key:'vin', label:'차대번호', w:20 },
+          { key:'product', label:'상품명', w:20 }, { key:'seller_name', label:'판매자', w:12 },
+          { key:'total_amt', label:'가격(VAT)', w:13, type:'num' },
+        ],
+        rows: bk.map(L => ({ ...L, ws: L.site_name || L.workshop_code })),
+        totals: { ws:'합계', total_amt: bk.reduce((a,L)=>a+Number(L.total_amt||0),0) },
+      }), '3. 쿠폰북 원본');
+    }
+    XLSX.writeFile(wb, fname);
+  }
 
   if(canConfirm){
-    const w = document.createElement('div');
-    w.style.marginTop = '12px';
-    w.innerHTML = `<button class="btn btn-sm eo-confirm-btn">정산 확정</button>
-      <span class="hint" style="margin-left:8px;">${round.settlement_types?.requires_invoice
-        ? '확정하면 이 금액으로 세금계산서 발행 대상이 확정됩니다.'
-        : '확정하면 이 금액으로 정산됩니다. 세금계산서 발행 대상은 아닙니다.'}</span>`;
-    w.querySelector('.eo-confirm-btn').addEventListener('click', async () => {
+    // 확정 버튼은 요약 바에 이미 있다. 거기에 연결만 한다 (버튼을 또 만들지 않는다)
+    const cb = card.querySelector('.eo-confirm-btn');
+    if(cb) cb.addEventListener('click', async () => {
       if(!confirm(`정산 합계 ${won(d.total)} 을(를) 확정할까요? 확정 후에는 취소할 수 없습니다.`)) return;
       const { data: upd, error } = await sb.from('claims')
         .update({ confirmed_at: new Date().toISOString() }).eq('id', c.id).select('id');
@@ -3204,7 +3526,6 @@ async function renderEngineOilRetailerCard(listEl, round, items){
       }
       await loadRetailerClaims();
     });
-    card.appendChild(w);
   }
   listEl.appendChild(card);
 }
@@ -12126,8 +12447,12 @@ async function openNoticeSummary(){
     // 유형별로 '건수' 의 의미가 다르다 — detail 에 담긴 실제 건수를 쓴다
     const d = c.detail || {};
     g.lines += Number(d.lines ?? d.user_count ?? d.count ?? 0)
-            || (d.workshops ? (d.workshops||[]).reduce((a,w) =>
-                 a + (w.jg?.n||0) + (w.lr?.n||0) + (w.incentive?.count||0), 0) : 0);
+            // ⚠ 키는 count 다. 쿠폰 건수가 있으면 그걸, 없으면 인센티브 건수를 쓴다
+            //    (둘을 더하면 3종 유형에서 같은 차를 두 번 센다)
+            || (d.workshops ? (d.workshops||[]).reduce((a, w) => {
+                 const cp = (w.jg?.count ?? w.jg?.n ?? 0) + (w.lr?.count ?? w.lr?.n ?? 0);
+                 return a + (cp || (w.incentive?.count ?? 0));
+               }, 0) : 0);
   });
   const rows = [...byRt.values()].sort((a,b) => a.code.localeCompare(b.code));
   const T = {
@@ -12411,6 +12736,267 @@ function bindSellerDecide(host, rows, onDone){
     await logAudit('SELLER_REJECT','ROUND', r.round_id, { label: `${r.workshop_code} ${r.seller_name}` });
     await onDone();
   });
+}
+
+/* ================================================================
+   판매자별 · 건별 내역 (2026-10-22 개편)
+
+   인센티브는 건별로 책정된다. 그래서 차대번호·고객명·판매일자가 보여야
+   하고, 실제 판매자가 다를 수 있으니 '개별 건' 단위로 수정 요청한다.
+   ★ 요청을 집계가 아니라 라인에 단다 — 승인하면 그 건의 판매자가 바뀌고
+     판매자별 건수는 자연히 따라 움직인다. 집계에 달면 안 옮겨간다.
+   ================================================================ */
+
+/* PostgREST 는 한 번에 1,000행까지만 준다. 그 이상이면 말없이 잘린다.
+   (2026-10-22 실측: BOOK 1,416건 중 1,000건만 읽혀 판매자별 내역과
+    리테일러 엑셀 원본이 416건 모자랐다) 끝까지 돌려 받는다. */
+async function sbAll(makeQuery, tag){
+  const out = [];
+  for(let from = 0;; from += 1000){
+    const { data, error } = await makeQuery().range(from, from + 999);
+    if(error){ console.warn('[' + (tag||'조회') + ']', error.message); break; }
+    out.push(...(data || []));
+    if(!data || data.length < 1000) break;
+  }
+  return out;
+}
+
+async function loadIncentiveLines(roundId, retailerId){
+  return sbAll(() => {
+    let q = sb.from('engineoil_lines').select('*')
+              .eq('round_id', roundId).eq('kind', 'BOOK')
+              .order('workshop_code').order('seller_name').order('used_at');
+    if(retailerId) q = q.eq('retailer_id', retailerId);
+    return q;
+  }, '인센티브 라인');
+}
+
+/* 라인 → 판매자별 묶음. 환불은 건수에서 뺀다. */
+function groupBySeller(lines, unit){
+  const g = new Map();
+  lines.forEach(L => {
+    const key = (L.workshop_code || '') + '|' + (L.seller_name || '(미기재)');
+    if(!g.has(key)) g.set(key, {
+      // engineoil_lines 의 지점 표기는 site_name 이다 (workshop_name 은 없는 열)
+      key, ws: L.site_name || L.workshop_code, wsCode: L.workshop_code,
+      name: L.seller_name || '(미기재)', retailer: L.retailer_code,
+      sale: 0, refund: 0, rows: [],
+    });
+    const x = g.get(key);
+    if(L.book_type === '환불') x.refund++; else x.sale++;
+    x.rows.push(L);
+  });
+  const out = [...g.values()];
+  out.forEach(x => { x.cnt = x.sale - x.refund; x.amount = Math.max(0, x.cnt) * unit; });
+  out.sort((a, b) => (a.ws || '').localeCompare(b.ws || '') || b.cnt - a.cnt);
+  return out;
+}
+
+const _esc = v => String(v == null ? '' : v).replace(/[<>]/g, '');
+const REQ_BADGE = {
+  REQUESTED: '<span class="badge badge-ar">수정 요청중</span>',
+  APPROVED : '<span class="badge badge-ap">수정 반영</span>',
+  REJECTED : '<span class="badge badge-off">반려</span>',
+};
+
+/* 한 판매자의 건별 표 */
+function lineRowsHtml(rows, editable, isAdmin){
+  return `<div style="overflow-x:auto;"><table style="min-width:760px; margin:6px 0 2px;">
+    <thead><tr>
+      <th>판매일자</th><th>쿠폰북ID</th><th>고객명</th><th>차량번호</th><th>차대번호</th>
+      <th>상품</th><th style="text-align:center;">구분</th>
+      <th>${isAdmin ? '수정 요청' : ''}</th>
+    </tr></thead><tbody>
+    ${rows.map(L => `<tr data-line="${L.id}">
+      <td class="muted" style="white-space:nowrap;">${_esc(String(L.used_at || '').slice(0, 16))}</td>
+      <td class="muted">${_esc(L.book_id)}</td>
+      <td>${_esc(L.customer)}</td>
+      <td>${_esc(L.car_no)}</td>
+      <td class="muted" style="font-size:11px;">${_esc(L.vin)}</td>
+      <td class="hint" style="max-width:180px;">${_esc(L.product)}</td>
+      <td style="text-align:center;">${L.book_type === '환불'
+        ? '<span style="color:var(--danger,#c0392b);">환불</span>' : '판매'}</td>
+      <td style="white-space:nowrap;">
+        ${L.req_status === 'REQUESTED'
+          ? `<b style="color:var(--accent-ar);">→ ${_esc(L.req_seller)}</b>`
+            + (L.req_note ? `<div class="hint">${_esc(L.req_note)}</div>` : '')
+            + (isAdmin ? ` <button class="btn btn-sm ln-ok" data-id="${L.id}">승인</button>
+                          <button class="btn btn-ghost btn-sm ln-no" data-id="${L.id}">반려</button>` : '')
+          : L.req_status === 'APPROVED'
+            ? `${REQ_BADGE.APPROVED}${L.prev_seller ? `<div class="hint">이전 ${_esc(L.prev_seller)}</div>` : ''}`
+          : L.req_status === 'REJECTED'
+            ? `${REQ_BADGE.REJECTED}${L.decide_note ? `<div class="hint">${_esc(L.decide_note)}</div>` : ''}`
+          : (editable ? `<button class="btn btn-ghost btn-sm ln-req" data-id="${L.id}">판매자 수정</button>` : '')}
+      </td></tr>`).join('')}
+    </tbody></table></div>`;
+}
+
+/* 판매자별 묶음 — 각 판매자를 펼치면 건별이 나온다 */
+function sellerBlocksHtml(groups, unit, editable, isAdmin){
+  if(!groups.length) return '<div class="hint" style="margin-top:12px;">판매자별 내역이 아직 없습니다.</div>';
+  const nTot = groups.reduce((a, g) => a + g.cnt, 0);
+  const aTot = groups.reduce((a, g) => a + g.amount, 0);
+  return `
+    <div class="section-label" style="margin-top:14px;">판매자별 · 건별 내역
+      <span class="hint" style="margin-left:6px; text-transform:none; letter-spacing:0;">
+        ${nTot.toLocaleString('ko-KR')}건 · ${fmtWon(aTot)}</span></div>
+    ${editable ? `<div class="hint" style="margin-bottom:8px;">
+      실제 판매자가 다른 건이 있으면 그 줄의 <b>[판매자 수정]</b> 으로 알려주세요.
+      JLR Korea 가 승인하면 그 건의 판매자가 바뀝니다. 금액은 바뀌지 않습니다.</div>` : ''}
+    ${groups.map((g, i) => `
+      <div style="border:1px solid var(--surface3); border-radius:6px; margin-bottom:8px; overflow:hidden;">
+        <div style="display:flex; align-items:center; gap:10px; padding:9px 12px;
+                    background:var(--surface2); cursor:pointer;" data-sg="${i}">
+          <span style="width:16px; color:var(--muted,#7a8699);" id="sg-${i}-caret">＋</span>
+          <b>${_esc(g.ws)}</b> <span>${_esc(g.name)}</span>
+          ${g.rows.some(r => r.req_status === 'REQUESTED')
+            ? '<span class="badge badge-ar">수정 요청</span>' : ''}
+          <span style="margin-left:auto; display:flex; gap:16px; align-items:center;">
+            <span class="hint">판매 ${g.sale}${g.refund ? ` · 환불 ${g.refund}` : ''}</span>
+            <b>${g.cnt}건</b>
+            <b style="color:var(--accent); min-width:90px; text-align:right;">${fmtWon(g.amount)}</b>
+          </span>
+        </div>
+        <div id="sg-${i}-body" style="display:none; padding:0 12px 8px;">
+          ${lineRowsHtml(g.rows, editable, isAdmin)}
+        </div>
+      </div>`).join('')}
+    <div style="display:flex; gap:16px; padding:9px 12px; background:var(--surface2);
+                border-radius:6px; font-weight:600;">
+      <span>합계 ${groups.length}명</span>
+      <span style="margin-left:auto;">${nTot.toLocaleString('ko-KR')}건</span>
+      <span style="color:var(--accent); min-width:90px; text-align:right;">${fmtWon(aTot)}</span>
+    </div>`;
+}
+
+function bindSellerBlocks(host, groups, opts){
+  host.querySelectorAll('[data-sg]').forEach(h => h.onclick = (ev) => {
+    if(ev.target.closest('button')) return;
+    const i = h.dataset.sg;
+    const body = host.querySelector('#sg-' + i + '-body');
+    const caret = host.querySelector('#sg-' + i + '-caret');
+    if(!body) return;
+    const open = body.style.display !== 'none';
+    body.style.display = open ? 'none' : 'block';
+    if(caret) caret.textContent = open ? '＋' : '－';
+  });
+
+  // 리테일러 — 건별 수정 요청
+  host.querySelectorAll('.ln-req').forEach(b => b.onclick = async () => {
+    const nm = (prompt('이 건의 실제 판매자명을 적어주세요.\n(JLR Korea 가 승인하면 반영됩니다)') || '').trim();
+    if(!nm) return;
+    const note = prompt('사유가 있으면 적어주세요. (선택)', '') || '';
+    b.disabled = true; b.textContent = '보내는 중...';
+    const { data: { user } } = await sb.auth.getUser();
+    const { data, error } = await sb.from('engineoil_lines')
+      .update({ req_seller: nm, req_note: note || null, req_status: 'REQUESTED',
+                req_at: new Date().toISOString(), req_by: user?.id || null })
+      .eq('id', b.dataset.id).select('id');
+    if(error || !data?.length){
+      alert(error ? '요청 실패: ' + error.message : '요청이 반영되지 않았습니다 (0건).');
+      b.disabled = false; b.textContent = '판매자 수정'; return;
+    }
+    await opts.refresh();
+  });
+
+  // 관리자 — 승인 / 반려
+  host.querySelectorAll('.ln-ok').forEach(b => b.onclick = async () => {
+    const L = opts.byId.get(String(b.dataset.id));
+    if(!L){ alert('이 건을 찾지 못했습니다. 새로고침 후 다시 시도해주세요.'); return; }
+    if(!confirm(`이 건의 판매자를 바꿉니다.\n\n${L.customer || ''} ${L.car_no || ''}\n`
+              + `${L.seller_name} → ${L.req_seller}\n\n금액은 그대로입니다. 승인할까요?`)) return;
+    b.disabled = true;
+    const { data: { user } } = await sb.auth.getUser();
+    const { data, error } = await sb.from('engineoil_lines').update({
+      prev_seller: L.seller_name, seller_name: L.req_seller, req_status: 'APPROVED',
+      decided_at: new Date().toISOString(), decided_by: user?.id || null,
+    }).eq('id', L.id).select('id');
+    if(error || !data?.length){
+      alert(error ? '승인 실패: ' + error.message
+                  : '승인이 반영되지 않았습니다 (0건). 권한을 확인해주세요.');
+      b.disabled = false; return;
+    }
+    await logAudit('EO_LINE_SELLER_APPROVE','ROUND', L.round_id,
+      { label: `${L.workshop_code} ${L.seller_name} → ${L.req_seller}` });
+    await opts.refresh();
+  });
+  host.querySelectorAll('.ln-no').forEach(b => b.onclick = async () => {
+    const L = opts.byId.get(String(b.dataset.id));
+    if(!L){ alert('이 건을 찾지 못했습니다. 새로고침 후 다시 시도해주세요.'); return; }
+    const note = prompt('반려 사유를 적어주세요. 리테일러에게 그대로 보입니다.', '');
+    if(note === null) return;
+    b.disabled = true;
+    const { data: { user } } = await sb.auth.getUser();
+    const { data, error } = await sb.from('engineoil_lines').update({
+      req_status: 'REJECTED', decide_note: note || null,
+      decided_at: new Date().toISOString(), decided_by: user?.id || null,
+    }).eq('id', L.id).select('id');
+    if(error || !data?.length){
+      alert(error ? '반려 실패: ' + error.message
+                  : '반려가 반영되지 않았습니다 (0건). 권한을 확인해주세요.');
+      b.disabled = false; return;
+    }
+    await opts.refresh();
+  });
+}
+
+/* ── 사내 공지용 PDF — 판매자별로 자기 판매건을 바로 확인하게 ── */
+function openSellerNoticePdf(round, groups, retailerName){
+  const nTot = groups.reduce((a, g) => a + g.cnt, 0);
+  const aTot = groups.reduce((a, g) => a + g.amount, 0);
+  const w = window.open('', '_blank', 'width=1000,height=840');
+  if(!w){ alert('팝업이 차단되었습니다. 이 사이트의 팝업을 허용해주세요.'); return; }
+  w.document.write(`<!doctype html><html lang="ko"><head><meta charset="utf-8">
+  <title>${_esc(retailerName)} ${_esc(round.period_label)} 판매자별 인센티브</title>
+  <style>
+    @page { size: A4; margin: 12mm; }
+    body { font-family:"맑은 고딕","Malgun Gothic",sans-serif; color:#1a1a1a; margin:0; padding:22px 26px; }
+    h1 { font-size:18px; margin:4px 0 2px; }
+    .sub { font-size:11.5px; color:#6e7375; margin-bottom:16px; }
+    .seller { margin-bottom:16px; break-inside:avoid; }
+    .shead { display:flex; align-items:center; gap:10px; background:#3d4448; color:#fff;
+             padding:6px 10px; font-size:12.5px; font-weight:600; }
+    .shead .r { margin-left:auto; }
+    table { border-collapse:collapse; width:100%; font-size:11px; }
+    th { background:#f4f5f5; font-weight:600; padding:5px 7px; text-align:left; border-bottom:1px solid #d9dcde; }
+    td { border-bottom:1px solid #eceeef; padding:4px 7px; }
+    .c { text-align:center; } .n { text-align:right; }
+    .tot { margin-top:14px; padding:9px 12px; background:#f4f5f5; font-weight:700; display:flex; }
+    .tot .r { margin-left:auto; }
+    .foot { margin-top:14px; font-size:10px; color:#6e7375; line-height:1.7; }
+    .noprint { margin-bottom:14px; }
+    .btn { font:inherit; font-size:12.5px; padding:7px 14px; border:1px solid #3d4448;
+           background:#3d4448; color:#fff; border-radius:5px; cursor:pointer; }
+    @media print { .noprint { display:none; } body { padding:0; } }
+  </style></head><body>
+  <div class="noprint"><button class="btn" onclick="window.print()">인쇄 / PDF로 저장</button>
+    <span style="font-size:11.5px;color:#6e7375;margin-left:8px;">
+      저장해서 사내에 공유하시면 판매자별로 자기 건을 확인할 수 있습니다</span></div>
+  <h1>${_esc(retailerName)} · 엔진오일 패키지 Sales Incentive</h1>
+  <div class="sub">${_esc(round.period_label)} · 판매자 ${groups.length}명 ·
+    ${nTot.toLocaleString('ko-KR')}건 · ${aTot.toLocaleString('ko-KR')}원
+    · 건당 10,000원 (판매 − 환불)</div>
+  ${groups.map(g => `<div class="seller">
+    <div class="shead"><span>${_esc(g.ws)}</span><span>${_esc(g.name)}</span>
+      <span class="r">${g.cnt}건 · ${g.amount.toLocaleString('ko-KR')}원</span></div>
+    <table><thead><tr>
+      <th>판매일자</th><th>쿠폰북ID</th><th>고객명</th><th>차량번호</th>
+      <th>차대번호</th><th>상품</th><th class="c">구분</th>
+    </tr></thead><tbody>
+      ${g.rows.map(L => `<tr>
+        <td>${_esc(String(L.used_at||'').slice(0,16))}</td><td>${_esc(L.book_id)}</td>
+        <td>${_esc(L.customer)}</td><td>${_esc(L.car_no)}</td>
+        <td>${_esc(L.vin)}</td><td>${_esc(L.product)}</td>
+        <td class="c">${L.book_type === '환불' ? '환불' : '판매'}</td></tr>`).join('')}
+    </tbody></table></div>`).join('')}
+  <div class="tot"><span>합계 ${groups.length}명</span>
+    <span class="r">${nTot.toLocaleString('ko-KR')}건 · ${aTot.toLocaleString('ko-KR')}원</span></div>
+  <div class="foot">
+    판매자가 실제와 다른 건이 있으면 정산 담당자에게 알려주시기 바랍니다.
+    포털에서 건별로 수정 요청하시면 JLR Korea 승인 후 반영됩니다.<br>
+    출력 ${new Date().toLocaleString('ko-KR')} · JLR Korea 정산 포털
+  </div></body></html>`);
+  w.document.close();
 }
 
 checkSession();
