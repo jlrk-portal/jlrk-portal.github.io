@@ -2605,10 +2605,17 @@ async function renderEngineOilSection(round, type, claims){
     box.className = 'info-card';
     box.style.marginTop = '12px';
     const drawSel = async () => {
-      const rows = await loadSellerRows(round.id, null);
-      box.innerHTML = '<div class="section-label" style="margin-top:0;">판매자별 내역 · 수정 요청</div>'
-                    + sellerTableAdmin(rows);
-      bindSellerDecide(box, rows, drawSel);
+      const lines = await loadIncentiveLines(round.id, null);
+      const groups = groupBySeller(lines, eo3vParams(type).INCENTIVE_UNIT);
+      const nReq = lines.filter(L => L.req_status === 'REQUESTED').length;
+      box.innerHTML = '<div class="section-label" style="margin-top:0;">판매자별 · 건별 내역</div>'
+        + (nReq ? `<div class="info-card" style="margin-bottom:10px; border-color:#e0b050;
+             background:#fff8ec;"><b>판매자 수정 요청 ${nReq}건</b>
+             <div class="hint" style="margin-top:4px;">승인하면 그 건의 판매자가 바뀌고
+               판매자별 건수가 따라 움직입니다. 금액 총액은 바뀌지 않습니다.</div></div>` : '')
+        + sellerBlocksHtml(groups, eo3vParams(type).INCENTIVE_UNIT, false, true);
+      bindSellerBlocks(box, groups, {
+        byId: new Map(lines.map(L => [L.id, L])), refresh: drawSel });
     };
     drawSel().then(() => host.appendChild(box));
   }
@@ -3232,17 +3239,28 @@ async function renderEngineOilRetailerCard(listEl, round, items){
   /* 판매자별 내역 — Sales Incentive 를 쓰는 유형에서만. 수정 요청도 여기서 보낸다.
      (공지 전에는 행이 없으므로 아무것도 안 그린다) */
   if(sSI){
-    // ⚠ 이 시점에 card 는 아직 문서에 붙기 전이라 document.getElementById 로는 못 찾는다.
-    //    card 안에서 직접 찾는다. (이것 때문에 판매자 표가 통째로 안 뜨고 있었다)
+    // ⚠ card 는 아직 문서에 붙기 전이다. card 안에서 찾아야 한다.
     const box = card.querySelector('#' + uidSel);
     if(box){
       const draw = async () => {
-        const rows = await loadSellerRows(round.id, c.retailer_id);
-        box.innerHTML = rows.length
-          ? sellerTableRetailer(rows, !c.confirmed_at)
-          : '<div class="hint" style="margin-top:12px;">판매자별 내역이 아직 없습니다. '
+        const lines = await loadIncentiveLines(round.id, c.retailer_id);
+        if(!lines.length){
+          box.innerHTML = '<div class="hint" style="margin-top:12px;">판매자별 내역이 아직 없습니다. '
             + 'JLR Korea 가 원본을 다시 올리면 표시됩니다.</div>';
-        bindSellerRequest(box, draw);
+          return;
+        }
+        const groups = groupBySeller(lines, EO3V.INCENTIVE_UNIT);
+        box.innerHTML = sellerBlocksHtml(groups, EO3V.INCENTIVE_UNIT, !c.confirmed_at, false)
+          + `<div style="margin-top:10px;">
+               <button class="btn btn-sm btn-ghost eo-pdf-btn">판매자별 PDF 저장 (사내 공지용)</button>
+               <span class="hint" style="margin-left:8px;">
+                 저장해서 공유하시면 판매자들이 자기 판매건을 바로 확인할 수 있습니다</span>
+             </div>`;
+        bindSellerBlocks(box, groups, {
+          byId: new Map(lines.map(L => [L.id, L])), refresh: draw });
+        const pb = box.querySelector('.eo-pdf-btn');
+        if(pb) pb.onclick = () => openSellerNoticePdf(round, groups,
+          myRetailer?.name || c.retailers?.name || '');
       };
       draw();
     }
@@ -12597,6 +12615,243 @@ function bindSellerDecide(host, rows, onDone){
     await logAudit('SELLER_REJECT','ROUND', r.round_id, { label: `${r.workshop_code} ${r.seller_name}` });
     await onDone();
   });
+}
+
+/* ================================================================
+   판매자별 · 건별 내역 (2026-10-22 개편)
+
+   인센티브는 건별로 책정된다. 그래서 차대번호·고객명·판매일자가 보여야
+   하고, 실제 판매자가 다를 수 있으니 '개별 건' 단위로 수정 요청한다.
+   ★ 요청을 집계가 아니라 라인에 단다 — 승인하면 그 건의 판매자가 바뀌고
+     판매자별 건수는 자연히 따라 움직인다. 집계에 달면 안 옮겨간다.
+   ================================================================ */
+
+async function loadIncentiveLines(roundId, retailerId){
+  let q = sb.from('engineoil_lines').select('*')
+            .eq('round_id', roundId).eq('kind', 'BOOK')
+            .order('workshop_code').order('seller_name').order('used_at');
+  if(retailerId) q = q.eq('retailer_id', retailerId);
+  const { data, error } = await q;
+  if(error){ console.warn('[인센티브 라인]', error.message); return []; }
+  return data || [];
+}
+
+/* 라인 → 판매자별 묶음. 환불은 건수에서 뺀다. */
+function groupBySeller(lines, unit){
+  const g = new Map();
+  lines.forEach(L => {
+    const key = (L.workshop_code || '') + '|' + (L.seller_name || '(미기재)');
+    if(!g.has(key)) g.set(key, {
+      // engineoil_lines 의 지점 표기는 site_name 이다 (workshop_name 은 없는 열)
+      key, ws: L.site_name || L.workshop_code, wsCode: L.workshop_code,
+      name: L.seller_name || '(미기재)', retailer: L.retailer_code,
+      sale: 0, refund: 0, rows: [],
+    });
+    const x = g.get(key);
+    if(L.book_type === '환불') x.refund++; else x.sale++;
+    x.rows.push(L);
+  });
+  const out = [...g.values()];
+  out.forEach(x => { x.cnt = x.sale - x.refund; x.amount = Math.max(0, x.cnt) * unit; });
+  out.sort((a, b) => (a.ws || '').localeCompare(b.ws || '') || b.cnt - a.cnt);
+  return out;
+}
+
+const _esc = v => String(v == null ? '' : v).replace(/[<>]/g, '');
+const REQ_BADGE = {
+  REQUESTED: '<span class="badge badge-ar">수정 요청중</span>',
+  APPROVED : '<span class="badge badge-ap">수정 반영</span>',
+  REJECTED : '<span class="badge badge-off">반려</span>',
+};
+
+/* 한 판매자의 건별 표 */
+function lineRowsHtml(rows, editable, isAdmin){
+  return `<div style="overflow-x:auto;"><table style="min-width:760px; margin:6px 0 2px;">
+    <thead><tr>
+      <th>판매일자</th><th>쿠폰북ID</th><th>고객명</th><th>차량번호</th><th>차대번호</th>
+      <th>상품</th><th style="text-align:center;">구분</th>
+      <th>${isAdmin ? '수정 요청' : ''}</th>
+    </tr></thead><tbody>
+    ${rows.map(L => `<tr data-line="${L.id}">
+      <td class="muted" style="white-space:nowrap;">${_esc(String(L.used_at || '').slice(0, 16))}</td>
+      <td class="muted">${_esc(L.book_id)}</td>
+      <td>${_esc(L.customer)}</td>
+      <td>${_esc(L.car_no)}</td>
+      <td class="muted" style="font-size:11px;">${_esc(L.vin)}</td>
+      <td class="hint" style="max-width:180px;">${_esc(L.product)}</td>
+      <td style="text-align:center;">${L.book_type === '환불'
+        ? '<span style="color:var(--danger,#c0392b);">환불</span>' : '판매'}</td>
+      <td style="white-space:nowrap;">
+        ${L.req_status === 'REQUESTED'
+          ? `<b style="color:var(--accent-ar);">→ ${_esc(L.req_seller)}</b>`
+            + (L.req_note ? `<div class="hint">${_esc(L.req_note)}</div>` : '')
+            + (isAdmin ? ` <button class="btn btn-sm ln-ok" data-id="${L.id}">승인</button>
+                          <button class="btn btn-ghost btn-sm ln-no" data-id="${L.id}">반려</button>` : '')
+          : L.req_status === 'APPROVED'
+            ? `${REQ_BADGE.APPROVED}${L.prev_seller ? `<div class="hint">이전 ${_esc(L.prev_seller)}</div>` : ''}`
+          : L.req_status === 'REJECTED'
+            ? `${REQ_BADGE.REJECTED}${L.decide_note ? `<div class="hint">${_esc(L.decide_note)}</div>` : ''}`
+          : (editable ? `<button class="btn btn-ghost btn-sm ln-req" data-id="${L.id}">판매자 수정</button>` : '')}
+      </td></tr>`).join('')}
+    </tbody></table></div>`;
+}
+
+/* 판매자별 묶음 — 각 판매자를 펼치면 건별이 나온다 */
+function sellerBlocksHtml(groups, unit, editable, isAdmin){
+  if(!groups.length) return '<div class="hint" style="margin-top:12px;">판매자별 내역이 아직 없습니다.</div>';
+  const nTot = groups.reduce((a, g) => a + g.cnt, 0);
+  const aTot = groups.reduce((a, g) => a + g.amount, 0);
+  return `
+    <div class="section-label" style="margin-top:14px;">판매자별 · 건별 내역
+      <span class="hint" style="margin-left:6px; text-transform:none; letter-spacing:0;">
+        ${nTot.toLocaleString('ko-KR')}건 · ${fmtWon(aTot)}</span></div>
+    ${editable ? `<div class="hint" style="margin-bottom:8px;">
+      실제 판매자가 다른 건이 있으면 그 줄의 <b>[판매자 수정]</b> 으로 알려주세요.
+      JLR Korea 가 승인하면 그 건의 판매자가 바뀝니다. 금액은 바뀌지 않습니다.</div>` : ''}
+    ${groups.map((g, i) => `
+      <div style="border:1px solid var(--surface3); border-radius:6px; margin-bottom:8px; overflow:hidden;">
+        <div style="display:flex; align-items:center; gap:10px; padding:9px 12px;
+                    background:var(--surface2); cursor:pointer;" data-sg="${i}">
+          <span style="width:16px; color:var(--muted,#7a8699);" id="sg-${i}-caret">＋</span>
+          <b>${_esc(g.ws)}</b> <span>${_esc(g.name)}</span>
+          ${g.rows.some(r => r.req_status === 'REQUESTED')
+            ? '<span class="badge badge-ar">수정 요청</span>' : ''}
+          <span style="margin-left:auto; display:flex; gap:16px; align-items:center;">
+            <span class="hint">판매 ${g.sale}${g.refund ? ` · 환불 ${g.refund}` : ''}</span>
+            <b>${g.cnt}건</b>
+            <b style="color:var(--accent); min-width:90px; text-align:right;">${fmtWon(g.amount)}</b>
+          </span>
+        </div>
+        <div id="sg-${i}-body" style="display:none; padding:0 12px 8px;">
+          ${lineRowsHtml(g.rows, editable, isAdmin)}
+        </div>
+      </div>`).join('')}
+    <div style="display:flex; gap:16px; padding:9px 12px; background:var(--surface2);
+                border-radius:6px; font-weight:600;">
+      <span>합계 ${groups.length}명</span>
+      <span style="margin-left:auto;">${nTot.toLocaleString('ko-KR')}건</span>
+      <span style="color:var(--accent); min-width:90px; text-align:right;">${fmtWon(aTot)}</span>
+    </div>`;
+}
+
+function bindSellerBlocks(host, groups, opts){
+  host.querySelectorAll('[data-sg]').forEach(h => h.onclick = (ev) => {
+    if(ev.target.closest('button')) return;
+    const i = h.dataset.sg;
+    const body = host.querySelector('#sg-' + i + '-body');
+    const caret = host.querySelector('#sg-' + i + '-caret');
+    if(!body) return;
+    const open = body.style.display !== 'none';
+    body.style.display = open ? 'none' : 'block';
+    if(caret) caret.textContent = open ? '＋' : '－';
+  });
+
+  // 리테일러 — 건별 수정 요청
+  host.querySelectorAll('.ln-req').forEach(b => b.onclick = async () => {
+    const nm = (prompt('이 건의 실제 판매자명을 적어주세요.\n(JLR Korea 가 승인하면 반영됩니다)') || '').trim();
+    if(!nm) return;
+    const note = prompt('사유가 있으면 적어주세요. (선택)', '') || '';
+    b.disabled = true; b.textContent = '보내는 중...';
+    const { data: { user } } = await sb.auth.getUser();
+    const { data, error } = await sb.from('engineoil_lines')
+      .update({ req_seller: nm, req_note: note || null, req_status: 'REQUESTED',
+                req_at: new Date().toISOString(), req_by: user?.id || null })
+      .eq('id', b.dataset.id).select('id');
+    if(error || !data?.length){
+      alert(error ? '요청 실패: ' + error.message : '요청이 반영되지 않았습니다 (0건).');
+      b.disabled = false; b.textContent = '판매자 수정'; return;
+    }
+    await opts.refresh();
+  });
+
+  // 관리자 — 승인 / 반려
+  host.querySelectorAll('.ln-ok').forEach(b => b.onclick = async () => {
+    const L = opts.byId.get(b.dataset.id);
+    if(!confirm(`이 건의 판매자를 바꿉니다.\n\n${L.customer || ''} ${L.car_no || ''}\n`
+              + `${L.seller_name} → ${L.req_seller}\n\n금액은 그대로입니다. 승인할까요?`)) return;
+    b.disabled = true;
+    const { data: { user } } = await sb.auth.getUser();
+    const { error } = await sb.from('engineoil_lines').update({
+      prev_seller: L.seller_name, seller_name: L.req_seller, req_status: 'APPROVED',
+      decided_at: new Date().toISOString(), decided_by: user?.id || null,
+    }).eq('id', L.id).select('id');
+    if(error){ alert('승인 실패: ' + error.message); b.disabled = false; return; }
+    await logAudit('EO_LINE_SELLER_APPROVE','ROUND', L.round_id,
+      { label: `${L.workshop_code} ${L.seller_name} → ${L.req_seller}` });
+    await opts.refresh();
+  });
+  host.querySelectorAll('.ln-no').forEach(b => b.onclick = async () => {
+    const L = opts.byId.get(b.dataset.id);
+    const note = prompt('반려 사유를 적어주세요. 리테일러에게 그대로 보입니다.', '');
+    if(note === null) return;
+    b.disabled = true;
+    const { data: { user } } = await sb.auth.getUser();
+    const { error } = await sb.from('engineoil_lines').update({
+      req_status: 'REJECTED', decide_note: note || null,
+      decided_at: new Date().toISOString(), decided_by: user?.id || null,
+    }).eq('id', L.id).select('id');
+    if(error){ alert('반려 실패: ' + error.message); b.disabled = false; return; }
+    await opts.refresh();
+  });
+}
+
+/* ── 사내 공지용 PDF — 판매자별로 자기 판매건을 바로 확인하게 ── */
+function openSellerNoticePdf(round, groups, retailerName){
+  const nTot = groups.reduce((a, g) => a + g.cnt, 0);
+  const aTot = groups.reduce((a, g) => a + g.amount, 0);
+  const w = window.open('', '_blank', 'width=1000,height=840');
+  if(!w){ alert('팝업이 차단되었습니다. 이 사이트의 팝업을 허용해주세요.'); return; }
+  w.document.write(`<!doctype html><html lang="ko"><head><meta charset="utf-8">
+  <title>${_esc(retailerName)} ${_esc(round.period_label)} 판매자별 인센티브</title>
+  <style>
+    @page { size: A4; margin: 12mm; }
+    body { font-family:"맑은 고딕","Malgun Gothic",sans-serif; color:#1a1a1a; margin:0; padding:22px 26px; }
+    h1 { font-size:18px; margin:4px 0 2px; }
+    .sub { font-size:11.5px; color:#6e7375; margin-bottom:16px; }
+    .seller { margin-bottom:16px; break-inside:avoid; }
+    .shead { display:flex; align-items:center; gap:10px; background:#3d4448; color:#fff;
+             padding:6px 10px; font-size:12.5px; font-weight:600; }
+    .shead .r { margin-left:auto; }
+    table { border-collapse:collapse; width:100%; font-size:11px; }
+    th { background:#f4f5f5; font-weight:600; padding:5px 7px; text-align:left; border-bottom:1px solid #d9dcde; }
+    td { border-bottom:1px solid #eceeef; padding:4px 7px; }
+    .c { text-align:center; } .n { text-align:right; }
+    .tot { margin-top:14px; padding:9px 12px; background:#f4f5f5; font-weight:700; display:flex; }
+    .tot .r { margin-left:auto; }
+    .foot { margin-top:14px; font-size:10px; color:#6e7375; line-height:1.7; }
+    .noprint { margin-bottom:14px; }
+    .btn { font:inherit; font-size:12.5px; padding:7px 14px; border:1px solid #3d4448;
+           background:#3d4448; color:#fff; border-radius:5px; cursor:pointer; }
+    @media print { .noprint { display:none; } body { padding:0; } }
+  </style></head><body>
+  <div class="noprint"><button class="btn" onclick="window.print()">인쇄 / PDF로 저장</button>
+    <span style="font-size:11.5px;color:#6e7375;margin-left:8px;">
+      저장해서 사내에 공유하시면 판매자별로 자기 건을 확인할 수 있습니다</span></div>
+  <h1>${_esc(retailerName)} · 엔진오일 패키지 Sales Incentive</h1>
+  <div class="sub">${_esc(round.period_label)} · 판매자 ${groups.length}명 ·
+    ${nTot.toLocaleString('ko-KR')}건 · ${aTot.toLocaleString('ko-KR')}원
+    · 건당 10,000원 (판매 − 환불)</div>
+  ${groups.map(g => `<div class="seller">
+    <div class="shead"><span>${_esc(g.ws)}</span><span>${_esc(g.name)}</span>
+      <span class="r">${g.cnt}건 · ${g.amount.toLocaleString('ko-KR')}원</span></div>
+    <table><thead><tr>
+      <th>판매일자</th><th>쿠폰북ID</th><th>고객명</th><th>차량번호</th>
+      <th>차대번호</th><th>상품</th><th class="c">구분</th>
+    </tr></thead><tbody>
+      ${g.rows.map(L => `<tr>
+        <td>${_esc(String(L.used_at||'').slice(0,16))}</td><td>${_esc(L.book_id)}</td>
+        <td>${_esc(L.customer)}</td><td>${_esc(L.car_no)}</td>
+        <td>${_esc(L.vin)}</td><td>${_esc(L.product)}</td>
+        <td class="c">${L.book_type === '환불' ? '환불' : '판매'}</td></tr>`).join('')}
+    </tbody></table></div>`).join('')}
+  <div class="tot"><span>합계 ${groups.length}명</span>
+    <span class="r">${nTot.toLocaleString('ko-KR')}건 · ${aTot.toLocaleString('ko-KR')}원</span></div>
+  <div class="foot">
+    판매자가 실제와 다른 건이 있으면 정산 담당자에게 알려주시기 바랍니다.
+    포털에서 건별로 수정 요청하시면 JLR Korea 승인 후 반영됩니다.<br>
+    출력 ${new Date().toLocaleString('ko-KR')} · JLR Korea 정산 포털
+  </div></body></html>`);
+  w.document.close();
 }
 
 checkSession();
