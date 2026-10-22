@@ -2624,8 +2624,16 @@ async function renderEngineOilSection(round, type, claims){
   const wantCoupon = eo.src === 'coupon' || eo.src === 'both';
   const wantSales  = eo.src === 'sales'  || eo.src === 'both';
   const wantSp     = eo.src === 'sp';
+  // 공지된 뒤에는 접어둔다 — 다시 계산할 일이 없으면 펼칠 이유가 없다
+  const upOpen = round.status === 'DRAFT';
   card.innerHTML = `
-    <div class="section-label" style="margin-top:0;">원본 업로드 — ${eo.label} (시스템 산출)</div>
+    <div class="section-label" style="margin-top:0; cursor:pointer; display:flex;
+         align-items:center; gap:8px;" id="eoUpToggle">
+      <span id="eoUpCaret" style="color:var(--muted,#7a8699);">${upOpen ? '－' : '＋'}</span>
+      <span>원본 업로드 — ${eo.label} (시스템 산출)</span>
+      ${upOpen ? '' : '<span class="hint" style="text-transform:none; letter-spacing:0;">다시 계산하려면 펼치세요</span>'}
+    </div>
+    <div id="eoUpBody" style="display:${upOpen ? 'block' : 'none'};">
     <div class="hint">
       리테일러 입력이 없는 유형입니다. 관리자가 원본을 올리면 시스템이 자동 계산합니다.<br>
       ${wantCoupon ? '쿠폰 클레임: <b>클레임상태=전송</b> AND 아직 정산되지 않은 건만. 중복키: 차대번호+참조번호+쿠폰번호.<br>' : ''}
@@ -2638,8 +2646,20 @@ async function renderEngineOilSection(round, type, claims){
       ${(wantSales || wantSp) ? `<div class="field"><label>쿠폰북 정산내역 원본</label>
         <input type="file" id="eoSales" accept=".xlsx,.xls"></div>` : ''}
     </div>
-    <div id="eoResult"></div>`;
+    <div id="eoResult"></div>
+    </div>`;
   host.appendChild(card);
+
+  // 머리말을 눌러 펼치고 접는다
+  const upT = card.querySelector('#eoUpToggle');
+  if(upT) upT.addEventListener('click', () => {
+    const body = card.querySelector('#eoUpBody');
+    const caret = card.querySelector('#eoUpCaret');
+    if(!body) return;
+    const open = body.style.display !== 'none';
+    body.style.display = open ? 'none' : 'block';
+    if(caret) caret.textContent = open ? '＋' : '－';
+  });
 
   const run = async () => {
     const cf = wantCoupon ? document.getElementById('eoCoupon')?.files[0] : null;
@@ -2954,9 +2974,11 @@ async function renderEngineOilRoundDetail(round, type){
   document.getElementById('reviewSection').appendChild(card);
 
   const vCount = eo.comps.length;
-  const vs = document.getElementById('voucherSection');
+  // 확정·바우처는 '맨 위' 에 둔다. 아래쪽 voucherSection 에 있으면 안 보인다.
+  // actions 안에서도 업로드 카드보다 앞에 오게 맨 앞에 꽂는다.
+  const vs = document.createElement('div');
+  actions.insertBefore(vs, actions.firstChild);
   if(round.status === 'PUBLISHED'){
-    const allDone = total > 0 && confirmed === total;
     // 확정 기한 — P&D 와 같은 방식. 기한이 있어야 리테일러 화면에
     // 'OO까지 확정해 주십시오' 와 기한 경과 표시가 뜬다.
     const dueAt = round.confirm_due_at ? new Date(round.confirm_due_at) : null;
@@ -3014,6 +3036,7 @@ async function renderEngineOilRoundDetail(round, type){
       await renderRoundDetail();
     });
 
+    const allDone = total > 0 && confirmed === total;
     const b = document.createElement('button');
     b.className = 'btn'; b.textContent = allDone ? '전체 확정 완료 처리' : `전체 확정 완료 처리 (미확인 ${total-confirmed}곳 강제 포함)`;
     b.addEventListener('click', () => finalizeEngineOilRound(round, type));
