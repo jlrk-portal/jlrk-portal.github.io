@@ -2631,7 +2631,7 @@ async function renderEngineOilSection(round, type, claims){
          align-items:center; gap:8px;" id="eoUpToggle">
       <span id="eoUpCaret" style="color:var(--muted,#7a8699);">${upOpen ? '－' : '＋'}</span>
       <span>원본 업로드 — ${eo.label} (시스템 산출)</span>
-      ${upOpen ? '' : '<span class="hint" style="margin-left:auto; text-transform:none;'
+      ${upOpen ? '' : '<span class="hint" style="margin:0; text-transform:none;'
         + ' letter-spacing:0; font-weight:400;">다시 계산하려면 펼치세요</span>'}
     </div>
     <div id="eoUpBody" style="display:${upOpen ? 'block' : 'none'};">
