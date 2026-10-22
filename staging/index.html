@@ -3183,10 +3183,29 @@ async function renderEngineOilRetailerCard(listEl, round, items){
         <div class="claim-sub" style="margin-left:18px;">JLR Korea 산출 정산 · 확인만 하시면 됩니다
           · <span class="badge ${round.status==='PUBLISHED'?'badge-ap':'badge-off'}">${ROUND_STATUS_LABEL[round.status]||round.status}</span></div>
         <div class="claim-sub" style="margin-top:4px; margin-left:18px;">
-          <b>${nTot.toLocaleString('ko-KR')}건 · ${won(grandTot)}</b>
-          ${round.invoice_issue_date ? ` · 인보이스 Date ${round.invoice_issue_date}` : ''}</div>
+          ${nTot.toLocaleString('ko-KR')}건${round.invoice_issue_date
+            ? ` · ${round.settlement_types?.requires_invoice ? '세금계산서' : '바우처'} 발행일 ${round.invoice_issue_date}` : ''}</div>
       </div>
       ${c.confirmed_at ? '<span class="badge badge-ap">확정완료</span>' : '<span class="badge badge-off">확인 대기</span>'}
+    </div>
+    <div class="eo-bar" style="display:flex; align-items:center; gap:18px; flex-wrap:wrap; margin:10px 0 0;
+                padding:10px 12px; background:var(--surface2); border-radius:6px;">
+      <div><div class="hint">대상 건수</div>
+        <div style="font-weight:600;">${nTot.toLocaleString('ko-KR')}건</div></div>
+      ${sRS ? `<div><div class="hint">사용반환금</div>
+        <div style="font-weight:600;">${won(d.customer)}</div></div>
+      <div><div class="hint">Retailer Support</div>
+        <div style="font-weight:600;">${won((d.vme||0)+(d.castrol||0))}</div></div>` : ''}
+      ${sSI ? `<div><div class="hint">Sales Incentive</div>
+        <div style="font-weight:600;">${won(d.incentive)}</div></div>` : ''}
+      ${sSP ? `<div><div class="hint">판매대금</div>
+        <div style="font-weight:600;">${won((d.sp_jg||0)+(d.sp_lr||0))}</div></div>` : ''}
+      <div><div class="hint">정산 금액</div>
+        <div style="font-weight:700; font-size:16px; color:var(--accent);">${won(grandTot)}</div></div>
+      <div style="margin-left:auto; display:flex; gap:8px;">
+        <button class="btn btn-sm btn-ghost eo-xls-btn">엑셀 다운로드</button>
+        ${canConfirm ? '<button class="btn btn-sm eo-confirm-btn">정산 확정</button>' : ''}
+      </div>
     </div>
     <div id="${uidSel}-body" style="display:none;">
       <div style="overflow-x:auto;"><table style="margin-top:10px;">
@@ -3195,9 +3214,6 @@ async function renderEngineOilRetailerCard(listEl, round, items){
         <tfoot><tr style="font-weight:600;">${tf.join('')}</tr></tfoot>
       </table></div>
       <div id="${uidSel}"></div>
-      <div style="margin-top:10px;">
-        <button class="btn btn-sm btn-ghost eo-xls-btn">엑셀 다운로드</button>
-      </div>
     </div>`;
 
   // 접힌 상태로 시작한다 (One DMS·픽업딜리버리와 같은 규칙)
@@ -3216,16 +3232,20 @@ async function renderEngineOilRetailerCard(listEl, round, items){
   /* 판매자별 내역 — Sales Incentive 를 쓰는 유형에서만. 수정 요청도 여기서 보낸다.
      (공지 전에는 행이 없으므로 아무것도 안 그린다) */
   if(sSI){
-    (async () => {
-      const box = document.getElementById(uidSel);
-      if(!box) return;
+    // ⚠ 이 시점에 card 는 아직 문서에 붙기 전이라 document.getElementById 로는 못 찾는다.
+    //    card 안에서 직접 찾는다. (이것 때문에 판매자 표가 통째로 안 뜨고 있었다)
+    const box = card.querySelector('#' + uidSel);
+    if(box){
       const draw = async () => {
         const rows = await loadSellerRows(round.id, c.retailer_id);
-        box.innerHTML = sellerTableRetailer(rows, !c.confirmed_at);
+        box.innerHTML = rows.length
+          ? sellerTableRetailer(rows, !c.confirmed_at)
+          : '<div class="hint" style="margin-top:12px;">판매자별 내역이 아직 없습니다. '
+            + 'JLR Korea 가 원본을 다시 올리면 표시됩니다.</div>';
         bindSellerRequest(box, draw);
       };
-      await draw();
-    })();
+      draw();
+    }
   }
 
   card.querySelector('.eo-xls-btn').onclick = () => {
@@ -3354,13 +3374,9 @@ async function renderEngineOilRetailerCard(listEl, round, items){
   }
 
   if(canConfirm){
-    const w = document.createElement('div');
-    w.style.marginTop = '12px';
-    w.innerHTML = `<button class="btn btn-sm eo-confirm-btn">정산 확정</button>
-      <span class="hint" style="margin-left:8px;">${round.settlement_types?.requires_invoice
-        ? '확정하면 이 금액으로 세금계산서 발행 대상이 확정됩니다.'
-        : '확정하면 이 금액으로 정산됩니다. 세금계산서 발행 대상은 아닙니다.'}</span>`;
-    w.querySelector('.eo-confirm-btn').addEventListener('click', async () => {
+    // 확정 버튼은 요약 바에 이미 있다. 거기에 연결만 한다 (버튼을 또 만들지 않는다)
+    const cb = card.querySelector('.eo-confirm-btn');
+    if(cb) cb.addEventListener('click', async () => {
       if(!confirm(`정산 합계 ${won(d.total)} 을(를) 확정할까요? 확정 후에는 취소할 수 없습니다.`)) return;
       const { data: upd, error } = await sb.from('claims')
         .update({ confirmed_at: new Date().toISOString() }).eq('id', c.id).select('id');
@@ -3371,7 +3387,6 @@ async function renderEngineOilRetailerCard(listEl, round, items){
       }
       await loadRetailerClaims();
     });
-    card.appendChild(w);
   }
   listEl.appendChild(card);
 }
