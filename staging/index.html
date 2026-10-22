@@ -583,6 +583,25 @@
       </div>
 
       <div class="info-card" style="margin-bottom:14px;">
+        <div class="section-label" style="margin-top:0;">Sales Report 적재 — 판매구분의 기준</div>
+        <div class="hint">
+          ASAP 인센티브는 Turn Over 만으로 못 냅니다. 한 건이 <b>Sales 실적인지 Service 실적인지</b>가
+          Sales Report 에서만 나오기 때문입니다. <b>시승차(DM) · 커티시카(LC) · 특수차(OUV)</b> 제외도
+          여기서 걸립니다.<br>
+          <b>Sales_Report_YYYYMM.xlsb</b> 를 그대로 올려주세요 (<b>Retail</b> 시트, 헤더 7행).
+          분기말 기준 <b>1년 전까지</b> 올려두셔야 제외가 제대로 걸립니다.
+        </div>
+        <div class="row2" style="max-width:620px; margin-top:10px;">
+          <div class="field"><label>Sales Report 파일 (여러 개 선택 가능)</label>
+            <input type="file" id="srFile" accept=".xlsb,.xlsx,.xls" multiple></div>
+          <div class="field"><label>적재 월 (비우면 파일명에서 자동)</label>
+            <input type="text" id="srYm" placeholder="예: 202609"></div>
+        </div>
+        <button class="btn btn-sm" id="srLoadBtn">Sales Report 적재</button>
+        <div id="srProgress" style="margin-top:10px;"></div>
+      </div>
+
+      <div class="info-card" style="margin-bottom:14px;">
         <div class="section-label" style="margin-top:0;">적재 현황</div>
         <div id="baseMonths"><div class="hint">불러오는 중...</div></div>
       </div>
@@ -11370,6 +11389,9 @@ const TO_MAP = [
   ['part_no',    ['품목코드','부품번호','품번']],
   ['part_name',  ['품목명','부품명']],
   ['qty',        ['품목수량','수량']],
+  // ASAP 인센티브는 '품목원가합계' 로 낸다. 045 때 빠져 있었다 (2026-10-23)
+  ['cost',       ['품목원가']],
+  ['cost_sum',   ['품목원가합계']],
   ['retail',     ['품목소매가']],
   ['retail_sum', ['품목소매가합계']],
   ['sale_sum',   ['품목판매단가합계']],
@@ -11378,13 +11400,17 @@ const TO_MAP = [
   ['vin',        ['차대번호','VIN']],
   ['reg_date',   ['차량등록일','최초등록일']],
   ['brand',      ['브랜드']],
+  ['series',     ['시리즈']],
   ['model',      ['모델']],
   ['dealer',     ['AS딜러','딜러']],
   ['workshop',   ['AS지점','지점']],
   ['customer',   ['고객명']],
+  // Service 실적이 붙는 자리. 이것도 045 때 빠져 있었다
+  ['sa',         ['담당SA','담당 SA']],
+  ['tech',       ['작업자']],
 ];
 const TO_TEXT = new Set(['ro_no','stl_no','inv_no','part_no','vin']);
-const TO_NUM  = new Set(['stl_line','qty','retail','retail_sum','sale_sum','split']);
+const TO_NUM  = new Set(['stl_line','qty','cost','cost_sum','retail','retail_sum','sale_sum','split']);
 const TO_DATE = new Set(['in_date','ro_date','inv_date','reg_date']);
 const TO_CHUNK = 2000;        // 한 번에 보낼 행수. 더 키우면 413 이 난다.
 
@@ -11419,34 +11445,55 @@ async function loadBaseData(){
 
 async function renderBaseMonths(){
   const host = document.getElementById('baseMonths');
-  const [{ data: tm }, { data: pm }] = await Promise.all([
+  const [{ data: tm }, { data: pm }, { data: sr }] = await Promise.all([
     sb.from('turnover_months').select('*'),
     sb.from('part_price_months').select('*'),
+    sb.from('sales_report_months').select('*'),
   ]);
   const months = new Map();
   (tm||[]).forEach(r => months.set(r.ym, { ym:r.ym, to:r }));
   (pm||[]).forEach(r => months.set(r.ym, { ...(months.get(r.ym)||{ym:r.ym}), pp:r }));
+  (sr||[]).forEach(r => months.set(r.ym, { ...(months.get(r.ym)||{ym:r.ym}), sr:r }));
   const rows = [...months.values()].sort((a,b) => b.ym.localeCompare(a.ym));
   if(!rows.length){ host.innerHTML = '<div class="hint">아직 적재된 데이터가 없습니다.</div>'; return; }
-  host.innerHTML = `<div style="overflow-x:auto;"><table style="min-width:680px;"><thead><tr>
+  const none = '<span class="hint">없음</span>';
+  host.innerHTML = `<div style="overflow-x:auto;"><table style="min-width:860px;"><thead><tr>
       <th>월</th><th style="text-align:right;">Turn Over 행</th><th style="text-align:right;">부품 행</th>
-      <th style="text-align:right;">부품가격 품번</th><th>마지막 적재</th><th></th>
+      <th style="text-align:right;">부품가격 품번</th><th style="text-align:right;">Sales Report 행</th>
+      <th style="text-align:center;">ASAP</th><th>마지막 적재</th><th></th>
     </tr></thead><tbody>
-    ${rows.map(r => `<tr>
+    ${rows.map(r => {
+      // ASAP 인센티브를 내려면 그 달에 Turn Over(64열 원본) 와 Sales Report 가 둘 다 있어야 한다
+      const ok = !!r.to && !!r.sr;
+      const last = [r.to?.loaded_at, r.pp?.loaded_at, r.sr?.loaded_at].filter(Boolean).sort().pop();
+      return `<tr>
       <td><b>${r.ym.slice(0,4)}-${r.ym.slice(4)}</b></td>
-      <td style="text-align:right;">${r.to ? Number(r.to.lines).toLocaleString('ko-KR') : '<span class="hint">없음</span>'}</td>
+      <td style="text-align:right;">${r.to ? Number(r.to.lines).toLocaleString('ko-KR') : none}</td>
       <td style="text-align:right;">${r.to ? Number(r.to.parts).toLocaleString('ko-KR') : '—'}</td>
-      <td style="text-align:right;">${r.pp ? Number(r.pp.parts).toLocaleString('ko-KR') : '<span class="hint">없음</span>'}</td>
-      <td class="muted">${new Date(r.to?.loaded_at || r.pp?.loaded_at).toLocaleDateString('ko-KR')}</td>
-      <td style="text-align:right;">${r.to
-        ? `<button class="btn btn-ghost btn-sm to-del" data-ym="${r.ym}">TO 삭제</button>` : ''}</td>
-    </tr>`).join('')}</tbody></table></div>`;
+      <td style="text-align:right;">${r.pp ? Number(r.pp.parts).toLocaleString('ko-KR') : none}</td>
+      <td style="text-align:right;">${r.sr ? Number(r.sr.lines).toLocaleString('ko-KR') : none}</td>
+      <td style="text-align:center;">${ok
+        ? '<span class="badge badge-ap">가능</span>'
+        : `<span class="badge badge-off">${!r.to ? 'TO 없음' : 'SR 없음'}</span>`}</td>
+      <td class="muted">${last ? new Date(last).toLocaleDateString('ko-KR') : '—'}</td>
+      <td style="text-align:right;">
+        ${r.to ? `<button class="btn btn-ghost btn-sm to-del" data-ym="${r.ym}">TO 삭제</button>` : ''}
+        ${r.sr ? `<button class="btn btn-ghost btn-sm sr-del" data-ym="${r.ym}" style="margin-left:4px;">SR 삭제</button>` : ''}
+      </td></tr>`; }).join('')}</tbody></table></div>`;
   host.querySelectorAll('.to-del').forEach(b => b.onclick = async () => {
     if(!confirm(`${b.dataset.ym} Turn Over 를 삭제합니다.\n이 달이 걸린 캠페인은 검증을 다시 돌려야 합니다. 계속할까요?`)) return;
     b.disabled = true;
     const { error } = await sb.from('turnover_lines').delete().eq('ym', b.dataset.ym);
     if(error){ alert('삭제 실패: ' + error.message); b.disabled = false; return; }
     await logAudit('TO_DELETE','BASE',null,{ label: b.dataset.ym });
+    await renderBaseMonths();
+  });
+  host.querySelectorAll('.sr-del').forEach(b => b.onclick = async () => {
+    if(!confirm(`${b.dataset.ym} Sales Report 를 삭제합니다.\n이 달이 걸린 ASAP 인센티브는 다시 계산해야 합니다. 계속할까요?`)) return;
+    b.disabled = true;
+    const { error } = await sb.from('sales_report_lines').delete().eq('ym', b.dataset.ym);
+    if(error){ alert('삭제 실패: ' + error.message); b.disabled = false; return; }
+    await logAudit('SR_DELETE','BASE',null,{ label: b.dataset.ym });
     await renderBaseMonths();
   });
 }
@@ -11477,6 +11524,128 @@ document.getElementById('toLoadBtn')?.addEventListener('click', async () => {
   }finally{ btn.disabled = false; }
 });
 
+/* ================================================================
+   Sales Report 적재  (2026-10-23)
+
+   ASAP 인센티브의 '판매구분' 이 여기서 나온다.
+     VIN 이 [전분기 마지막월 ~ 당분기말] Retail 에 있으면 → Sales
+     그 외 → Service (담당SA 실적)
+   제외(DM 시승차 · LC 커티시카 · OUV 특수차)도 여기서 걸린다.
+
+   원본은 .xlsb 다. SheetJS 가 읽어준다. 'Retail' 시트, 헤더 7행 —
+   다만 해마다 줄이 밀릴 수 있으니 'Vin' 이 있는 줄을 찾아 쓴다.
+   ================================================================ */
+const SR_MAP = [
+  ['vin',         ['Vin']],
+  ['brand',       ['Brand']],
+  ['model',       ['Model']],
+  ['model_year',  ['MY']],
+  ['order_type',  ['OrderType']],
+  ['showroom',    ['Retail전시장']],
+  ['retailer',    ['Retailer(ref.)']],
+  ['seller',      ['영업사원명']],
+  ['customer',    ['고객명']],
+  ['retail_date', ['리테일일자']],
+  ['note',        ['비고']],
+];
+const SR_NUM  = new Set(['model_year']);
+const SR_DATE = new Set(['retail_date']);
+const SR_CHUNK = 1000;
+
+async function loadSalesReportFile(file, ym){
+  const P = h => baseProgress('srProgress', h);
+  P(`<b>${ym}</b> · ${file.name} 읽는 중...`);
+  const wb = xsFixBook(XLSX.read(await file.arrayBuffer(), { type:'array', cellDates:true }));
+  // 'Retail' 시트. 이름이 조금 달라도 찾아낸다 (Wholesale 과 헷갈리면 안 된다).
+  const name = wb.SheetNames.find(n => n.replace(/\s/g,'').toLowerCase() === 'retail')
+            || wb.SheetNames.find(n => /retail/i.test(n) && !/whole/i.test(n));
+  if(!name) throw new Error(`'Retail' 시트를 찾지 못했습니다. (${wb.SheetNames.join(', ')})`);
+  const aoa = XLSX.utils.sheet_to_json(xsFixRange(wb.Sheets[name]), { header:1, raw:true, defval:null });
+
+  // 헤더 줄 — 'Vin' 이 있는 첫 줄 (실측 7행이지만 밀릴 수 있다)
+  const norm = c => String(c ?? '').replace(/\s/g,'');
+  let hi = aoa.findIndex(r => (r||[]).some(c => norm(c) === 'Vin'));
+  if(hi < 0) throw new Error("헤더에서 'Vin' 열을 찾지 못했습니다.");
+  const head = (aoa[hi]||[]).map(norm);
+  const col = {};
+  SR_MAP.forEach(([k, names]) => {
+    const i = head.findIndex(h => names.some(n => h === norm(n)));
+    if(i >= 0) col[k] = i;
+  });
+  const need = ['vin','order_type','showroom','seller'].filter(k => col[k] === undefined);
+  if(need.length) throw new Error('필수 열을 찾지 못했습니다: ' + need.join(', '));
+
+  const total = aoa.length - hi - 1;
+  P(`<b>${ym}</b> · ${total.toLocaleString('ko-KR')}행 확인. 기존 ${ym} 데이터를 지우는 중...`);
+  const { error: delErr } = await sb.from('sales_report_lines').delete().eq('ym', ym);
+  if(delErr) throw delErr;
+
+  let sent = 0, skipped = 0, batch = [];
+  const seen = new Set();     // 같은 파일 안의 중복 (유니크 인덱스에 걸린다)
+  const flush = async () => {
+    if(!batch.length) return;
+    const { error } = await sb.from('sales_report_lines').insert(batch);
+    if(error) throw error;
+    sent += batch.length; batch = [];
+    const pct = Math.round(sent / Math.max(total,1) * 100);
+    P(`<b>${ym}</b> 적재 중 — ${sent.toLocaleString('ko-KR')} / ${total.toLocaleString('ko-KR')}행 (${pct}%)
+       <div style="height:6px; background:var(--surface3); border-radius:3px; margin-top:6px; max-width:420px;">
+         <div style="height:6px; width:${pct}%; background:var(--accent); border-radius:3px;"></div></div>`);
+  };
+  for(let i = hi + 1; i < aoa.length; i++){
+    const r = aoa[i]; if(!r) continue;
+    const vin = String(r[col.vin] ?? '').trim();
+    if(!vin || vin.length < 10) continue;          // 합계줄·빈줄
+    const o = { ym };
+    for(const [k] of SR_MAP){
+      if(col[k] === undefined) continue;
+      const v = r[col[k]];
+      o[k] = SR_DATE.has(k) ? xlDate(v)
+           : SR_NUM.has(k)  ? xlNum(v)
+           : (v === null || v === undefined || v === '') ? null : String(v).trim();
+    }
+    const key = vin + '|' + (o.retail_date || '');
+    if(seen.has(key)){ skipped++; continue; }
+    seen.add(key);
+    batch.push(o);
+    if(batch.length >= SR_CHUNK) await flush();
+  }
+  await flush();
+  const ex = [...seen].length;
+  P(`<b>${ym}</b> 적재 완료 — ${sent.toLocaleString('ko-KR')}행`
+    + (skipped ? ` · 같은 차대·일자 중복 ${skipped.toLocaleString('ko-KR')}건 제외` : ''));
+  return { ym, sent, skipped };
+}
+
+document.getElementById('srLoadBtn')?.addEventListener('click', async () => {
+  const btn = document.getElementById('srLoadBtn');
+  const files = [...(document.getElementById('srFile')?.files || [])];
+  const forceYm = (document.getElementById('srYm')?.value || '').trim();
+  if(!files.length){ alert('Sales Report 파일을 선택해주세요.'); return; }
+  if(files.length > 1 && forceYm){ alert('여러 개를 올릴 때는 적재 월을 비워주세요. 파일명에서 읽습니다.'); return; }
+  btn.disabled = true;
+  try{
+    for(const f of files){
+      const ym = forceYm || ymFromSrName(f.name);
+      if(!ym){
+        baseProgress('srProgress',
+          `<span style="color:var(--danger);">${f.name} — 파일명에서 월을 읽지 못했습니다. 적재 월을 직접 입력해주세요.</span>`);
+        continue;
+      }
+      await loadSalesReportFile(f, ym);
+    }
+    await renderBaseMonths();
+  }catch(e){
+    baseProgress('srProgress', `<span style="color:var(--danger);">적재 실패: ${e.message || e}</span>`);
+  }finally{ btn.disabled = false; }
+});
+
+/* 'Sales_Report_202609.xlsb' → '202609' */
+function ymFromSrName(name){
+  const m = String(name).match(/(20\d{2})(0[1-9]|1[0-2])/);
+  return m ? m[1] + m[2] : null;
+}
+
 async function loadTurnoverFile(file, ym){
   const P = h => baseProgress('toProgress', h);
   P(`<b>${ym}</b> · ${file.name} 읽는 중...`);
@@ -11496,6 +11665,14 @@ async function loadTurnoverFile(file, ym){
   });
   const missing = ['ro_no','item_type','claim_acct','sale_sum'].filter(k => col[k] === undefined);
   if(missing.length) throw new Error('필수 열을 찾지 못했습니다: ' + missing.join(', '));
+  // 27열 추출본에는 원가·담당SA 가 없다. 그걸 올리면 ASAP 인센티브를 못 낸다.
+  const noAsap = ['cost_sum','sa'].filter(k => col[k] === undefined);
+  if(noAsap.length && !confirm(
+      '이 파일에는 ' + noAsap.join(' · ') + ' 열이 없습니다.\n'
+    + '64열 Turn Over 원본이 아니라 추출본으로 보입니다.\n\n'
+    + 'ASAP 인센티브는 이 열이 있어야 계산됩니다. 그래도 적재할까요?')) {
+    throw new Error('적재를 취소했습니다. 64열 Turn Over 원본을 올려주세요.');
+  }
 
   const total = aoa.length - hi - 1;
   P(`<b>${ym}</b> · ${total.toLocaleString('ko-KR')}행 확인. 기존 ${ym} 데이터를 지우는 중...`);
