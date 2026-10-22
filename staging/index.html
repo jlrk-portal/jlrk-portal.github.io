@@ -6856,7 +6856,10 @@ document.getElementById('saveWorkshopBtn').addEventListener('click', async () =>
   await loadRetailersAdmin();
 });
 
+/* 겹쳐 불리면 줄이 두 벌로 찍힌다 — 마지막 호출만 그리게 토큰을 둔다 */
+let roundsRun = 0;
 async function loadRounds(){
+  const myRun = ++roundsRun;
   const { data, error } = await sb.from('rounds')
     .select('*, settlement_types(name, code, direction, claim_unit)')
     .order('created_at', { ascending:false });
@@ -6915,9 +6918,19 @@ async function loadRounds(){
   }
   emptyState.style.display='none'; document.getElementById('roundsTable').style.display='table';
 
+  // 회차마다 count 를 두 번 돌리면 24회차에 48번 왕복한다. 한 번에 받아 센다.
+  const cnt = new Map();
+  const cs = await sbAll(() => sb.from('claims').select('round_id, status')
+    .in('round_id', rows.map(r => r.id)), '회차별 청구');
+  cs.forEach(c => {
+    if(!cnt.has(c.round_id)) cnt.set(c.round_id, { total:0, submitted:0 });
+    const x = cnt.get(c.round_id); x.total++;
+    if(['SUBMITTED','APPROVED'].includes(c.status)) x.submitted++;
+  });
+  if(myRun !== roundsRun) return;   // 그 사이 새로 불렸으면 그리지 않는다
+
   for(const r of rows){
-    const { count: total } = await sb.from('claims').select('id', {count:'exact', head:true}).eq('round_id', r.id);
-    const { count: submitted } = await sb.from('claims').select('id', {count:'exact', head:true}).eq('round_id', r.id).in('status', ['SUBMITTED','APPROVED']);
+    const { total = 0, submitted = 0 } = cnt.get(r.id) || {};
     const isAR = r.settlement_types?.direction === 'AR';
     const dd = roundDue(r, isAR);
     const due = dd.at;
@@ -6938,7 +6951,7 @@ async function loadRounds(){
       <td class="muted">${due
         ? `<span class="hint" style="margin-right:4px;">${dd.tag}</span>${new Date(due).toLocaleDateString('ko-KR')}`
         : '—'} ${dDayBadge(due, dd.live)}</td>
-      <td>${total ? `${submitted||0} / ${total}` : '—'}</td>
+      <td>${total ? `${submitted} / ${total}` : '—'}</td>
       <td><button class="btn btn-ghost btn-sm dup-round-btn">복제</button></td>`;
     tbody.appendChild(tr);
   }
