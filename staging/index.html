@@ -2608,8 +2608,8 @@ async function renderEngineOilSection(round, type, claims){
       const lines = await loadIncentiveLines(round.id, null);
       const groups = groupBySeller(lines, eo3vParams(type).INCENTIVE_UNIT);
       const nReq = lines.filter(L => L.req_status === 'REQUESTED').length;
-      box.innerHTML = '<div class="section-label" style="margin-top:0;">판매자별 · 건별 내역</div>'
-        + (nReq ? `<div class="info-card" style="margin-bottom:10px; border-color:#e0b050;
+      // 제목은 sellerBlocksHtml 이 건수·금액과 함께 넣는다 (여기서 또 넣으면 두 번 찍힘)
+      box.innerHTML = (nReq ? `<div class="info-card" style="margin-bottom:10px; border-color:#e0b050;
              background:#fff8ec;"><b>판매자 수정 요청 ${nReq}건</b>
              <div class="hint" style="margin-top:4px;">승인하면 그 건의 판매자가 바뀌고
                판매자별 건수가 따라 움직입니다. 금액 총액은 바뀌지 않습니다.</div></div>` : '')
@@ -2912,10 +2912,15 @@ function eoConfirmPanel(round, type, claims, confirmed, total){
   const vCount = eo.comps.length;
 
   const sumParts = [];
+  // 청구 합계가 정답이다. source_summary.grand 는 비어 있는 회차가 있다.
+  const claimSum = (claims||[]).reduce((a,c) => a + Number(c.approved_amount || 0), 0);
+  sumParts.push(`정산 합계 <b>${fmtWon(claimSum)}</b>`);
   if(eo.comps.includes('saveback'))     sumParts.push(`사용반환금 <b>${fmtWon(s.grand?.customer)}</b>`);
   if(eo.comps.includes('support'))      sumParts.push(`Retailer Support <b>${fmtWon((s.grand?.vme||0)+(s.grand?.castrol||0))}</b>`);
   if(eo.comps.includes('incentive'))    sumParts.push(`Sales Incentive <b>${fmtWon(s.grand?.incentive)}</b>`);
   if(eo.comps.includes('salespayment')) sumParts.push(`판매대금 <b>${fmtWon((s.grand?.sp_jg||0)+(s.grand?.sp_lr||0))}</b> (JG ${fmtWon(s.grand?.sp_jg)} / LR ${fmtWon(s.grand?.sp_lr)})`);
+  // grand 가 비어 0원만 늘어놓는 일이 없게 — 값이 있는 것만 남긴다
+  const sumShow = sumParts.filter((p,i) => i === 0 || !/>0원</.test(p));
 
   const rows = (claims||[]).slice().sort((a,b) =>
       ((a.retailers?.code||'')+(a.retailers?.name||''))
@@ -2965,8 +2970,8 @@ function eoConfirmPanel(round, type, claims, confirmed, total){
       <th>리테일러</th><th style="text-align:right;">정산 합계</th>
       <th style="text-align:center;">확정</th><th>확정 일시</th>
     </tr></thead><tbody>${rows}</tbody></table></div>
-    ${sumParts.length ? `<div class="hint" style="padding:9px 12px;
-      border-top:1px solid var(--surface3);">${sumParts.join(' · ')}</div>` : ''}
+    ${sumShow.length ? `<div class="hint" style="padding:9px 12px;
+      border-top:1px solid var(--surface3);">${sumShow.join(' · ')}</div>` : ''}
     ${foot}
   </div>`;
 }
@@ -3465,8 +3470,8 @@ async function renderEngineOilRetailerCard(listEl, round, items){
     }
 
     // 내 로우데이터 — RLS 로 자기 리테일러 행만 돌아온다
-    const { data: lines } = await sb.from('engineoil_lines').select('*')
-      .eq('round_id', round.id).order('workshop_code').order('used_at');
+    const lines = await sbAll(() => sb.from('engineoil_lines').select('*')
+      .eq('round_id', round.id).order('workshop_code').order('used_at'), '엑셀 원본');
     const cp = (lines||[]).filter(L => L.kind === 'COUPON');
     const bk = (lines||[]).filter(L => L.kind === 'BOOK');
     if(cp.length){
@@ -12751,14 +12756,28 @@ function bindSellerDecide(host, rows, onDone){
      판매자별 건수는 자연히 따라 움직인다. 집계에 달면 안 옮겨간다.
    ================================================================ */
 
+/* PostgREST 는 한 번에 1,000행까지만 준다. 그 이상이면 말없이 잘린다.
+   (2026-10-22 실측: BOOK 1,416건 중 1,000건만 읽혀 판매자별 내역과
+    리테일러 엑셀 원본이 416건 모자랐다) 끝까지 돌려 받는다. */
+async function sbAll(makeQuery, tag){
+  const out = [];
+  for(let from = 0;; from += 1000){
+    const { data, error } = await makeQuery().range(from, from + 999);
+    if(error){ console.warn('[' + (tag||'조회') + ']', error.message); break; }
+    out.push(...(data || []));
+    if(!data || data.length < 1000) break;
+  }
+  return out;
+}
+
 async function loadIncentiveLines(roundId, retailerId){
-  let q = sb.from('engineoil_lines').select('*')
-            .eq('round_id', roundId).eq('kind', 'BOOK')
-            .order('workshop_code').order('seller_name').order('used_at');
-  if(retailerId) q = q.eq('retailer_id', retailerId);
-  const { data, error } = await q;
-  if(error){ console.warn('[인센티브 라인]', error.message); return []; }
-  return data || [];
+  return sbAll(() => {
+    let q = sb.from('engineoil_lines').select('*')
+              .eq('round_id', roundId).eq('kind', 'BOOK')
+              .order('workshop_code').order('seller_name').order('used_at');
+    if(retailerId) q = q.eq('retailer_id', retailerId);
+    return q;
+  }, '인센티브 라인');
 }
 
 /* 라인 → 판매자별 묶음. 환불은 건수에서 뺀다. */
