@@ -2631,7 +2631,8 @@ async function renderEngineOilSection(round, type, claims){
          align-items:center; gap:8px;" id="eoUpToggle">
       <span id="eoUpCaret" style="color:var(--muted,#7a8699);">${upOpen ? '－' : '＋'}</span>
       <span>원본 업로드 — ${eo.label} (시스템 산출)</span>
-      ${upOpen ? '' : '<span class="hint" style="text-transform:none; letter-spacing:0;">다시 계산하려면 펼치세요</span>'}
+      ${upOpen ? '' : '<span class="hint" style="margin-left:auto; text-transform:none;'
+        + ' letter-spacing:0; font-weight:400;">다시 계산하려면 펼치세요</span>'}
     </div>
     <div id="eoUpBody" style="display:${upOpen ? 'block' : 'none'};">
     <div class="hint">
@@ -2950,7 +2951,9 @@ async function renderEngineOilRoundDetail(round, type){
       if(!btn){ clearInterval(obs); return; }
       btn.disabled = !(window.__eo3v && window.__eo3v.round_id === round.id && window.__eo3v[needKey]);
     }, 800);
-    return;
+    // ⚠ DRAFT 일 때만 여기서 끝낸다. 공지된 회차에서 return 하면 아래의
+    //   확정 현황·확정 기한·전체 확정 완료 처리·바우처가 통째로 안 그려진다.
+    if(round.status === 'DRAFT') return;
   }
 
   // PUBLISHED 이후 — 리테일러 확정 현황
