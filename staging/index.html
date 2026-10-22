@@ -2859,7 +2859,11 @@ async function renderEngineOilRoundDetail(round, type){
     const el = document.getElementById(id); if(el) el.innerHTML = '';
   });
 
-  if(round.status === 'DRAFT'){
+  // 공지 뒤에도 원본을 다시 올려 정정할 수 있어야 한다.
+  // 바우처가 나간 뒤에는 열지 않는다.
+  const canUpload = ['DRAFT','PUBLISHED'].includes(round.status);
+  const isRepub = round.status === 'PUBLISHED';
+  if(canUpload){
     const wrap = document.createElement('div');
     wrap.innerHTML = `
       <div class="row2" style="max-width:420px;">
@@ -2867,8 +2871,12 @@ async function renderEngineOilRoundDetail(round, type){
           ? '세금계산서 발행일 (바우처 Invoice Date)' : '인보이스 Date (바우처)'}</label>
           <input type="date" id="eoIssueDate" value="${round.invoice_issue_date || new Date().toISOString().slice(0,10)}"></div>
       </div>
-      <button class="btn" id="eoPublishBtn" disabled>리테일러에 정산내역 공지</button>
-      <div class="hint" style="margin-top:6px;">원본 2개를 올려 미리보기가 나온 뒤 활성화됩니다.</div>`;
+      <button class="btn" id="eoPublishBtn" disabled>${isRepub
+        ? '다시 계산해서 정정 공지' : '리테일러에 정산내역 공지'}</button>
+      <div class="hint" style="margin-top:6px;">${isRepub
+        ? '이미 공지된 회차입니다. 원본을 다시 올리면 새로 계산합니다. '
+          + '<b>금액이 그대로인 리테일러의 확정은 유지</b>되고, 금액이 바뀐 곳에만 다시 통지합니다.'
+        : '원본을 올려 미리보기가 나온 뒤 활성화됩니다.'}</div>`;
     actions.appendChild(wrap);
     document.getElementById('eoPublishBtn').addEventListener('click', () => publishEngineOilRound(round, type));
     await renderEngineOilSection(round, type, claims);
