@@ -2437,6 +2437,10 @@ async function parseEngineOilSales(buf, type){
   const iVin  = hdr.map['차대번호'];
   const iCbid = hdr.map['쿠폰북ID'] ?? hdr.map['쿠폰북 ID'];
   const iPrice = hdr.map['가격 (VAT)'] ?? hdr.map['가격(VAT)'] ?? hdr.map['가격'];
+  // 원본에 판매자ID·판매자명이 들어 있다. 지금까지 안 읽었는데,
+  // 리테일러가 판매자별로 확인하고 틀리면 수정 요청을 보내려면 필요하다.
+  const iSid  = hdr.map['판매자ID'] ?? hdr.map['판매자 ID'];
+  const iSnm  = hdr.map['판매자명'] ?? hdr.map['판매자'];
 
   // 기정산 지문 (type 있을 때만)
   const known = new Set();
@@ -2451,6 +2455,7 @@ async function parseEngineOilSales(buf, type){
   }
 
   const byWs = new Map();     // code → { sale, refund }
+  const bySeller = new Map(); // code|sid|name → { code, site, sid, name, sale, refund }
   const unmatched = new Map();
   const targetHashes = [];
   const seen = new Set();
@@ -2479,12 +2484,21 @@ async function parseEngineOilSales(buf, type){
     let g = byWs.get(code);
     if(!g){ g = { sale:0, refund:0 }; byWs.set(code, g); }
     if(t === '판매') g.sale++; else g.refund++;
+
+    // 판매자별로도 같이 센다 (지점 합계와 반드시 일치한다)
+    const sid = iSid !== undefined ? String(row[iSid] ?? '').trim() : '';
+    const snm = iSnm !== undefined ? String(row[iSnm] ?? '').trim() : '';
+    const sk = code + '|' + sid + '|' + snm;
+    let sg = bySeller.get(sk);
+    if(!sg){ sg = { code, site, sid, name: snm, sale:0, refund:0 }; bySeller.set(sk, sg); }
+    if(t === '판매') sg.sale++; else sg.refund++;
     if(hash){
       const amt = iPrice !== undefined ? (Number(String(row[iPrice]).replace(/,/g,'')) || 0) : 0;
       targetHashes.push({ hash, code, keys:[vin, cb, t], amount: amt });
     }
   }
-  return { byWs, unmatched, targetHashes, nDup, nAlready, nTarget: targetHashes.length };
+  return { byWs, bySeller: [...bySeller.values()], unmatched, targetHashes,
+           nDup, nAlready, nTarget: targetHashes.length };
 }
 
 // ── 쿠폰북정산내역 원본 → 지점별 판매대금 (AR: 리테일러 → JLRK 입금) ──
@@ -2549,6 +2563,19 @@ async function parseEngineOilSalesPayment(buf, type){
 async function renderEngineOilSection(round, type, claims){
   const eo = eoPreset(type);
   const host = document.getElementById('reviewSection');
+  /* 판매자별 내역 (Sales Incentive) — 리테일러·지점·판매자 표와 수정 요청 처리 */
+  if(eoPreset(type)?.comps?.includes('incentive') && round.status !== 'DRAFT'){
+    const box = document.createElement('div');
+    box.className = 'info-card';
+    box.style.marginTop = '12px';
+    const drawSel = async () => {
+      const rows = await loadSellerRows(round.id, null);
+      box.innerHTML = '<div class="section-label" style="margin-top:0;">판매자별 내역 · 수정 요청</div>'
+                    + sellerTableAdmin(rows);
+      bindSellerDecide(box, rows, drawSel);
+    };
+    drawSel().then(() => host.appendChild(box));
+  }
   const card = document.createElement('div');
   card.className = 'info-card';
   const wantCoupon = eo.src === 'coupon' || eo.src === 'both';
@@ -2818,7 +2845,8 @@ async function renderEngineOilRoundDetail(round, type){
     `<span class="badge ${round.status==='DRAFT'?'badge-off':'badge-ap'}">${ROUND_STATUS_LABEL[round.status]||round.status}</span>`;
   document.getElementById('rd_meta').textContent = `${eo.ar ? 'AR' : 'AP'} · 시스템 산출 (${eo.label}) · 리테일러 확인만`;
   document.getElementById('rd_due').textContent = round.invoice_issue_date
-    ? `세금계산서 발행일 ${round.invoice_issue_date}` : '발행일 미설정';
+    ? `${type?.requires_invoice ? '세금계산서' : '바우처'} 발행일 ${round.invoice_issue_date}`
+    : '발행일 미설정';
 
   const { data: claims } = await sb.from('claims')
     .select('*, retailers(code,name,biz_no)').eq('round_id', round.id).order('created_at');
@@ -2941,6 +2969,40 @@ async function publishEngineOilRound(round, type){
       if(changed) notifyTargets.push(rt);
     }
 
+    // 판매자별 내역 — 리테일러가 확인하고 틀리면 수정 요청을 보내는 표
+    if(eo.sales?.bySeller?.length){
+      const P2 = eo3vParams(type);
+      const wsByCode = new Map((allWs||[]).map(w => [w.code, w]));
+      const seller = eo.sales.bySeller.map(x => {
+        const w = wsByCode.get(x.code);
+        const fin = x.sale - x.refund;
+        return {
+          round_id: round.id, retailer_id: w?.retailer_id || null,
+          retailer_code: w?.retailers?.code || '', workshop_code: x.code,
+          workshop_name: x.site || w?.name || '',
+          seller_id: x.sid || null, seller_name: x.name || '(미기재)',
+          sale: x.sale, refund: x.refund, cnt: fin,
+          amount: Math.max(0, fin) * P2.INCENTIVE_UNIT,
+        };
+      });
+      // 회차 단위로 갈아끼운다. 단, 이미 들어온 수정 요청은 지우지 않는다.
+      const { data: keep } = await sb.from('incentive_sellers')
+        .select('workshop_code, seller_id, seller_name, req_name, req_note, req_status, req_at, prev_name')
+        .eq('round_id', round.id).neq('req_status', 'NONE');
+      const keepMap = new Map((keep||[]).map(k =>
+        [k.workshop_code + '|' + (k.seller_id||'') + '|' + (k.seller_name||''), k]));
+      seller.forEach(r => {
+        const k = keepMap.get(r.workshop_code + '|' + (r.seller_id||'') + '|' + (r.seller_name||''));
+        if(k){ r.req_name=k.req_name; r.req_note=k.req_note; r.req_status=k.req_status;
+               r.req_at=k.req_at; r.prev_name=k.prev_name; }
+      });
+      await sb.from('incentive_sellers').delete().eq('round_id', round.id);
+      for(let i = 0; i < seller.length; i += 400){
+        const { error: sErr } = await sb.from('incentive_sellers').insert(seller.slice(i, i+400));
+        if(sErr) throw new Error('판매자별 내역 저장 실패: ' + sErr.message);
+      }
+    }
+
     const cSrc = eo.coupon || eo.sales || eo.sp;
     const summary = {
       preset: type.source_config?.preset || 'ENGINE_OIL_3V', computed_at: new Date().toISOString(),
@@ -3002,6 +3064,7 @@ async function finalizeEngineOilRound(round, type){
 async function renderEngineOilRetailerCard(listEl, round, items){
   const c = items[0];
   const d = c.detail || {};
+  const uidSel = 'sel' + String(c.id).slice(0, 8);
   const won = (n) => fmtWon(Math.round(n||0));
   const canConfirm = round.status === 'PUBLISHED' && !c.confirmed_at;
   const eo = eoPreset(round.settlement_types) || { comps:['saveback','support','incentive'] };
@@ -3059,10 +3122,26 @@ async function renderEngineOilRetailerCard(listEl, round, items){
       <tbody>${wsRows}</tbody>
       <tfoot><tr style="font-weight:600;">${tf.join('')}</tr></tfoot>
     </table></div>
+    <div id="${uidSel}"></div>
     <div style="margin-top:10px;">
       <button class="btn btn-sm btn-ghost eo-xls-btn">엑셀 다운로드</button>
     </div>`;
   d.total = grandTot;
+
+  /* 판매자별 내역 — Sales Incentive 를 쓰는 유형에서만. 수정 요청도 여기서 보낸다.
+     (공지 전에는 행이 없으므로 아무것도 안 그린다) */
+  if(sSI){
+    (async () => {
+      const box = document.getElementById(uidSel);
+      if(!box) return;
+      const draw = async () => {
+        const rows = await loadSellerRows(round.id, c.retailer_id);
+        box.innerHTML = sellerTableRetailer(rows, !c.confirmed_at);
+        bindSellerRequest(box, draw);
+      };
+      await draw();
+    })();
+  }
 
   card.querySelector('.eo-xls-btn').onclick = () => {
     const cols = [{ key:'ws', label:'지점', w:14 }, { key:'n', label:'건수', w:9, type:'num' }];
@@ -3798,7 +3877,8 @@ async function renderOneDmsRoundDetail(round, type){
     `<span class="badge ${round.status==='DRAFT'?'badge-off':'badge-ap'}">${ROUND_STATUS_LABEL[round.status]||round.status}</span>`;
   document.getElementById('rd_meta').textContent = 'AR · 시스템 산출 (One DMS 라이선스) · 리테일러 확인만';
   document.getElementById('rd_due').textContent = round.invoice_issue_date
-    ? `세금계산서 발행일 ${round.invoice_issue_date}` : '발행일 미설정';
+    ? `${type?.requires_invoice ? '세금계산서' : '바우처'} 발행일 ${round.invoice_issue_date}`
+    : '발행일 미설정';
 
   ['rd_actions','reviewSection','invoiceSection','voucherSection'].forEach(id => {
     const el = document.getElementById(id); if(el) el.innerHTML = '';
@@ -12162,6 +12242,175 @@ async function openNoticeSummary(){
   <\/script></body></html>`);
   w.document.close();
   await logAudit('NOTICE_SUMMARY','ROUND', currentRoundId, { label: `${type.name} · ${round.period_label}` });
+}
+
+/* ================================================================
+   Sales Incentive 판매자별 내역 (2026-10-22)
+
+   리테일러는 "우리 지점 누가 몇 건 팔아서 얼마" 를 봐야 하고, 실제
+   판매자가 다르면 고쳐 달라고 보낼 수 있어야 한다. 매니저가 승인해야
+   바뀐다 — 리테일러가 직접 이름을 바꾸지는 못한다(DB 트리거로도 막아둠).
+   ================================================================ */
+
+async function loadSellerRows(roundId, retailerId){
+  let q = sb.from('incentive_sellers').select('*').eq('round_id', roundId)
+            .order('workshop_code').order('seller_name');
+  if(retailerId) q = q.eq('retailer_id', retailerId);
+  const { data, error } = await q;
+  if(error){ console.warn('[판매자내역]', error.message); return []; }
+  return data || [];
+}
+
+const SELLER_REQ_BADGE = {
+  REQUESTED: '<span class="badge badge-ar">수정 요청중</span>',
+  APPROVED : '<span class="badge badge-ap">수정 반영됨</span>',
+  REJECTED : '<span class="badge badge-off">요청 반려</span>',
+};
+
+/* ── 리테일러 화면 ───────────────────────────────────────────── */
+function sellerTableRetailer(rows, editable){
+  if(!rows.length) return '';
+  const byWs = new Map();
+  rows.forEach(r => {
+    if(!byWs.has(r.workshop_code)) byWs.set(r.workshop_code, []);
+    byWs.get(r.workshop_code).push(r);
+  });
+  const esc = v => String(v == null ? '' : v).replace(/[<>]/g, '');
+  const n = rows.reduce((a, r) => a + (r.cnt || 0), 0);
+  const amt = rows.reduce((a, r) => a + Number(r.amount || 0), 0);
+
+  return `<div style="margin-top:14px;">
+    <div class="section-label" style="margin-top:0;">판매자별 내역
+      <span class="hint" style="margin-left:6px; text-transform:none; letter-spacing:0;">
+        ${n.toLocaleString('ko-KR')}건 · ${fmtWon(amt)}</span></div>
+    ${editable ? `<div class="hint" style="margin-bottom:8px;">
+      실제 판매자가 다르면 <b>[수정 요청]</b> 으로 알려주세요.
+      JLR Korea 가 승인하면 반영됩니다. 금액은 바뀌지 않습니다.</div>` : ''}
+    <div style="overflow-x:auto;"><table style="min-width:640px;"><thead><tr>
+      <th>지점</th><th>판매자</th>
+      <th style="text-align:right;">판매</th><th style="text-align:right;">환불</th>
+      <th style="text-align:right;">최종</th><th style="text-align:right;">인센티브</th>
+      ${editable ? '<th></th>' : '<th>요청</th>'}
+    </tr></thead><tbody>
+      ${[...byWs.entries()].map(([ws, list]) => list.map((r, i) => `<tr data-sel="${r.id}">
+        <td>${i === 0 ? esc(r.workshop_name || ws) : ''}</td>
+        <td>${esc(r.seller_name)}
+          ${r.req_status === 'REQUESTED' ? `<div class="hint">→ ${esc(r.req_name)} 요청중</div>` : ''}
+          ${r.req_status === 'APPROVED' && r.prev_name ? `<div class="hint">(이전 ${esc(r.prev_name)})</div>` : ''}
+          ${r.req_status === 'REJECTED' ? `<div class="hint" style="color:var(--danger);">요청 반려${
+            r.decide_note ? ' — ' + esc(r.decide_note) : ''}</div>` : ''}</td>
+        <td style="text-align:right;">${r.sale}</td>
+        <td style="text-align:right;">${r.refund || ''}</td>
+        <td style="text-align:right;">${r.cnt}</td>
+        <td style="text-align:right;">${fmtWon(r.amount)}</td>
+        <td style="text-align:right;">${editable
+          ? (r.req_status === 'REQUESTED'
+              ? '<span class="hint">요청 접수됨</span>'
+              : `<button class="btn btn-ghost btn-sm sel-req" data-id="${r.id}">수정 요청</button>`)
+          : (SELLER_REQ_BADGE[r.req_status] || '')}</td>
+      </tr>`).join('')).join('')}
+    </tbody><tfoot><tr style="font-weight:600;">
+      <td colspan="4">합계</td>
+      <td style="text-align:right;">${n.toLocaleString('ko-KR')}</td>
+      <td style="text-align:right;">${fmtWon(amt)}</td><td></td>
+    </tr></tfoot></table></div></div>`;
+}
+
+function bindSellerRequest(host, onDone){
+  host.querySelectorAll('.sel-req').forEach(b => b.onclick = async () => {
+    const name = prompt('실제 판매자명을 적어주세요.\n(JLR Korea 가 승인하면 반영됩니다)');
+    if(name === null) return;
+    const nm = name.trim();
+    if(!nm){ alert('판매자명을 입력해주세요.'); return; }
+    const note = prompt('사유가 있으면 적어주세요. (선택)', '') || '';
+    b.disabled = true; b.textContent = '보내는 중...';
+    const { data: { user } } = await sb.auth.getUser();
+    const { data, error } = await sb.from('incentive_sellers')
+      .update({ req_name: nm, req_note: note || null, req_status: 'REQUESTED',
+                req_at: new Date().toISOString(), req_by: user?.id || null })
+      .eq('id', b.dataset.id).select('id');
+    if(error){ alert('요청 실패: ' + error.message); b.disabled = false; b.textContent = '수정 요청'; return; }
+    if(!data || !data.length){
+      alert('요청이 반영되지 않았습니다 (0건). 새로고침 후 다시 시도해주세요.');
+      b.disabled = false; b.textContent = '수정 요청'; return;
+    }
+    await onDone();
+  });
+}
+
+/* ── 관리자 화면 ─────────────────────────────────────────────── */
+function sellerTableAdmin(rows){
+  if(!rows.length) return '<div class="hint">판매자별 내역이 없습니다. 원본을 올려 공지하면 생성됩니다.</div>';
+  const esc = v => String(v == null ? '' : v).replace(/[<>]/g, '');
+  const req = rows.filter(r => r.req_status === 'REQUESTED');
+  const n = rows.reduce((a, r) => a + (r.cnt || 0), 0);
+  const amt = rows.reduce((a, r) => a + Number(r.amount || 0), 0);
+  return `
+    ${req.length ? `<div class="info-card" style="margin-bottom:10px; border-color:#e0b050; background:#fff8ec;">
+      <b>판매자 수정 요청 ${req.length}건</b>
+      <div class="hint" style="margin-top:4px;">승인하면 판매자명이 바뀝니다. 금액·건수는 그대로입니다.</div>
+    </div>` : ''}
+    <div style="overflow-x:auto;"><table style="min-width:860px;"><thead><tr>
+      <th>리테일러</th><th>지점</th><th>판매자</th>
+      <th style="text-align:right;">판매</th><th style="text-align:right;">환불</th>
+      <th style="text-align:right;">최종</th><th style="text-align:right;">인센티브</th>
+      <th>수정 요청</th><th></th>
+    </tr></thead><tbody>
+      ${rows.map(r => `<tr data-sel="${r.id}">
+        <td>${esc(r.retailer_code)}</td>
+        <td>${esc(r.workshop_name || r.workshop_code)}</td>
+        <td>${esc(r.seller_name)}${r.req_status === 'APPROVED' && r.prev_name
+          ? `<div class="hint">(이전 ${esc(r.prev_name)})</div>` : ''}</td>
+        <td style="text-align:right;">${r.sale}</td>
+        <td style="text-align:right;">${r.refund || ''}</td>
+        <td style="text-align:right;">${r.cnt}</td>
+        <td style="text-align:right;">${fmtWon(r.amount)}</td>
+        <td>${r.req_status === 'REQUESTED'
+          ? `<b style="color:var(--accent-ar);">→ ${esc(r.req_name)}</b>${
+              r.req_note ? `<div class="hint">${esc(r.req_note)}</div>` : ''}`
+          : (SELLER_REQ_BADGE[r.req_status] || '')}</td>
+        <td style="text-align:right; white-space:nowrap;">${r.req_status === 'REQUESTED'
+          ? `<button class="btn btn-sm sel-ok" data-id="${r.id}">승인</button>
+             <button class="btn btn-ghost btn-sm sel-no" data-id="${r.id}">반려</button>` : ''}</td>
+      </tr>`).join('')}
+    </tbody><tfoot><tr style="font-weight:600;">
+      <td colspan="5">합계 ${rows.length}명</td>
+      <td style="text-align:right;">${n.toLocaleString('ko-KR')}</td>
+      <td style="text-align:right;">${fmtWon(amt)}</td><td colspan="2"></td>
+    </tr></tfoot></table></div>`;
+}
+
+function bindSellerDecide(host, rows, onDone){
+  const byId = new Map(rows.map(r => [r.id, r]));
+  host.querySelectorAll('.sel-ok').forEach(b => b.onclick = async () => {
+    const r = byId.get(b.dataset.id);
+    if(!confirm(`판매자명을 바꿉니다.\n\n${r.workshop_name || r.workshop_code}\n`
+              + `${r.seller_name} → ${r.req_name}\n\n금액·건수는 그대로입니다. 승인할까요?`)) return;
+    b.disabled = true;
+    const { data: { user } } = await sb.auth.getUser();
+    const { error } = await sb.from('incentive_sellers').update({
+      prev_name: r.seller_name, seller_name: r.req_name,
+      req_status: 'APPROVED', decided_at: new Date().toISOString(), decided_by: user?.id || null,
+    }).eq('id', r.id).select('id');
+    if(error){ alert('승인 실패: ' + error.message); b.disabled = false; return; }
+    await logAudit('SELLER_APPROVE','ROUND', r.round_id,
+      { label: `${r.workshop_code} ${r.seller_name} → ${r.req_name}` });
+    await onDone();
+  });
+  host.querySelectorAll('.sel-no').forEach(b => b.onclick = async () => {
+    const r = byId.get(b.dataset.id);
+    const note = prompt('반려 사유를 적어주세요. 리테일러에게 그대로 보입니다.', '');
+    if(note === null) return;
+    b.disabled = true;
+    const { data: { user } } = await sb.auth.getUser();
+    const { error } = await sb.from('incentive_sellers').update({
+      req_status: 'REJECTED', decide_note: note || null,
+      decided_at: new Date().toISOString(), decided_by: user?.id || null,
+    }).eq('id', r.id).select('id');
+    if(error){ alert('반려 실패: ' + error.message); b.disabled = false; return; }
+    await logAudit('SELLER_REJECT','ROUND', r.round_id, { label: `${r.workshop_code} ${r.seller_name}` });
+    await onDone();
+  });
 }
 
 checkSession();
