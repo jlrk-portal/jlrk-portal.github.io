@@ -137,11 +137,8 @@ excl_win as (
 ),
 -- 전시차: 지원 분기 앞뒤 N개월이 이 회차 기간과 겹치면 검토 대상
 show_vin as (
-  select distinct s.vin
-    from asap_support_vins s, cfg, lateral asap_fy_range(s.period_label) r
-   where s.kind = 'SHOWROOM' and r.d_from is not null
-     and (r.d_from - make_interval(months => cfg.sm))::date <= p_to
-     and (r.d_to   + make_interval(months => cfg.sm))::date >= p_from
+  -- 손으로 올린 것 + 전시차 지원 프로그램 정산서 이력 (065). 함수가 없으면 앞엣것만.
+  select vin from asap_showroom_window(p_from, p_to, (select sm from cfg))
 ),
 promo_vin as (
   select vin, string_agg(distinct coalesce(support_type,'프로모션'), ', ') as kinds

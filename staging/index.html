@@ -1098,7 +1098,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 15:48';
+const BUILD = '10-23 15:55';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -9037,6 +9037,74 @@ function asapBranchLabel(scope, branch){
   return hit ? `${_asapRtByCode.get(hit)} · ${branch}` : branch;
 }
 
+/* 전시차 지원 프로그램 정산서 적재 — 'ASAP 전시차' 시트를 통째로 쌓는다.
+   열을 버리지 않는다: 쓰는 열은 꺼내 두고 원본 행은 raw 에 담는다. (2026-10-23)
+   파일명 'FY2526 Q1 …' → FY26 Q1 로 맞춘다 (회계연도 표기가 두 가지다). */
+function asapFyFromName(name){
+  const m = String(name).match(/FY\s*(\d{2})(\d{2})?\s*(Q[1-4])/i);
+  if(!m) return null;
+  const fy = m[2] ? 'FY' + m[2] : 'FY' + m[1];     // FY2526 → FY26
+  return `${fy} ${m[3].toUpperCase()}`;
+}
+
+async function asapLoadShowroomFile(file, msg){
+  const P = h => { if(msg) msg.innerHTML = h; };
+  const fy = asapFyFromName(file.name);
+  if(!fy) throw new Error(`${file.name} — 파일명에서 분기를 읽지 못했습니다 (예: FY27 Q1).`);
+  P(`<b>${fy}</b> · ${file.name} 읽는 중...`);
+  const wb = xsFixBook(XLSX.read(await file.arrayBuffer(), { type:'array' }));
+  const sn = wb.SheetNames.find(n => n.replace(/\s/g,'') === 'ASAP전시차')
+          || wb.SheetNames.find(n => /전시차/.test(n));
+  if(!sn) throw new Error(`'ASAP 전시차' 시트를 찾지 못했습니다 (${wb.SheetNames.join(', ')}).`);
+  const aoa = XLSX.utils.sheet_to_json(xsFixRange(wb.Sheets[sn]), { header:1, raw:true, defval:null });
+  const hi = aoa.findIndex(r => (r||[]).some(c => String(c ?? '').trim() === 'VIN'));
+  if(hi < 0) throw new Error("머리글에서 'VIN' 을 찾지 못했습니다.");
+  const cols = (aoa[hi]||[]).map((h, i) => ({ name: String(h ?? '').trim(), i }))
+                            .filter(x => x.name);
+  const at = (names) => { const c = cols.find(x => names.includes(x.name.replace(/\s/g,''))); return c ? c.i : undefined; };
+  const iV = at(['VIN']), iRt = at(['리테일러명']), iBr = at(['지점']),
+        iNew = at(['신규/기존']), iDt = at(['장착일자']), iBrand = at(['브랜드']),
+        iMd = at(['장착모델']), iL460 = at(['L460/461지원']),
+        iPn = at(['장착액세서리품번']), iPnm = at(['장착액세서리품명']),
+        iRp = at(['소비자가격']), iQty = at(['수량']), iSa = at(['총매출액']),
+        iCo = at(['매출원가']), iSup = at(['지원금액','지원금청구액']);
+  const num = v => { const n = Number(String(v ?? '').replace(/,/g,'')); return isFinite(n) ? n : null; };
+  const { data: { user } } = await sb.auth.getUser();
+  const rows = [];
+  for(let r = hi + 1; r < aoa.length; r++){
+    const row = aoa[r]; if(!row) continue;
+    const vin = String(row[iV] ?? '').trim().toUpperCase();
+    if(vin.length < 11) continue;
+    const raw = {}; cols.forEach(c => { raw[c.name] = _eoCell(row, c.i); });
+    rows.push({ fy_label: fy, src_file: file.name, src_row: r + 1,
+      retailer_code: iRt   !== undefined ? _eoCell(row, iRt)   || null : null,
+      branch_code:   iBr   !== undefined ? _eoCell(row, iBr)   || null : null,
+      is_new:        iNew  !== undefined ? _eoCell(row, iNew)  || null : null,
+      fit_date:      iDt   !== undefined ? xlDate(row[iDt]) : null,
+      brand:         iBrand!== undefined ? _eoCell(row, iBrand)|| null : null,
+      model:         iMd   !== undefined ? _eoCell(row, iMd)   || null : null,
+      l460_support:  iL460 !== undefined ? _eoCell(row, iL460) || null : null,
+      vin,
+      part_no:       iPn   !== undefined ? _eoCell(row, iPn)   || null : null,
+      part_name:     iPnm  !== undefined ? _eoCell(row, iPnm)  || null : null,
+      retail_price:  iRp   !== undefined ? num(row[iRp])  : null,
+      qty:           iQty  !== undefined ? num(row[iQty]) : null,
+      sales_amount:  iSa   !== undefined ? num(row[iSa])  : null,
+      cost_amount:   iCo   !== undefined ? num(row[iCo])  : null,
+      support_amount:iSup  !== undefined ? num(row[iSup]) : null,
+      raw, loaded_by: user?.id || null });
+  }
+  if(!rows.length) throw new Error('읽어낸 행이 없습니다.');
+  P(`<b>${fy}</b> · ${rows.length.toLocaleString('ko-KR')}행 확인. 기존 ${fy} 를 지우는 중...`);
+  await sb.from('asap_showroom_support').delete().eq('fy_label', fy).eq('src_file', file.name);
+  for(let i = 0; i < rows.length; i += 400){
+    await insertRetry('asap_showroom_support', rows.slice(i, i+400), '전시차 이력');
+    P(`<b>${fy}</b> 적재 중 — ${Math.min(i+400, rows.length).toLocaleString('ko-KR')} / ${rows.length.toLocaleString('ko-KR')}행`);
+  }
+  await logAudit('ASAP_SHOWROOM_LOAD','BASE', null, { label: `${fy} ${rows.length}행` });
+  return { fy, n: rows.length, vins: new Set(rows.map(r => r.vin)).size };
+}
+
 const ASAP_SUP = {
   SHOWROOM: { label:'전시차 지원', cols:['차대번호','지원분기','비고'],
               sample:[['SALCA2BN7MA685259','FY27 Q2','2026 전시차'],
@@ -9064,7 +9132,22 @@ async function renderAsapSupportCard(round, host){
   const draw = async () => {
     const { data } = await sb.from('asap_support_vins').select('kind, vin');
     const cnt = {}; (data||[]).forEach(r => cnt[r.kind] = (cnt[r.kind]||0) + 1);
-    body.innerHTML = Object.entries(ASAP_SUP).map(([k, d]) => `
+    const { data: hist } = await sb.from('asap_showroom_vehicles').select('vin', { count:'exact', head:false }).limit(1);
+    const { count: histN } = await sb.from('asap_showroom_support')
+      .select('id', { count:'exact', head:true });
+    body.innerHTML = `
+      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+           padding:9px 10px; border:1px solid var(--surface3); border-radius:6px; margin-bottom:8px;
+           background:var(--surface2);">
+        <b style="min-width:110px;">전시차 정산서</b>
+        <span class="hint">${(histN||0).toLocaleString('ko-KR')}행 쌓임</span>
+        <span class="hint" style="flex:1; min-width:220px;">
+          「ASAP 전시차 지원 프로그램」 정산서를 그대로 올리면 전 열을 담습니다.
+          파일명에 <b>FY27 Q1</b> 같은 분기가 있어야 합니다. 같은 파일을 다시 올리면 그 분기만 갈아끼웁니다.</span>
+        <label class="btn btn-sm" style="cursor:pointer; margin:0;">
+          정산서 올리기<input type="file" accept=".xlsx,.xls" id="asHistFile" multiple style="display:none;"></label>
+        <button class="btn btn-sm btn-ghost" id="asHistView">차대 목록 보기</button>
+      </div>` + Object.entries(ASAP_SUP).map(([k, d]) => `
       <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;
            padding:9px 10px; border:1px solid var(--surface3); border-radius:6px; margin-bottom:8px;">
         <b style="min-width:110px;">${d.label}</b>
@@ -9075,6 +9158,41 @@ async function renderAsapSupportCard(round, host){
           엑셀 올리기<input type="file" accept=".xlsx,.xls" data-sup="${k}" style="display:none;"></label>
         ${cnt[k] ? `<button class="btn btn-sm btn-danger as-sup-clear" data-k="${k}">전체 삭제</button>` : ''}
       </div>`).join('') + '<div class="hint" id="asSupMsg"></div>';
+
+    const hf = body.querySelector('#asHistFile');
+    if(hf) hf.onchange = async () => {
+      const msg = body.querySelector('#asSupMsg');
+      const files = [...hf.files]; if(!files.length) return;
+      const done = [];
+      for(const f of files){
+        try{ const r = await asapLoadShowroomFile(f, msg); done.push(`${r.fy} ${r.n.toLocaleString('ko-KR')}행 · 차대 ${r.vins}대`); }
+        catch(e){ msg.innerHTML = `<span style="color:var(--danger);">${f.name} — ${e.message || e}</span>`; return; }
+      }
+      hf.value = '';
+      msg.innerHTML = `<b>적재 완료</b> — ${done.join(' · ')}. [계산하기] 를 다시 누르면 반영됩니다.`;
+      await draw();
+    };
+    const hv = body.querySelector('#asHistView');
+    if(hv) hv.onclick = async () => {
+      const { data } = await sb.from('asap_showroom_vehicles').select('*').order('vin');
+      if(!data?.length){ alert('아직 쌓인 전시차 이력이 없습니다.'); return; }
+      xlsxHouse({
+        title: '전시차로 쓰인 차대 목록',
+        subtitle: `${data.length.toLocaleString('ko-KR')}대 · 전시차 지원 프로그램 정산서에서 모음`,
+        columns: [
+          { key:'vin', label:'차대번호', w:20 },
+          { key:'quarters', label:'지원 분기', w:22 },
+          { key:'branches', label:'사용 지점', w:18 },
+          { key:'retailers', label:'리테일러', w:12 },
+          { key:'first_fit', label:'첫 장착일', w:12, align:'center' },
+          { key:'last_fit', label:'마지막 장착일', w:12, align:'center' },
+          { key:'lines', label:'라인', w:8, type:'num' },
+          { key:'support_amount', label:'지원 금액 합계', w:15, type:'num' },
+        ],
+        rows: data.map(r => ({ ...r, support_amount: Math.round(Number(r.support_amount||0)) })),
+        filename: 'ASAP_전시차_차대목록.xlsx',
+      });
+    };
 
     body.querySelectorAll('.as-sup-tpl').forEach(b => b.onclick = () => {
       const d = ASAP_SUP[b.dataset.k];
