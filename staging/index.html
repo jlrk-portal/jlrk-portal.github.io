@@ -265,6 +265,10 @@
     <div class="brand">
       <span class="brand-mark">JLRK 정산 포털</span>
       <span class="brand-sub" id="brandSub">Settlement Portal</span>
+      <!-- 지금 띄워둔 화면이 어느 빌드인지 바로 보이게. 적재처럼 '옛 화면으로
+           돌리면 결과가 달라지는' 작업이 있어서 눈에 보여야 한다. (2026-10-23) -->
+      <span class="brand-sub" id="buildStamp" title="포털 버전 — 적재·바우처 작업 전에 최신인지 확인하세요"
+            style="opacity:.65; margin-left:6px;"></span>
     </div>
     <div class="who">
       <span id="whoEmail"></span>
@@ -1086,6 +1090,14 @@
    검증 : https://jlrk-portal.github.io/staging/   ·   localhost
    접속 주소로만 갈린다. 파일은 /index.html(운영) 과 /staging/index.html(검증)
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
+/* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
+   적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
+const BUILD = '10-23 12:28';
+document.addEventListener('DOMContentLoaded', () => {
+  const el = document.getElementById('buildStamp');
+  if(el) el.textContent = 'build ' + BUILD;
+});
+
 const ENVS = {
   prod: {
     label: null,
