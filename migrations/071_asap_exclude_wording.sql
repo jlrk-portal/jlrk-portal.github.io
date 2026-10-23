@@ -14,6 +14,14 @@
 --  이라고 쓸 수 있다. base_fit_parts 를 배열에서 {품번: 이름} 으로 바꾼다.
 -- ============================================================
 
+-- Demo 도 시승차다 (매니저 확인 2026-10-23). DM 과 따로 적혀 있을 뿐
+-- 같은 시승차라서, 지금까지 Demo 차대는 인센티브가 그대로 나가고 있었다.
+-- FY27 Q2 기준 1대 · 2줄 · 134,893원.
+update asap_config
+   set v = '["DM","Demo","LC","OUV"]'::jsonb,
+       note = '정산 대상이 아닌 차량의 Order type. 대소문자는 가리지 않는다.'
+ where k = 'exclude_order_types';
+
 -- 품번만 있던 것 → 이름을 붙인다
 update asap_config
    set v = '{"28VPLKV0134": "Dash cam"}'::jsonb,
@@ -88,7 +96,8 @@ excl_win as (
     from sales_report_lines s, cfg
    where s.vin is not null
      and s.retail_date between (p_to - interval '1 year')::date and p_to
-     and s.order_type in (select jsonb_array_elements_text(cfg.ex_types))
+     and upper(s.order_type) in
+         (select upper(t2) from jsonb_array_elements_text(cfg.ex_types) t2)
    order by s.vin, s.retail_date desc
 ),
 show_vin  as (select vin, quarters from asap_showroom_window(p_from, p_to, (select sm from cfg))),
@@ -142,9 +151,9 @@ select
       coalesce((select cfg2.base_fit ->> b.part_no from cfg cfg2), '기본장착')
       || ' 기본장착 품목 — 판매 전 차량에 기본 장착 (' || b.part_no || ')'
     when b.excl_type is not null then
-      case b.excl_type
+      case upper(b.excl_type)
         when 'DM'   then '시승차 (Demonstrator · DM) — 이 차대는 시승차입니다'
-        when 'Demo' then '시승차 (Demonstrator · Demo) — 이 차대는 시승차입니다'
+        when 'DEMO' then '시승차 (Demonstrator · Demo) — 이 차대는 시승차입니다'
         when 'LC'   then '커티시카 (Loan Car · LC) — 이 차대는 커티시카입니다'
         when 'OUV'  then '업무용 차량 (Own Use Vehicle · OUV) — 리테일러 업무용입니다'
         when 'MC'   then '마케팅 차량 (Marketing Car · MC)'
@@ -170,10 +179,6 @@ $$;
 
 revoke all on function asap_lines(date, date, uuid) from public;
 grant execute on function asap_lines(date, date, uuid) to authenticated;
-
--- 참고 — 'Demo' 는 아직 제외 목록에 없다. 넣으시려면 아래 한 줄.
---   update asap_config set v = '["DM","Demo","LC","OUV"]'::jsonb
---    where k = 'exclude_order_types';
 
 -- 확인
 select hard_excluded as 제외사유, count(*)::text as 라인
