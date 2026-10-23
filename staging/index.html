@@ -1128,7 +1128,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 20:13';
+const BUILD = '10-23 22:56';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -13268,10 +13268,50 @@ const TO_MAP = [
   // Service 실적이 붙는 자리. 이것도 045 때 빠져 있었다
   ['sa',         ['담당SA','담당 SA']],
   ['tech',       ['작업자']],
+  /* ── 여기부터 080 에서 추가. 매니저 지시(2026-10-23):
+     "턴오버는 ... 모든 필드를 하나도 버리지말고 다 담고 있어야해"
+     원본 77열 중 43열만 담고 34열을 버리고 있었다. */
+  ['src_no',       ['No']],
+  ['booking_no',   ['예약번호']],
+  ['inv_total',    ['인보이스 총금액','인보이스총금액']],
+  ['inv_amount',   ['인보이스 금액','인보이스금액']],
+  ['inv_discount', ['인보이스 할인금액','인보이스할인금액']],
+  ['margin',       ['마진']],
+  ['margin_pct',   ['마진(%)','마진%']],
+  ['inv_by',       ['인보이스등록자']],
+  ['inv_cancel_at',['인보이스취소일']],
+  ['inv_cancel_by',['인보이스취소자']],
+  ['ict_branch',   ['ICT 요청지점','ICT요청지점']],
+  ['ict_req_date', ['ICT요청일']],
+  ['ict_part_name',['ICT요청 부품명','ICT요청부품명']],
+  ['ict_part_no',  ['ICT요청 부품코드','ICT요청부품코드']],
+  ['ict_out_by',   ['ICT출고자']],
+  ['ict_out_at',   ['ICT출고일시']],
+  ['ict_out_qty',  ['ICT출고수량']],
+  ['ict_out_amt',  ['ICT출고금액']],
+  ['car_no',       ['차량번호']],
+  ['delivery_date',['인도일자']],
+  ['customer_type',['고객형태']],
+  ['account_code', ['거래처코드']],
+  /* 매니저가 엑셀에서 달던 작업열 — 있으면 그대로 보관 (대조용) */
+  ['note_excl',      ['인센티브 제외','인센티브제외']],
+  ['note_jlrk',      ['JLRK Comment','JLRKComment']],
+  ['note_sale_div',  ['판매구분']],
+  ['note_model',     ['Model']],
+  ['note_6th',       ['6th digit','6thdigit']],
+  ['note_sold_date', ['Sold Date','SoldDate']],
+  ['note_dfetc',     ['DF/ETC']],
+  ['note_seller',    ['영업사원']],
+  ['note_demo',      ['시승차/커티시카/전시']],
+  ['note_newreg',    ['신차등록일']],
+  ['note_promo',     ['영업 프로모션','영업프로모션']],
+  ['note_showroom',  ['전시차여부']],
 ];
-const TO_TEXT = new Set(['ro_no','stl_no','inv_no','part_no','vin']);
-const TO_NUM  = new Set(['stl_line','qty','cost','cost_sum','retail','retail_sum','sale_sum','split','odo']);
-const TO_DATE = new Set(['in_date','ro_date','inv_date','reg_date','out_date']);
+const TO_TEXT = new Set(['ro_no','stl_no','inv_no','part_no','vin','car_no']);
+const TO_NUM  = new Set(['stl_line','qty','cost','cost_sum','retail','retail_sum','sale_sum','split','odo',
+  'src_no','inv_total','inv_amount','inv_discount','margin','margin_pct','ict_out_qty','ict_out_amt']);
+const TO_DATE = new Set(['in_date','ro_date','inv_date','reg_date','out_date',
+  'inv_cancel_at','ict_req_date','delivery_date']);
 const TO_CHUNK = 2000;        // 한 번에 보낼 행수. 더 키우면 413 이 난다.
 
 /* 엑셀 날짜는 숫자(1900 기준 일련번호)로 오기도 하고 문자열로 오기도 한다 */
@@ -13625,6 +13665,14 @@ async function loadTurnoverFile(file, ym){
   });
   const missing = ['ro_no','item_type','claim_acct','sale_sum'].filter(k => col[k] === undefined);
   if(missing.length) throw new Error('필수 열을 찾지 못했습니다: ' + missing.join(', '));
+  // 매핑에 없는 열 — 버리지 않고 raw_extra 로 담는다
+  const takenIdx = new Set(Object.values(col));
+  const rawHead = aoa[hi] || [];
+  const extraCols = [];
+  head.forEach((h, i) => {
+    if(!h || takenIdx.has(i)) return;
+    extraCols.push({ i, label: String(rawHead[i] ?? h).trim() });
+  });
   // 27열 추출본에는 원가·담당SA 가 없다. 그걸 올리면 ASAP 인센티브를 못 낸다.
   const noAsap = ['cost_sum','sa','part_group'].filter(k => col[k] === undefined);
   if(noAsap.length && !confirm(
@@ -13678,6 +13726,16 @@ async function loadTurnoverFile(file, ym){
              : TO_NUM.has(key)  ? xlNum(v)
              : (v === null || v === undefined || v === '') ? null : String(v).trim();
     }
+    /* 매핑에 없던 열은 버리지 않고 여기에 담는다 — 열 하나도 버리지 말 것.
+       평소에는 비어 있어 공간을 거의 안 쓴다. (매니저 지시 2026-10-23) */
+    if(extraCols.length){
+      const ex = {};
+      extraCols.forEach(({ i, label }) => {
+        const v = r[i];
+        if(v !== null && v !== undefined && String(v).trim() !== '') ex[label] = String(v).trim();
+      });
+      if(Object.keys(ex).length) o.raw_extra = ex;
+    }
     batch.push(o);
     if(batch.length >= TO_CHUNK) await flush();
   }
@@ -13685,8 +13743,12 @@ async function loadTurnoverFile(file, ym){
 
   const { count } = await sb.from('turnover_lines')
     .select('id', { count:'exact', head:true }).eq('ym', ym);
+  const nCols = Object.keys(col).length;
   P(`<b>${ym}</b> 적재 완료 — 원본 ${total.toLocaleString('ko-KR')}행 → DB ${Number(count).toLocaleString('ko-KR')}행
-     <span class="hint">(다른 달 파일에 이미 들어있던 같은 정산라인은 중복으로 제외됩니다)</span>`);
+     <span class="hint">· 열 ${nCols}개 담음${extraCols.length
+       ? ` + 매핑 밖 ${extraCols.length}개는 raw_extra 로 보관 (${extraCols.slice(0,4).map(x=>x.label).join(', ')}${extraCols.length>4?' 외':''})`
+       : ' · 버린 열 없음'}
+     <br>(다른 달 파일에 이미 들어있던 같은 정산라인은 중복으로 제외됩니다)</span>`);
   await logAudit('TO_LOAD','BASE',null,{ label:`${ym} · ${count}행` });
 }
 
@@ -15268,6 +15330,7 @@ async function renderAsapRetailerCard(listEl, round, items){
       ],
       columns: [
         { key:'vin',     label:'차대번호',     w:20 },
+        { key:'car_no',  label:'차량번호',     w:12 },
         { key:'scope',   label:'구분',         w:9,  align:'center' },
         { key:'branch',  label:'전시장/지점',  w:20 },
         { key:'person',  label:'담당자',       w:12 },
@@ -15281,7 +15344,7 @@ async function renderAsapRetailerCard(listEl, round, items){
         { key:'why',     label:'제외 사유',    w:34 },
       ],
       rows: shown.map(v => ({
-        vin: v.vin, scope: v.scope === 'SALES' ? '전시장' : '서비스',
+        vin: v.vin, car_no: v.car_no || '', scope: v.scope === 'SALES' ? '전시장' : '서비스',
         branch: asapBranchLabel(v.scope, v.branch), person: v.person || '',
         kind: kind(v), customer: v.customer || '', sold: v.retail_date || '',
         inv: v.first_inv === v.last_inv ? (v.last_inv || '') : `${v.first_inv} ~ ${v.last_inv}`,
@@ -15437,7 +15500,8 @@ async function renderAsapRetailerCard(listEl, round, items){
                     .filter(x => !x.hard_excluded && x.decision !== 'EXCLUDE' && !x.net_zero);
                   const names = [...new Set(ls.map(x => x.part_name).filter(Boolean))];
                   return `<tr>
-                <td style="font-variant-numeric:tabular-nums;">${e(v.vin)}</td>
+                <td style="font-variant-numeric:tabular-nums;">${e(v.vin)}${
+                  v.car_no ? `<div class="parts">${e(v.car_no)}</div>` : ''}</td>
                 <td>${e(kind(v))}${names.length
                   ? `<div class="parts">${e(names.join(' · '))}</div>` : ''}</td>
                 <td>${e(v.customer || '—')}</td>
@@ -15593,7 +15657,8 @@ async function renderAsapRetailerCard(listEl, round, items){
                   const inv = v.first_inv === v.last_inv ? v.last_inv
                             : `${v.first_inv} ~ ${v.last_inv}`;
                   return `<tr${out?' style="opacity:.7; cursor:pointer;"':' style="cursor:pointer;"'} data-vin="${esc2(v.vin)}">
-                  <td style="font-variant-numeric:tabular-nums; white-space:nowrap;">${op?'▾':'▸'} ${esc2(v.vin)}</td>
+                  <td style="font-variant-numeric:tabular-nums; white-space:nowrap;">${op?'▾':'▸'} ${esc2(v.vin)}
+                    ${v.car_no ? `<div class="hint">${esc2(v.car_no)}</div>` : ''}</td>
                   <td>${esc2(kind(v))}</td>
                   <td>${esc2(v.customer || '—')}</td>
                   <td style="white-space:nowrap;">${esc2(v.retail_date || '—')}</td>
