@@ -1128,7 +1128,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 17:45';
+const BUILD = '10-23 18:22';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -9290,6 +9290,35 @@ async function renderAsapSupportCard(round, host){
 }
 
 /* 라인 검토 — 이 화면이 본체다. 2,000줄을 걸러 보고, 골라 빼고, 사유를 남긴다. */
+/* asap_summary 와 똑같은 산식을 JS 로.
+   한 줄 뺄 때마다 20초짜리 RPC 를 다시 돌릴 수는 없는데, 2단계 금액은
+   바로 바뀌어야 한다. 라인은 이미 손에 있으니 여기서 센다.
+   매니저 지적(2026-10-23): "내가 수정해서 제외할때마다 아래 step2에
+   금액 변동이 없네?"                                                   */
+function asapSummarize(lines, unit){
+  const u = Number(unit) || 1;
+  const m = new Map();
+  lines.filter(x => !x.hard_excluded && x.decision !== 'EXCLUDE').forEach(x => {
+    const k = [x.scope, x.branch, x.person].join('\u0000');
+    if(!m.has(k)) m.set(k, { scope:x.scope, branch:x.branch, person:x.person,
+      lines:0, vinSet:new Set(), cost_sum:0, lines_df:0, cost_df:0,
+      lines_etc:0, cost_etc:0, flagged:0, raw:0 });
+    const g = m.get(k);
+    g.lines++; g.vinSet.add(x.vin); g.cost_sum += x.cost_sum;
+    if(x.is_defender){ g.lines_df++;  g.cost_df  += x.cost_sum; }
+    else             { g.lines_etc++; g.cost_etc += x.cost_sum; }
+    if((x.flags||[]).length) g.flagged++;
+    g.raw += x.cost_sum * x.rate;
+  });
+  return [...m.values()].map(g => ({ scope:g.scope, branch:g.branch, person:g.person,
+      lines:g.lines, vins:g.vinSet.size, cost_sum:g.cost_sum,
+      lines_df:g.lines_df, cost_df:g.cost_df, lines_etc:g.lines_etc, cost_etc:g.cost_etc,
+      flagged:g.flagged, amount: Math.ceil(g.raw / u) * u }))
+    .sort((a,b) => String(a.scope||'').localeCompare(String(b.scope||''))
+                || String(a.branch||'').localeCompare(String(b.branch||''))
+                || String(a.person||'').localeCompare(String(b.person||'')));
+}
+
 /* 차대 한 대 = 카드 한 장.
    매니저 지시(2026-10-23): "검토를 요청하는 사유가 먼저 나오고 그거에 맞게
    내가 검토하기 편하게 만들라는 얘기야 ... 건별로 내가 결정할수있게 해줘 ...
@@ -9636,7 +9665,7 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
         }
         if(err){ btn.disabled = false; say('실패: ' + err, true); return; }
         draw(); back(); say(msg);
-        onChanged && onChanged();
+        onChanged && onChanged(all);
       });
     });
   };
@@ -9714,11 +9743,21 @@ async function renderAsapRoundDetail(round, type){
       const { data, error } = await sb.rpc('asap_summary',
         { p_from: from, p_to: to, p_round: round.id });
       if(error) throw new Error(error.message);
-      const rows = (data||[]).map(x => ({ ...x,
+      const rows0 = (data||[]).map(x => ({ ...x,
         lines:Number(x.lines), vins:Number(x.vins),
         cost_sum:Number(x.cost_sum), amount:Number(x.amount) }));
       const resolve = await asapRetailerResolver();
       await asapLoadNames();
+      const uRes = await sb.from('asap_config').select('v').eq('k','round_unit').maybeSingle();
+      const unit = Number((uRes.data && uRes.data.v) ?? 1) || 1;
+
+      // 자리를 먼저 잡아둔다 — 2단계는 라인을 고칠 때마다 이 안만 다시 그린다
+      out.innerHTML = '';
+      const ub = document.createElement('div'); out.appendChild(ub);
+      const rh = document.createElement('div'); rh.id = 'asReviewHost'; out.appendChild(rh);
+      const sh = document.createElement('div'); sh.id = 'asSummaryHost'; out.appendChild(sh);
+
+    const renderStep2 = async (rows) => {
       const byRt = new Map(); const unmatched = new Map();
       rows.forEach(r => {
         const rt = resolve(r.scope, r.branch);
@@ -9778,15 +9817,13 @@ async function renderAsapRoundDetail(round, type){
         <div id="asDetailBox"></div>`;
 
       // 지점을 못 찾은 건은 데이터 오류라 맨 위에 둔다. 금액 요약은 검토 뒤로.
-      out.innerHTML = un.length
+      ub.innerHTML = un.length
         ? `<div class="info-card" style="border-color:#e0b050; background:#fff8ec; margin-bottom:10px;">
             <b>리테일러를 못 찾은 지점 ${un.length}곳 · ${fmtWon(un.reduce((a,x)=>a+x[1],0))}</b>
             <div class="hint" style="margin-top:4px;">${un.map(x=>`${esc2(x[0])} ${fmtWon(x[1])}`).join(' · ')}
               <br>이 금액은 공지에 들어가지 않습니다. 지점 마스터의 이름과 맞는지 확인해주세요.</div></div>`
         : '';
-      const rh = document.createElement('div'); rh.id = 'asReviewHost'; out.appendChild(rh);
-      const sh = document.createElement('div'); sh.id = 'asSummaryHost';
-      sh.innerHTML = summaryHtml; out.appendChild(sh);
+      sh.innerHTML = summaryHtml;
       // 공지는 맨 위에 — 다른 정산건과 같은 자리 (매니저 지시 2026-10-23)
       const top = document.getElementById('rd_actions');
       top.innerHTML = `<button class="btn" id="asPublish">${round.status === 'DRAFT'
@@ -9858,11 +9895,14 @@ async function renderAsapRoundDetail(round, type){
         drawDetail('SALES');
       };
       document.getElementById('asPublish').onclick = () => asapPublish(round, type, last);
+    };
 
-      // 라인 검토 — 이 화면의 본체. 빼고 나면 2단계 숫자를 다시 세야 한다.
-      await renderAsapLineReview(round, from, to, rh, () => {
-        const b = document.getElementById('asCalc');
-        if(b){ b.textContent = '다시 계산하기'; b.classList.remove('btn-ghost'); }
+      await renderStep2(rows0);
+
+      // 라인 검토 — 이 화면의 본체. 한 줄을 빼거나 승인할 때마다
+      // 2단계를 그 자리에서 다시 센다 (RPC 를 또 돌리지 않는다).
+      await renderAsapLineReview(round, from, to, rh, async (lines) => {
+        if(lines) await renderStep2(asapSummarize(lines, unit));
       });
     }catch(e){
       out.innerHTML = `<div class="hint" style="color:var(--danger);">계산 실패: ${e.message || e}</div>`;
