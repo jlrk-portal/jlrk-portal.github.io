@@ -11483,16 +11483,16 @@ async function renderBaseMonths(){
   host.querySelectorAll('.to-del').forEach(b => b.onclick = async () => {
     if(!confirm(`${b.dataset.ym} Turn Over 를 삭제합니다.\n이 달이 걸린 캠페인은 검증을 다시 돌려야 합니다. 계속할까요?`)) return;
     b.disabled = true;
-    const { error } = await sb.from('turnover_lines').delete().eq('ym', b.dataset.ym);
-    if(error){ alert('삭제 실패: ' + error.message); b.disabled = false; return; }
+    try{ await deleteMonthChunked('turnover_lines', b.dataset.ym, 'toProgress', 'Turn Over'); }
+    catch(e){ alert(e.message); b.disabled = false; return; }
     await logAudit('TO_DELETE','BASE',null,{ label: b.dataset.ym });
     await renderBaseMonths();
   });
   host.querySelectorAll('.sr-del').forEach(b => b.onclick = async () => {
     if(!confirm(`${b.dataset.ym} Sales Report 를 삭제합니다.\n이 달이 걸린 ASAP 인센티브는 다시 계산해야 합니다. 계속할까요?`)) return;
     b.disabled = true;
-    const { error } = await sb.from('sales_report_lines').delete().eq('ym', b.dataset.ym);
-    if(error){ alert('삭제 실패: ' + error.message); b.disabled = false; return; }
+    try{ await deleteMonthChunked('sales_report_lines', b.dataset.ym, 'srProgress', 'Sales Report'); }
+    catch(e){ alert(e.message); b.disabled = false; return; }
     await logAudit('SR_DELETE','BASE',null,{ label: b.dataset.ym });
     await renderBaseMonths();
   });
@@ -11577,15 +11577,13 @@ async function loadSalesReportFile(file, ym){
 
   const total = aoa.length - hi - 1;
   P(`<b>${ym}</b> · ${total.toLocaleString('ko-KR')}행 확인. 기존 ${ym} 데이터를 지우는 중...`);
-  const { error: delErr } = await sb.from('sales_report_lines').delete().eq('ym', ym);
-  if(delErr) throw delErr;
+  await deleteMonthChunked('sales_report_lines', ym, 'srProgress', 'Sales Report');
 
   let sent = 0, skipped = 0, batch = [];
   const seen = new Set();     // 같은 파일 안의 중복 (유니크 인덱스에 걸린다)
   const flush = async () => {
     if(!batch.length) return;
-    const { error } = await sb.from('sales_report_lines').insert(batch);
-    if(error) throw error;
+    await insertRetry('sales_report_lines', batch, 'Sales Report');
     sent += batch.length; batch = [];
     const pct = Math.round(sent / Math.max(total,1) * 100);
     P(`<b>${ym}</b> 적재 중 — ${sent.toLocaleString('ko-KR')} / ${total.toLocaleString('ko-KR')}행 (${pct}%)
@@ -11646,6 +11644,47 @@ function ymFromSrName(name){
   return m ? m[1] + m[2] : null;
 }
 
+/* 한 달이 10~14만 행이라 한 번에 지우면 statement timeout 으로 죽는다.
+   나눠 지우는 RPC 를 0 이 나올 때까지 돌린다. (2026-10-23)
+   RPC 가 아직 없는 환경에서는 예전처럼 한 번에 지운다. */
+/* 타임아웃이 나면 묶음을 반으로 줄여 다시 보낸다. 중간에 죽으면
+   그 달이 반만 들어간 채로 남아 더 나쁘다. (2026-10-23) */
+async function insertRetry(table, rows, label){
+  let size = rows.length;
+  for(let at = 0; at < rows.length; ){
+    const slice = rows.slice(at, at + size);
+    const { error } = await sb.from(table).insert(slice);
+    if(!error){ at += slice.length; continue; }
+    const tmo = /timeout|57014|canceling statement/i.test(error.message || '');
+    if(tmo && size > 125){ size = Math.floor(size / 2); continue; }
+    throw new Error(`${label} 적재 실패: ${error.message}`);
+  }
+}
+
+async function deleteMonthChunked(table, ym, progressId, label){
+  const rpc = table === 'turnover_lines' ? 'turnover_delete_ym' : 'sales_report_delete_ym';
+  let gone = 0;
+  for(let i = 0; i < 400; i++){
+    const { data, error } = await sb.rpc(rpc, { p_ym: ym, p_limit: 20000 });
+    if(error){
+      // 함수가 없으면 (마이그레이션 전) 예전 방식으로
+      if(/function .* does not exist|PGRST202/i.test(error.message || '')){
+        const { error: e2 } = await sb.from(table).delete().eq('ym', ym);
+        if(e2) throw new Error(`${label} 기존 ${ym} 삭제 실패: ${e2.message}`
+          + ' — 057 마이그레이션(나눠 삭제)을 먼저 돌려주세요.');
+        return gone;
+      }
+      throw new Error(`${label} 기존 ${ym} 삭제 실패: ${error.message}`);
+    }
+    const n = Number(data || 0);
+    gone += n;
+    if(progressId && n) baseProgress(progressId,
+      `<b>${ym}</b> · 기존 데이터를 지우는 중 — ${gone.toLocaleString('ko-KR')}행`);
+    if(n < 20000) break;
+  }
+  return gone;
+}
+
 async function loadTurnoverFile(file, ym){
   const P = h => baseProgress('toProgress', h);
   P(`<b>${ym}</b> · ${file.name} 읽는 중...`);
@@ -11676,14 +11715,12 @@ async function loadTurnoverFile(file, ym){
 
   const total = aoa.length - hi - 1;
   P(`<b>${ym}</b> · ${total.toLocaleString('ko-KR')}행 확인. 기존 ${ym} 데이터를 지우는 중...`);
-  const { error: delErr } = await sb.from('turnover_lines').delete().eq('ym', ym);
-  if(delErr) throw delErr;
+  await deleteMonthChunked('turnover_lines', ym, 'toProgress', 'Turn Over');
 
   let sent = 0, batch = [];
   const flush = async () => {
     if(!batch.length) return;
-    const { error } = await sb.from('turnover_lines').insert(batch);
-    if(error) throw error;
+    await insertRetry('turnover_lines', batch, 'Turn Over');
     sent += batch.length; batch = [];
     const pct = Math.round(sent / total * 100);
     P(`<b>${ym}</b> 적재 중 — ${sent.toLocaleString('ko-KR')} / ${total.toLocaleString('ko-KR')}행 (${pct}%)
