@@ -9,10 +9,9 @@ for rel in ['staging/index.html', 'index.html']:
     p = root / rel
     if not p.exists(): continue
     s = io.open(p, encoding='utf-8').read()
-    n = s
-    n = re.sub(r"const BUILD = '[^']*';", f"const BUILD = '{stamp}';", n, count=1)
-    if n != s:
-        io.open(p, 'w', encoding='utf-8').write(n)
-        print(f'  {rel} → build {stamp}')
-    else:
-        print(f'  {rel} — BUILD 자리를 찾지 못했습니다', file=sys.stderr)
+    n, hits = re.subn(r"const BUILD = '[^']*';", f"const BUILD = '{stamp}';", s, count=1)
+    # 같은 분에 두 번 돌리면 내용이 안 바뀐다 — '바뀌었나' 가 아니라 '찾았나' 를 본다
+    if not hits:
+        print(f'  {rel} — BUILD 자리를 찾지 못했습니다', file=sys.stderr); continue
+    if n != s: io.open(p, 'w', encoding='utf-8').write(n)
+    print(f'  {rel} → build {stamp}')
