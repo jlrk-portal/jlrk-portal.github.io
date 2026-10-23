@@ -1098,7 +1098,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 16:20';
+const BUILD = '10-23 16:31';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -9323,18 +9323,18 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
       return `<tr data-id="${r.line_id}">
         <td>${ids.length ? `<input type="checkbox" class="as-ck" data-ids="${ids.join(',')}">` : ''}</td>
         <td>${uniq(g.map(state)).map(s2 => `<span class="badge ${BADGE[s2]}">${LABEL[s2]}</span>`).join(' ')}</td>
-        <td>${uniq(g.map(x => x.scope === 'SALES' ? '전시장' : '서비스')).join(' / ')}</td>
+        <td style="white-space:nowrap;">${uniq(g.map(x => x.scope === 'SALES' ? '전시장' : '서비스')).join(' / ')}</td>
         <td>${uniq(g.map(x => asapBranchLabel(x.scope, x.branch))).map(esc2).join(', ')}</td>
         <td>${uniq(g.map(x => x.person || '(미기재)')).map(esc2).join(', ')}</td>
-        <td style="font-variant-numeric:tabular-nums;">${esc2(r.vin)}</td>
-        <td style="text-align:center;">${one ? esc2(r.inv_date) : g.length.toLocaleString('ko-KR') + '건'}</td>
-        <td>${one ? esc2(r.part_no) : ''}</td>
+        <td style="font-variant-numeric:tabular-nums; white-space:nowrap;">${esc2(r.vin)}</td>
+        <td style="text-align:center; white-space:nowrap;">${one ? esc2(r.inv_date) : g.length.toLocaleString('ko-KR') + '건'}</td>
+        ${group ? '' : `<td>${esc2(r.part_no)}</td>`}
         <td>${one ? esc2(r.part_name)
                   : esc2(names.slice(0,3).join(', ')) + (names.length > 3 ? ' 외 ' + (names.length-3) : '')}</td>
         <td style="text-align:center;">${esc2(r.model_code || '—')}</td>
-        <td style="text-align:right;">${one ? (r.rate*100).toFixed(0) + '%' : ''}</td>
-        <td style="text-align:right;">${fmtWon(cost)}</td>
-        <td style="text-align:right;">${fmtWon(amt)}</td>
+        ${group ? '' : `<td style="text-align:right;">${(r.rate*100).toFixed(0)}%</td>`}
+        <td style="text-align:right; white-space:nowrap;">${fmtWon(cost)}</td>
+        <td style="text-align:right; white-space:nowrap;">${fmtWon(amt)}</td>
         <td class="hint">${why.map(esc2).join(' · ')}</td></tr>`;
     };
 
@@ -9362,10 +9362,12 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
       </div>
       <div style="overflow-x:auto;"><table style="min-width:1180px;"><thead><tr>
         <th style="width:28px;"><input type="checkbox" id="asAll"></th>
-        <th>상태</th><th>구분</th><th>지점/전시장</th><th>담당자</th><th>차대번호</th>
-        <th style="text-align:center;">${group ? '건수' : '인보이스완료일'}</th><th>품번</th><th>품명</th>
-        <th style="text-align:center;">모델</th><th style="text-align:right;">요율</th>
-        <th style="text-align:right;">원가합계</th><th style="text-align:right;">인센티브</th>
+        <th>상태</th><th style="white-space:nowrap;">구분</th><th>지점/전시장</th><th>담당자</th><th>차대번호</th>
+        <th style="text-align:center; white-space:nowrap;">${group ? '건수' : '인보이스완료일'}</th>
+        ${group ? '' : '<th>품번</th>'}<th>품명</th>
+        <th style="text-align:center;">모델</th>${group ? '' : '<th style="text-align:right;">요율</th>'}
+        <th style="text-align:right; white-space:nowrap;">원가합계</th>
+        <th style="text-align:right; white-space:nowrap;">인센티브</th>
         <th>검토 사유 / 제외 사유</th>
       </tr></thead><tbody>
         ${shown.map(rowHtml).join('')}
