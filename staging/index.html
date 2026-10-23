@@ -221,6 +221,30 @@
   .inv-txn .tt.MOVE{ background:var(--surface3); color:var(--text-mid); }
   .inv-txn .tt.ADJ{ background:rgba(207,47,59,.12); color:var(--danger); }
   .inv-txn .rt{ grid-column:3; color:var(--text-dim); }
+
+/* ── ASAP 라인 검토 — 차대 한 대가 카드 한 장 ───────────────────── */
+.as-card{ border:1px solid var(--surface3); border-radius:7px; margin-bottom:12px; overflow:hidden; }
+.as-why{ display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+         padding:9px 11px; background:var(--surface2); border-bottom:1px solid var(--surface3);
+         font-size:12.5px; }
+.as-why.warn{ background:#fff8ec; border-bottom-color:#e9d3a8; }
+.as-why.out { background:rgba(190,60,60,.07); }
+.as-info{ display:grid; grid-template-columns:repeat(auto-fit, minmax(135px, 1fr));
+          gap:2px 14px; padding:10px 11px; font-size:12.5px;
+          border-bottom:1px solid var(--surface3); }
+.as-info .hint{ display:block; font-size:11px; margin-bottom:1px; }
+.as-prior{ border-bottom:1px solid var(--surface3); background:rgba(0,0,0,.015); }
+.as-prior-h{ padding:8px 11px 4px; font-size:12px; font-weight:600; }
+.as-prior-h .hint{ font-weight:400; margin-left:6px; }
+.as-sub{ width:100%; border-collapse:collapse; }
+.as-sub thead th{ font-size:11px; font-weight:600; text-align:left; padding:5px 11px;
+                  color:var(--muted); border-bottom:1px solid var(--surface3); }
+.as-sub tbody td{ font-size:12.5px; padding:6px 11px; border-bottom:1px solid var(--surface3); }
+.as-sub tbody tr:last-child td{ border-bottom:none; }
+.as-sub .btn-sm{ padding:3px 8px; font-size:11.5px; }
+@media (max-width: 860px){
+  .as-sub{ display:block; overflow-x:auto; white-space:nowrap; }
+}
 </style>
 </head>
 <body>
@@ -1098,7 +1122,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 17:04';
+const BUILD = '10-23 17:22';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -9260,6 +9284,13 @@ async function renderAsapSupportCard(round, host){
 }
 
 /* 라인 검토 — 이 화면이 본체다. 2,000줄을 걸러 보고, 골라 빼고, 사유를 남긴다. */
+/* 차대 한 대 = 카드 한 장.
+   매니저 지시(2026-10-23): "검토를 요청하는 사유가 먼저 나오고 그거에 맞게
+   내가 검토하기 편하게 만들라는 얘기야 ... 건별로 내가 결정할수있게 해줘 ...
+   테이블을 나눠서 차량이랑 전시장, 담당자정보 테이블 따로 해당되는
+   액세서리 품목에 대한 구성, 원가 테이블 따로 ... 전시차 지원건인거면
+   이전에 전시차 청구했던게 어떤 품목인지 알려주면 그거랑 같은건지
+   연관된건지 내가 알수있잖아."                                           */
 async function renderAsapLineReview(round, from, to, host, onChanged){
   const box = document.createElement('div');
   box.className = 'info-card';
@@ -9281,8 +9312,27 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
     incentive: Math.round(Number(x.cost_sum) * Number(x.rate)),
     flags: x.flags || [] }));
 
-  // 제외 사유 보기 — 타이핑 대신 고른다. '{분기}' 는 실제 데이터에 있는 분기로 펼친다.
-  // 리테일러가 그대로 보는 문구라 'FY27 Q1 전시차 청구건' 처럼 분기를 박아 쓴다.
+  // ── 왜 검토하라고 했는지 판단하려면 '전에 뭘 받았는지' 를 같이 봐야 한다.
+  //    그래서 원본을 다 쌓아둔 것이다. 차대별로 끌어온다.
+  const vins = [...new Set(all.filter(r => (r.flags||[]).length).map(r => r.vin))];
+  const chunk = (a, n) => { const o = []; for(let i=0;i<a.length;i+=n) o.push(a.slice(i,i+n)); return o; };
+  const prior = { show: new Map(), promo: new Map() };
+  if(vins.length){
+    for(const part of chunk(vins, 120)){
+      const [sh, pr] = await Promise.all([
+        sbAll(() => sb.from('asap_showroom_support')
+          .select('vin,fy_label,branch_code,retailer_code,part_no,part_name,qty,support_amount,fit_date')
+          .in('vin', part), '전시차이력'),
+        sbAll(() => sb.from('asap_promo_support')
+          .select('vin,month_ym,category,promo_type,program,program2,showroom,settle_showroom,seller,remark,reg_date')
+          .in('vin', part), '프로모션이력')
+      ]);
+      sh.forEach(x => { if(!prior.show.has(x.vin)) prior.show.set(x.vin, []); prior.show.get(x.vin).push(x); });
+      pr.forEach(x => { if(!prior.promo.has(x.vin)) prior.promo.set(x.vin, []); prior.promo.get(x.vin).push(x); });
+    }
+  }
+
+  // 제외 사유 — 타이핑 대신 고른다. '{분기}' 는 실제 데이터에 있는 분기로 펼친다.
   const qIn = (r, head) => (r.flags||[]).filter(f => f.startsWith(head))
     .flatMap(f => (f.match(/FY\d{2}\s*Q[1-4]/g) || []));
   const showQ  = [...new Set(all.flatMap(r => qIn(r, '전시차')))].sort();
@@ -9293,12 +9343,11 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
     const qs = s0.includes('전시차') ? showQ : promoQ;
     return (qs.length ? qs : [round.period_label || '']).map(q => s0.replace('{분기}', q).trim());
   });
+  if(!REASONS.length) REASONS.push('검토 결과 제외');
 
-  let filter = 'FLAG', page = 1, term = '', group = true;
-  let reason = REASONS[0] || '__ETC__', reasonEtc = '';
-  const picked   = new Set();   // 고른 line_id — 다시 그려도 유지된다
-  const folded   = new Set();   // 접어둔 차대
-  const pageSize = () => group ? 40 : 200;
+  let filter = 'FLAG', page = 1, term = '';
+  const folded = new Set();
+  const PAGE = 15;
 
   const state = (r) => r.hard_excluded ? 'HARD' : (r.decision === 'EXCLUDE' ? 'OUT'
                      : (r.flags.length ? 'FLAG' : 'OK'));
@@ -9310,8 +9359,158 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
                         : RSN[k]      ? (state(r) !== 'HARD' && has(r, k))
                         :               state(r) === k;
   const TABS = ['ALL','FLAG','SHOW','PROMO','DSS','OUT','HARD','OK'];
-  const TAB_LABEL = { ...LABEL, ALL:'전체', SHOW:'└ 전시차', PROMO:'└ 프로모션', DSS:'└ DSS 의심' };
+  const TAB_LABEL = { ...LABEL, ALL:'전체', SHOW:'└ 전시차', PROMO:'└ 프로모션 대상 차량', DSS:'└ DSS 의심' };
   const uniq = (a) => [...new Set(a)];
+  const one  = (a) => { const u = uniq(a.filter(v => v !== null && v !== undefined && v !== '')); return u.length === 1 ? u[0] : null; };
+
+  // 그 차대에 맞는 기본 제외 사유를 미리 골라둔다
+  const defaultReason = (g) => {
+    const fl = g.flatMap(x => x.flags || []);
+    const pick = (head) => {
+      const q = (fl.filter(f => f.startsWith(head)).map(f => (f.match(/FY\d{2}\s*Q[1-4]/)||[])[0]).filter(Boolean))[0];
+      return REASONS.find(r => q && r.startsWith(q) && r.includes(head)) || null;
+    };
+    return pick('전시차') || pick('프로모션')
+      || (fl.some(f => f.startsWith('DSS')) ? REASONS.find(r => r.includes('DSS')) : null)
+      || REASONS[0];
+  };
+
+  const persist = async (ids, reason) => {
+    const { data: { user } } = await sb.auth.getUser();
+    const { error } = await sb.from('asap_line_decisions').upsert(
+      ids.map(id => ({ round_id: round.id, line_id: id, decision:'EXCLUDE', reason,
+                       decided_by: user?.id || null, decided_at: new Date().toISOString() })),
+      { onConflict:'round_id,line_id' });
+    if(error) return error.message;
+    await logAudit('ASAP_EXCLUDE','ROUND', round.id, { label:`${ids.length}건 · ${reason}` });
+    ids.forEach(id => { const r = all.find(x => x.line_id === id);
+      if(r){ r.decision = 'EXCLUDE'; r.decision_reason = reason; } });
+    return null;
+  };
+  const unpersist = async (ids) => {
+    const { error } = await sb.from('asap_line_decisions').delete()
+      .eq('round_id', round.id).in('line_id', ids);
+    if(error) return error.message;
+    ids.forEach(id => { const r = all.find(x => x.line_id === id);
+      if(r){ r.decision = null; r.decision_reason = null; } });
+    return null;
+  };
+
+  // ── 전에 받은 지원 — 같은 품번이면 바로 눈에 띄게
+  const priorBlock = (g) => {
+    const vin = g[0].vin, out = [];
+    const sh = prior.show.get(vin) || [];
+    if(sh.length){
+      const byQ = new Map();
+      sh.forEach(x => { const k = x.fy_label; if(!byQ.has(k)) byQ.set(k, []); byQ.get(k).push(x); });
+      out.push(`<div class="as-prior">
+        <div class="as-prior-h">전에 전시차 지원으로 청구한 품목
+          <span class="hint">${[...byQ.keys()].sort().join(', ')} ·
+          ${uniq(sh.map(x => x.branch_code).filter(Boolean)).join(', ')} ·
+          ${sh.length}건 · ${fmtWon(sh.reduce((a,x) => a + Number(x.support_amount||0), 0))}</span></div>
+        <table class="as-sub"><thead><tr><th>분기</th><th>지점</th><th>장착일</th>
+          <th>품번</th><th>품명</th><th style="text-align:right;">수량</th>
+          <th style="text-align:right;">지원금액</th></tr></thead><tbody>
+          ${sh.slice(0, 40).map(x => `<tr><td>${esc2(x.fy_label)}</td><td>${esc2(x.branch_code||'—')}</td>
+            <td style="white-space:nowrap;">${esc2(x.fit_date||'—')}</td>
+            <td style="white-space:nowrap;">${esc2(x.part_no||'—')}</td><td>${esc2(x.part_name||'—')}</td>
+            <td style="text-align:right;">${x.qty ?? '—'}</td>
+            <td style="text-align:right; white-space:nowrap;">${fmtWon(Number(x.support_amount||0))}</td></tr>`).join('')}
+        </tbody></table>
+        ${sh.length > 40 ? `<div class="hint">외 ${sh.length-40}건</div>` : ''}</div>`);
+    }
+    const pm = prior.promo.get(vin) || [];
+    if(pm.length){
+      out.push(`<div class="as-prior">
+        <div class="as-prior-h">이 차대가 받은 액세서리 프로모션
+          <span class="hint">${pm.length}건 — 프로모션 정산서에는 품번이 없어 프로그램만 남습니다</span></div>
+        <table class="as-sub"><thead><tr><th>지원월</th><th>구분</th><th>프로그램</th>
+          <th>세부</th><th>쇼룸</th><th>영업사원</th><th>비고</th></tr></thead><tbody>
+          ${pm.map(x => `<tr><td style="white-space:nowrap;">${esc2(x.month_ym||'—')}</td>
+            <td>${esc2(x.promo_type||x.category||'—')}</td><td>${esc2(x.program||'—')}</td>
+            <td>${esc2(x.program2||'—')}</td>
+            <td>${esc2(x.settle_showroom||x.showroom||'—')}</td>
+            <td>${esc2(x.seller||'—')}</td><td class="hint">${esc2(x.remark||'')}</td></tr>`).join('')}
+        </tbody></table></div>`);
+    }
+    return out.join('');
+  };
+
+  const card = (g) => {
+    const r = g[0], vin = r.vin;
+    const sts  = uniq(g.map(state));
+    const why  = uniq(g.flatMap(x => [x.hard_excluded, ...(x.flags||[])].filter(Boolean)));
+    const cost = g.reduce((a,x) => a + x.cost_sum, 0);
+    const amt  = g.reduce((a,x) => a + x.incentive, 0);
+    const ids  = g.filter(x => state(x) !== 'HARD').map(x => x.line_id);
+    const outIds = g.filter(x => x.decision === 'EXCLUDE').map(x => x.line_id);
+    const fold = folded.has(vin);
+    // 모든 줄이 같은 값이면 머리에 한 번만 쓴다 (중복 기입 금지)
+    const cDate = one(g.map(x => x.inv_date)), cRate = one(g.map(x => x.rate));
+    const cScope = one(g.map(x => x.scope)), cBranch = one(g.map(x => x.branch));
+    const cPerson = one(g.map(x => x.person)), cModel = one(g.map(x => x.model_code));
+    const priorParts = new Set((prior.show.get(vin)||[]).map(x => String(x.part_no||'').trim()).filter(Boolean));
+    const lines = g.slice().sort((x,y) => (x.net_zero?1:0) - (y.net_zero?1:0) || y.incentive - x.incentive);
+
+    const info = [
+      ['차대번호', esc2(vin)],
+      ['모델', esc2(cModel || uniq(g.map(x=>x.model_code||'—')).join(', '))],
+      ['구분', cScope ? (cScope === 'SALES' ? '전시장 (Sales)' : '서비스 (Service)')
+                      : uniq(g.map(x => x.scope === 'SALES' ? '전시장' : '서비스')).join(' / ')],
+      [cScope === 'SALES' ? '전시장' : '지점',
+        esc2(cBranch ? asapBranchLabel(cScope || 'SERVICE', cBranch)
+                     : uniq(g.map(x => asapBranchLabel(x.scope, x.branch))).join(', '))],
+      ['담당자', esc2(cPerson || uniq(g.map(x => x.person || '(미기재)')).join(', '))],
+      ['인보이스완료일', cDate ? esc2(cDate) : '라인마다 다름'],
+      ['요율', cRate != null ? (cRate*100).toFixed(0) + '%' : '라인마다 다름'],
+      ['품목 / 원가 / 인센티브',
+        `${g.length}건 · ${fmtWon(cost)} · <b>${fmtWon(amt)}</b>`]
+    ];
+
+    return `<div class="as-card" data-vin="${esc2(vin)}">
+      <div class="as-why ${sts.includes('FLAG') ? 'warn' : (sts.includes('OUT') ? 'out' : '')}">
+        <div style="flex:1; min-width:260px;">
+          <b>${why.length ? why.map(esc2).join(' · ') : '검토 사유 없음 — 정상'}</b>
+          ${sts.map(s2 => `<span class="badge ${BADGE[s2]}" style="margin-left:6px;">${LABEL[s2]}</span>`).join('')}
+        </div>
+        <select class="as-rsn" style="padding:5px 7px; max-width:230px;">
+          ${REASONS.map(x => `<option value="${esc2(x)}" ${x===defaultReason(g)?'selected':''}>${esc2(x)}</option>`).join('')}
+        </select>
+        ${ids.length ? `<button class="btn btn-sm btn-danger" data-act="ex-all">이 차대 전부 제외</button>` : ''}
+        ${outIds.length ? `<button class="btn btn-sm btn-ghost" data-act="keep-all">전부 되돌리기</button>` : ''}
+        <button class="btn btn-sm btn-ghost" data-act="fold">${fold ? '펼치기' : '접기'}</button>
+      </div>
+      ${fold ? '' : `
+      <div class="as-info">${info.map(([k,v]) =>
+        `<div><span class="hint">${k}</span><div>${v}</div></div>`).join('')}</div>
+      ${priorBlock(g)}
+      <div class="as-prior-h" style="padding:8px 10px 0;">이번 분기 청구 액세서리</div>
+      <table class="as-sub"><thead><tr>
+        <th style="width:72px;">상태</th>
+        ${cDate ? '' : '<th>완료일</th>'}
+        <th>품번</th><th>품명</th>
+        ${cRate != null ? '' : '<th style="text-align:right;">요율</th>'}
+        <th style="text-align:right;">원가</th><th style="text-align:right;">인센티브</th>
+        <th style="width:150px;"></th></tr></thead><tbody>
+        ${lines.map(x => { const st = state(x); const same = priorParts.has(String(x.part_no||'').trim());
+          return `<tr data-id="${x.line_id}" style="${x.net_zero?'opacity:.45;':''}">
+          <td><span class="badge ${BADGE[st]}">${LABEL[st]}</span></td>
+          ${cDate ? '' : `<td style="white-space:nowrap;">${esc2(x.inv_date)}</td>`}
+          <td style="white-space:nowrap;">${esc2(x.part_no)}
+            ${same ? '<span class="badge badge-warn" style="margin-left:4px;">전에도 청구</span>' : ''}</td>
+          <td>${esc2(x.part_name)}</td>
+          ${cRate != null ? '' : `<td style="text-align:right;">${(x.rate*100).toFixed(0)}%</td>`}
+          <td style="text-align:right; white-space:nowrap;">${fmtWon(x.cost_sum)}</td>
+          <td style="text-align:right; white-space:nowrap;">${fmtWon(x.incentive)}</td>
+          <td style="text-align:right; white-space:nowrap;">
+            ${st === 'HARD' ? '<span class="hint">규칙 제외</span>'
+              : st === 'OUT' ? `<span class="hint" title="${esc2(x.decision_reason||'')}">${esc2(x.decision_reason||'제외')}</span>
+                  <button class="btn btn-sm btn-ghost" data-act="keep" data-id="${x.line_id}">되돌리기</button>`
+              : `<button class="btn btn-sm btn-danger" data-act="ex" data-id="${x.line_id}">제외</button>`}
+          </td></tr>`; }).join('')}
+      </tbody></table>`}
+    </div>`;
+  };
 
   const draw = () => {
     const counts = {}; TABS.forEach(k => counts[k] = all.filter(r => match(r, k)).length);
@@ -9321,202 +9520,75 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
     const list = all.filter(r => match(r, filter)
       && (!t || [r.vin, r.part_no, r.part_name, r.person, r.branch]
             .some(v => String(v||'').toUpperCase().includes(t))));
-    const listAmt = list.reduce((a,r) => a + r.incentive, 0);
-    const nzCount = list.filter(r => r.net_zero).length;
-
-    // 차대로 묶는다. 묶음 안에서는 상계(0원) 줄을 맨 아래로 내린다.
-    const groups = (() => {
-      const m = new Map();
-      list.forEach(r => { if(!m.has(r.vin)) m.set(r.vin, []); m.get(r.vin).push(r); });
-      const gs = [...m.values()].map(g => g.slice().sort((x,y) =>
-        (x.net_zero?1:0) - (y.net_zero?1:0)
-        || String(x.inv_date||'').localeCompare(String(y.inv_date||''))
-        || String(x.part_no||'').localeCompare(String(y.part_no||''))));
-      gs.sort((x,y) => y.reduce((a,r)=>a+r.incentive,0) - x.reduce((a,r)=>a+r.incentive,0));
-      return gs;
-    })();
-    const units = group ? groups : list.map(r => [r]);
-    const shown = units.slice(0, pageSize() * page);
-    const selectable = (g) => g.filter(x => state(x) !== 'HARD').map(x => x.line_id);
-    const pickedNow = [...picked];
-
-    const cellSum = (g) => {
-      const why = uniq(g.flatMap(x => [x.hard_excluded, ...(x.flags||[])].filter(Boolean)));
-      return why.map(esc2).join(' · ');
-    };
-    const lineWhy = (x) => [x.hard_excluded,
-        x.decision === 'EXCLUDE' ? ('제외 — ' + (x.decision_reason || '사유 없음')) : null,
-        x.net_zero ? '상계 (+/- 합 0)' : null].filter(Boolean).map(esc2).join(' · ');
-
-    // 묶음 머리 — 전시장·담당자·차대는 여기 한 번만 쓴다
-    const headRow = (g) => {
-      const r = g[0], ids = selectable(g);
-      const on = ids.length && ids.every(i => picked.has(i));
-      const cost = g.reduce((a,x) => a + x.cost_sum, 0);
-      const amt  = g.reduce((a,x) => a + x.incentive, 0);
-      const fold = folded.has(r.vin);
-      return `<tr class="as-head" data-vin="${esc2(r.vin)}" style="background:var(--surface2);">
-        <td>${ids.length ? `<input type="checkbox" class="as-gck" data-ids="${ids.join(',')}" ${on?'checked':''}>` : ''}</td>
-        <td>${uniq(g.map(state)).map(s2 => `<span class="badge ${BADGE[s2]}">${LABEL[s2]}</span>`).join(' ')}</td>
-        <td style="white-space:nowrap;">${uniq(g.map(x => x.scope === 'SALES' ? '전시장' : '서비스')).join(' / ')}</td>
-        <td>${uniq(g.map(x => asapBranchLabel(x.scope, x.branch))).map(esc2).join(', ')}</td>
-        <td>${uniq(g.map(x => x.person || '(미기재)')).map(esc2).join(', ')}</td>
-        <td class="as-fold" style="font-variant-numeric:tabular-nums; white-space:nowrap; cursor:pointer;"
-            title="접기/펼치기">${fold ? '▸' : '▾'} ${esc2(r.vin)}</td>
-        <td style="text-align:center; white-space:nowrap;">${g.length.toLocaleString('ko-KR')}건</td>
-        <td colspan="2" class="hint">${fold
-          ? esc2(uniq(g.map(x => x.part_name).filter(Boolean)).slice(0,3).join(', '))
-          : ''}</td>
-        <td style="text-align:center;">${esc2(r.model_code || '—')}</td>
-        <td></td>
-        <td style="text-align:right; white-space:nowrap;"><b>${fmtWon(cost)}</b></td>
-        <td style="text-align:right; white-space:nowrap;"><b>${fmtWon(amt)}</b></td>
-        <td class="hint">${cellSum(g)}</td></tr>`;
-    };
-
-    // 부품 줄 — 묶음 안에서는 전시장·담당자·차대를 비운다
-    const partRow = (x, inGroup) => {
-      const st = state(x), dim = x.net_zero ? ' opacity:.45;' : '';
-      return `<tr data-id="${x.line_id}" style="${dim}">
-        <td>${st === 'HARD' ? '' : `<input type="checkbox" class="as-ck" data-id="${x.line_id}" ${picked.has(x.line_id)?'checked':''}>`}</td>
-        <td><span class="badge ${BADGE[st]}">${LABEL[st]}</span></td>
-        ${inGroup ? '<td></td><td></td><td></td><td></td>' : `
-        <td style="white-space:nowrap;">${x.scope === 'SALES' ? '전시장' : '서비스'}</td>
-        <td>${esc2(asapBranchLabel(x.scope, x.branch))}</td>
-        <td>${esc2(x.person || '(미기재)')}</td>
-        <td style="font-variant-numeric:tabular-nums; white-space:nowrap;">${esc2(x.vin)}</td>`}
-        <td style="text-align:center; white-space:nowrap;">${esc2(x.inv_date)}</td>
-        <td style="white-space:nowrap;">${esc2(x.part_no)}</td>
-        <td>${esc2(x.part_name)}</td>
-        <td style="text-align:center;">${inGroup ? '' : esc2(x.model_code || '—')}</td>
-        <td style="text-align:right;">${(x.rate*100).toFixed(0)}%</td>
-        <td style="text-align:right; white-space:nowrap;">${fmtWon(x.cost_sum)}</td>
-        <td style="text-align:right; white-space:nowrap;">${fmtWon(x.incentive)}</td>
-        <td class="hint">${inGroup ? lineWhy(x)
-          : [x.hard_excluded, ...(x.flags||[]),
-             x.decision === 'EXCLUDE' ? ('제외 — ' + (x.decision_reason || '사유 없음')) : null,
-             x.net_zero ? '상계 (+/- 합 0)' : null].filter(Boolean).map(esc2).join(' · ')}</td></tr>`;
-    };
-
-    const body = shown.map(g => group
-      ? `<tbody class="as-g">${headRow(g)}${folded.has(g[0].vin) ? '' : g.map(x => partRow(x, true)).join('')}</tbody>`
-      : `<tbody>${g.map(x => partRow(x, false)).join('')}</tbody>`).join('');
+    const m = new Map();
+    list.forEach(r => { if(!m.has(r.vin)) m.set(r.vin, []); m.get(r.vin).push(r); });
+    const groups = [...m.values()].sort((x,y) =>
+      y.reduce((a,r)=>a+r.incentive,0) - x.reduce((a,r)=>a+r.incentive,0));
+    const shown = groups.slice(0, PAGE * page);
 
     box.innerHTML = `
       <div class="section-label" style="margin-top:0;">1단계 — 라인 검토</div>
       <div class="hint" style="margin-bottom:8px;">
-        규칙상 빠지는 것(시승차·커티시카·특수차, 전 차종 <b>기본장착</b> 품목)은 <b>규칙 제외</b>로 이미 빠져 있습니다.
-        <b>검토 필요</b>는 아직 빠지지 않은 상태입니다 — 보시고 빼실 것만 고르세요.
-        차대를 눌러 접었다 펼 수 있고, +/- 가 맞물려 합이 0 이 되는 줄은 흐리게 맨 아래로 내려둡니다.
+        차대 한 대가 카드 한 장입니다. <b>왜 검토 대상인지</b>가 맨 위, 그 다음 차량·담당자,
+        그 아래에 <b>전에 받은 지원 내역</b>, 마지막이 이번 분기 청구 품목입니다.
+        품목마다 바로 [제외] 하실 수 있고, 같은 품번을 전에도 청구했으면 「전에도 청구」가 붙습니다.
+        규칙상 빠지는 것(시승차·커티시카·특수차, 전 차종 기본장착)은 이미 빠져 있습니다.
       </div>
       <div class="action-row" style="margin-top:0; flex-wrap:wrap;">
         ${TABS.map(k => `<button class="btn btn-sm ${filter===k?'':'btn-ghost'}"
           data-f="${k}">${TAB_LABEL[k]} ${counts[k].toLocaleString('ko-KR')}</button>`).join('')}
-        <label class="hint" style="display:flex; align-items:center; gap:5px; margin-left:auto;">
-          <input type="checkbox" id="asGroup" ${group?'checked':''}> 차대로 묶어 보기</label>
         <input id="asQ" placeholder="차대·품번·품명·담당자·지점 검색" value="${esc2(term)}"
-               style="max-width:240px; padding:6px 8px;">
+               style="max-width:240px; padding:6px 8px; margin-left:auto;">
       </div>
       <div class="hint" style="margin:6px 0 10px;">
         집계에 들어가는 라인 <b>${kept.length.toLocaleString('ko-KR')}건</b> ·
         인센티브(라인 합, 올림 전) <b>${fmtWon(keptAmt)}</b>
-        &nbsp;|&nbsp; 지금 보기 <b>${list.length.toLocaleString('ko-KR')}건</b>${
-          group ? ` · 차대 <b>${groups.length.toLocaleString('ko-KR')}대</b>` : ''} ·
-        <b>${fmtWon(listAmt)}</b>${nzCount ? ` · 이 중 상계 ${nzCount.toLocaleString('ko-KR')}건` : ''}
-        ${group ? '&nbsp;·&nbsp;<a href="#" id="asFoldAll">모두 접기</a> / <a href="#" id="asOpenAll">모두 펼치기</a>' : ''}
+        &nbsp;|&nbsp; 지금 보기 차대 <b>${groups.length.toLocaleString('ko-KR')}대</b> ·
+        <b>${list.length.toLocaleString('ko-KR')}건</b> ·
+        <b>${fmtWon(list.reduce((a,r)=>a+r.incentive,0))}</b>
+        &nbsp;·&nbsp;<a href="#" id="asFoldAll">모두 접기</a> / <a href="#" id="asOpenAll">모두 펼치기</a>
       </div>
-      <div style="overflow-x:auto;"><table style="min-width:1180px;"><thead><tr>
-        <th style="width:28px;"><input type="checkbox" id="asAll"></th>
-        <th>상태</th><th style="white-space:nowrap;">구분</th><th>지점/전시장</th><th>담당자</th>
-        <th>차대번호</th><th style="text-align:center; white-space:nowrap;">${group?'건수 / 인보이스완료일':'인보이스완료일'}</th>
-        <th>품번</th><th>품명</th><th style="text-align:center;">모델</th>
-        <th style="text-align:right;">요율</th>
-        <th style="text-align:right; white-space:nowrap;">원가합계</th>
-        <th style="text-align:right; white-space:nowrap;">인센티브</th>
-        <th>검토 사유 / 제외 사유</th>
-      </tr></thead>${body}</table></div>
-      ${units.length > shown.length ? `<div class="action-row"><button class="btn btn-sm btn-ghost" id="asMore">
-        더 보기 (${shown.length.toLocaleString('ko-KR')} / ${units.length.toLocaleString('ko-KR')}${group?'대':'건'})</button></div>` : ''}
-      <div class="action-row" style="flex-wrap:wrap; align-items:center; gap:6px;">
-        <span class="hint">제외 사유</span>
-        <select id="asReason" style="padding:6px 8px; max-width:300px;">
-          ${REASONS.map(r => `<option value="${esc2(r)}" ${r===reason?'selected':''}>${esc2(r)}</option>`).join('')}
-          <option value="__ETC__" ${reason==='__ETC__'?'selected':''}>직접 입력…</option>
-        </select>
-        ${reason === '__ETC__' ? `<input id="asReasonEtc" value="${esc2(reasonEtc)}"
-          placeholder="사유를 적어주세요" style="padding:6px 8px; min-width:220px;">` : ''}
-        <button class="btn btn-sm btn-danger" id="asExclude">선택한 줄 정산 제외</button>
-        <button class="btn btn-sm btn-ghost" id="asRestore">선택한 줄 제외 해제</button>
-        <span class="hint" id="asSel">선택 ${pickedNow.length.toLocaleString('ko-KR')}건</span>
-      </div>
-      <div class="hint" id="asMsg" style="margin-top:4px;"></div>`;
+      <div id="asMsg" class="hint" style="margin-bottom:8px;"></div>
+      ${shown.length ? shown.map(card).join('') : '<div class="hint">해당하는 라인이 없습니다.</div>'}
+      ${groups.length > shown.length ? `<div class="action-row"><button class="btn btn-sm btn-ghost" id="asMore">
+        더 보기 (${shown.length} / ${groups.length.toLocaleString('ko-KR')}대)</button></div>` : ''}`;
 
     const $ = (q) => box.querySelector(q);
-    box.querySelectorAll('[data-f]').forEach(b => b.onclick = () => { filter = b.dataset.f; page = 1; draw(); });
-    $('#asGroup').onchange = (e) => { group = e.target.checked; page = 1; draw(); };
+    const say = (msg, bad) => { const el = $('#asMsg');
+      el.textContent = msg; el.style.color = bad ? 'var(--danger)' : 'var(--muted)'; };
+
+    box.querySelectorAll('[data-f]').forEach(b2 => b2.onclick = () => { filter = b2.dataset.f; page = 1; draw(); });
     const q = $('#asQ');
-    q.oninput = () => { term = q.value; page = 1; const p = q.selectionStart; draw();
-      const n = $('#asQ'); n.focus(); n.setSelectionRange(p, p); };
+    q.oninput = () => { term = q.value; page = 1; const pos = q.selectionStart; draw();
+      const n = $('#asQ'); n.focus(); n.setSelectionRange(pos, pos); };
     const more = $('#asMore'); if(more) more.onclick = () => { page++; draw(); };
-    const fa = $('#asFoldAll'); if(fa) fa.onclick = (e) => {
-      e.preventDefault(); groups.forEach(g => folded.add(g[0].vin)); draw(); };
-    const oa = $('#asOpenAll'); if(oa) oa.onclick = (e) => { e.preventDefault(); folded.clear(); draw(); };
-    box.querySelectorAll('.as-fold').forEach(td => td.onclick = () => {
-      const v = td.closest('tr').dataset.vin;
-      folded.has(v) ? folded.delete(v) : folded.add(v); draw(); });
+    $('#asFoldAll').onclick = (e) => { e.preventDefault(); groups.forEach(g => folded.add(g[0].vin)); draw(); };
+    $('#asOpenAll').onclick = (e) => { e.preventDefault(); folded.clear(); draw(); };
 
-    const selCount = () => { $('#asSel').textContent = `선택 ${picked.size.toLocaleString('ko-KR')}건`; };
-    box.querySelectorAll('.as-ck').forEach(c => c.onchange = () => {
-      c.checked ? picked.add(+c.dataset.id) : picked.delete(+c.dataset.id);
-      const tb = c.closest('tbody'), gck = tb && tb.querySelector('.as-gck');
-      if(gck){ const ids = gck.dataset.ids.split(',').map(Number);
-               gck.checked = ids.every(i => picked.has(i)); }
-      selCount(); });
-    box.querySelectorAll('.as-gck').forEach(c => c.onchange = () => {
-      const ids = c.dataset.ids.split(',').map(Number);
-      ids.forEach(i => c.checked ? picked.add(i) : picked.delete(i));
-      const tb = c.closest('tbody');
-      tb.querySelectorAll('.as-ck').forEach(x => x.checked = picked.has(+x.dataset.id));
-      selCount(); });
-    $('#asAll').onchange = (e) => {
-      shown.flat().filter(x => state(x) !== 'HARD')
-        .forEach(x => e.target.checked ? picked.add(x.line_id) : picked.delete(x.line_id));
-      draw(); };
-
-    $('#asReason').onchange = (e) => { reason = e.target.value; draw(); };
-    const etc = $('#asReasonEtc'); if(etc) etc.oninput = () => { reasonEtc = etc.value; };
-    const say = (m, bad) => { const el = $('#asMsg');
-      el.textContent = m; el.style.color = bad ? 'var(--danger)' : 'var(--muted)'; };
-
-    $('#asExclude').onclick = async () => {
-      const ids = [...picked];
-      if(!ids.length){ say('뺄 줄을 먼저 고르세요.', true); return; }
-      const txt = (reason === '__ETC__' ? reasonEtc : reason).trim();
-      if(!txt){ say('제외 사유를 고르거나 적어주세요. 리테일러가 그대로 봅니다.', true); return; }
-      const { data: { user } } = await sb.auth.getUser();
-      const { error } = await sb.from('asap_line_decisions').upsert(
-        ids.map(id => ({ round_id: round.id, line_id: id, decision:'EXCLUDE',
-                         reason: txt, decided_by: user?.id || null,
-                         decided_at: new Date().toISOString() })),
-        { onConflict:'round_id,line_id' });
-      if(error){ say('실패: ' + error.message, true); return; }
-      await logAudit('ASAP_EXCLUDE','ROUND', round.id, { label:`${ids.length}건 · ${txt}` });
-      ids.forEach(id => { const r = all.find(x => x.line_id === id);
-        if(r){ r.decision = 'EXCLUDE'; r.decision_reason = txt; } });
-      picked.clear(); draw(); say(`${ids.length.toLocaleString('ko-KR')}건을 뺐습니다 — ${txt}`);
-      onChanged && onChanged();
-    };
-    $('#asRestore').onclick = async () => {
-      const ids = [...picked];
-      if(!ids.length){ say('되돌릴 줄을 먼저 고르세요.', true); return; }
-      const { error } = await sb.from('asap_line_decisions').delete()
-        .eq('round_id', round.id).in('line_id', ids);
-      if(error){ say('실패: ' + error.message, true); return; }
-      ids.forEach(id => { const r = all.find(x => x.line_id === id);
-        if(r){ r.decision = null; r.decision_reason = null; } });
-      picked.clear(); draw(); say(`${ids.length.toLocaleString('ko-KR')}건을 되돌렸습니다.`);
-      onChanged && onChanged();
-    };
+    box.querySelectorAll('.as-card').forEach(c => {
+      const vin = c.dataset.vin;
+      const g = groups.find(x => x[0].vin === vin) || [];
+      const rsn = () => (c.querySelector('.as-rsn') || {}).value || REASONS[0];
+      c.querySelectorAll('[data-act]').forEach(btn => btn.onclick = async () => {
+        const act = btn.dataset.act;
+        if(act === 'fold'){ folded.has(vin) ? folded.delete(vin) : folded.add(vin); draw(); return; }
+        btn.disabled = true;
+        let err = null, n = 0, reason = rsn();
+        if(act === 'ex'){      n = 1; err = await persist([+btn.dataset.id], reason); }
+        else if(act === 'keep'){ n = 1; err = await unpersist([+btn.dataset.id]); }
+        else if(act === 'ex-all'){
+          const ids = g.filter(x => state(x) !== 'HARD' && x.decision !== 'EXCLUDE').map(x => x.line_id);
+          n = ids.length; err = ids.length ? await persist(ids, reason) : null;
+        } else if(act === 'keep-all'){
+          const ids = g.filter(x => x.decision === 'EXCLUDE').map(x => x.line_id);
+          n = ids.length; err = ids.length ? await unpersist(ids) : null;
+        }
+        if(err){ btn.disabled = false; say('실패: ' + err, true); return; }
+        draw();
+        say(act.startsWith('ex') ? `${n}건을 뺐습니다 — ${reason}` : `${n}건을 되돌렸습니다.`);
+        onChanged && onChanged();
+      });
+    });
   };
   draw();
 }
