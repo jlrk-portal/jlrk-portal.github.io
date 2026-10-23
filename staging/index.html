@@ -12692,6 +12692,206 @@ function odsPrintConfirm(round, type, claims){
    깨끗하게 그린다. 어느 유형에서 눌러도 똑같이 동작한다.
    ================================================================ */
 
+/* ================================================================
+   공지용 요약에 딸린 두 가지 — 모든 정산유형 공통  (2026-10-23)
+
+   매니저 지시: 공지 메일에 붙일 수 있게 ① 인원별 금액 PDF
+   ② 리테일러 통합본(원본 포함) 엑셀. 엔진오일만이 아니라 전부.
+
+   '인원' 과 '원본' 이 유형마다 다른 표에 있으므로 여기서 한 번에 찾는다.
+   없으면 버튼을 숨긴다 — 눌렀는데 빈 파일이 나오는 게 제일 나쁘다.
+   ================================================================ */
+
+/* 그 회차의 원본 행을 유형에 맞게 긁어온다. [{sheet, columns, rows}] */
+async function noticeRawSheets(round, type, claims){
+  const out = [];
+  const code = String(type?.code || '');
+
+  // ① 엔진오일 — engineoil_lines (쿠폰 클레임 / 쿠폰북)
+  if(/Engine Oil/i.test(code) || /엔진오일/.test(type?.name || '')){
+    const L = await sbAll(() => sb.from('engineoil_lines').select('*')
+      .eq('round_id', round.id).order('retailer_code').order('workshop_code').order('used_at'), '원본');
+    const cp = L.filter(x => x.kind === 'COUPON'), bk = L.filter(x => x.kind === 'BOOK');
+    if(cp.length) out.push({ sheet:'원본 쿠폰클레임', columns:[
+      { key:'retailer_code', label:'리테일러', w:10 }, { key:'site_name', label:'지점', w:16 },
+      { key:'coupon_no', label:'쿠폰번호', w:16 }, { key:'ref_no', label:'참조번호', w:16 },
+      { key:'used_at', label:'사용일자', w:12, align:'center' },
+      { key:'sent_at', label:'클레임전송일자', w:14, align:'center' },
+      { key:'customer', label:'고객명', w:12 }, { key:'car_no', label:'차량번호', w:12 },
+      { key:'vin', label:'차대번호', w:20 },
+      { key:'total_amt', label:'총금액', w:13, type:'num' },
+      { key:'saveback', label:'사용반환금', w:13, type:'num' },
+      { key:'vme', label:'VME', w:12, type:'num' },
+      { key:'castrol', label:'Castrol', w:11, type:'num' },
+    ], rows: cp });
+    if(bk.length) out.push({ sheet:'원본 쿠폰북', columns:[
+      { key:'retailer_code', label:'리테일러', w:10 }, { key:'site_name', label:'지점', w:16 },
+      { key:'book_id', label:'쿠폰북ID', w:16 }, { key:'book_type', label:'유형', w:9, align:'center' },
+      { key:'product', label:'상품', w:22 },
+      { key:'seller_name', label:'판매자', w:11 }, { key:'seller_id', label:'판매자ID', w:12 },
+      { key:'customer', label:'고객명', w:12 }, { key:'vin', label:'차대번호', w:20 },
+      { key:'used_at', label:'판매일자', w:12, align:'center' },
+      { key:'incentive', label:'인센티브', w:12, type:'num' },
+    ], rows: bk });
+    return out;
+  }
+
+  // ② 픽업&딜리버리 — pnd_lines
+  if(/PND|Pick/i.test(code)){
+    const L = await sbAll(() => sb.from('pnd_lines').select('*')
+      .eq('round_id', round.id).order('verdict').order('svc_date'), '원본');
+    if(L.length){
+      const keys = Object.keys(L[0]).filter(k => !['id','round_id','created_at'].includes(k));
+      out.push({ sheet:'원본 (전체)', columns: keys.map(k => ({ key:k, label:k, w:14 })), rows:L });
+    }
+    return out;
+  }
+
+  // ③ One DMS — claims.detail.users 에 명단이 들어 있다
+  const users = [];
+  (claims||[]).forEach(c => (c.detail?.users || []).forEach(u =>
+    users.push({ ...u, _rt: `${c.retailers?.code||''} ${c.retailers?.name||''}` })));
+  if(users.length){
+    const keys = Object.keys(users[0]).filter(k => k !== '_rt');
+    out.push({ sheet:'원본 (전체)', columns:[
+      { key:'_rt', label:'리테일러', w:18 },
+      ...keys.map(k => ({ key:k, label:k, w:14 })),
+    ], rows: users });
+  }
+  return out;
+}
+
+/* 인원별(판매자별) 금액 — 있으면 [{branch, person, cnt, amount, retailer}] */
+async function noticePersons(round){
+  const rows = await sbAll(() => sb.from('incentive_sellers').select('*')
+    .eq('round_id', round.id).order('retailer_code').order('workshop_code').order('seller_name'),
+    '판매자별');
+  return rows.map(r => ({
+    retailer: r.retailer_code || '', branch: r.workshop_name || r.workshop_code || '',
+    person: r.seller_name || '(미기재)', cnt: Number(r.cnt || 0), amount: Number(r.amount || 0),
+  }));
+}
+
+/* 리테일러 통합본 엑셀 — 요약 + 인원별 + 원본 */
+async function noticeExportXlsx(round, type, claims, rows, T){
+  const name = `${String(type?.name||'정산').replace(/[\\/:*?"<>|]/g,'')}_${round.period_label}`;
+  const wb = XLSX.utils.book_new();
+  const isAR = type?.direction === 'AR';
+  const hasLines = T.lines > 0;
+
+  XLSX.utils.book_append_sheet(wb, xsSheet({
+    title: `${type?.name||''} · ${round.period_label}`,
+    subtitle: `리테일러 통합본 · ${rows.length}개사 · ${Math.round(T.amount).toLocaleString('ko-KR')}원`
+      + (round.invoice_issue_date ? ` · ${type?.requires_invoice ? '세금계산서 발행일' : '인보이스 Date'} ${round.invoice_issue_date}` : ''),
+    summary: [
+      { label:'대상 리테일러', value: rows.length },
+      ...(hasLines ? [{ label:'대상 건수', value: T.lines }] : []),
+      { label: isAR ? '청구 금액' : '정산 금액', value: Math.round(T.amount) },
+      { label:'확정', value: `${T.confirmed} / ${T.n}` },
+    ],
+    columns: [
+      { key:'code', label:'리테일러', w:10 },
+      { key:'name', label:'법인명', w:22 },
+      { key:'ws',   label:'지점수', w:8,  type:'num', align:'center' },
+      ...(hasLines ? [{ key:'lines', label:'건수', w:10, type:'num' }] : []),
+      { key:'amount', label: isAR ? '청구 금액' : '정산 금액', w:16, type:'num' },
+      { key:'state',  label:'확정', w:8, align:'center' },
+    ],
+    rows: rows.map(r => ({ code:r.code, name:r.name, ws:r.ws.size || '',
+      lines:r.lines, amount:Math.round(r.amount),
+      state:(r.confirmed >= r.n && r.n) ? '확정' : '대기' })),
+    totals: { code:'합계', lines:T.lines, amount:Math.round(T.amount) },
+    notes: ['이 파일은 관리자용 통합본입니다 — 전 리테일러가 함께 들어 있습니다.',
+            '리테일러에게는 포털에서 각자 자기 것만 내려받게 하십시오.'],
+  }), '정산 요약');
+
+  const persons = await noticePersons(round);
+  if(persons.length){
+    XLSX.utils.book_append_sheet(wb, xsSheet({
+      title: `${type?.name||''} · ${round.period_label} — 인원별 금액`,
+      subtitle: `${persons.length}명 · ${persons.reduce((a,p)=>a+p.cnt,0).toLocaleString('ko-KR')}건`,
+      columns: [
+        { key:'retailer', label:'리테일러', w:10 }, { key:'branch', label:'지점', w:18 },
+        { key:'person', label:'판매자', w:12 },
+        { key:'cnt', label:'건수', w:9, type:'num' },
+        { key:'amount', label:'금액', w:14, type:'num' },
+      ],
+      rows: persons,
+      totals: { retailer:'합계', cnt:persons.reduce((a,p)=>a+p.cnt,0),
+                amount:persons.reduce((a,p)=>a+p.amount,0) },
+    }), '인원별 금액');
+  }
+
+  for(const sh of await noticeRawSheets(round, type, claims)){
+    XLSX.utils.book_append_sheet(wb, xsSheet({
+      title: `${type?.name||''} · ${round.period_label} — ${sh.sheet}`,
+      subtitle: `${sh.rows.length.toLocaleString('ko-KR')}행 · 전 리테일러 통합`,
+      columns: sh.columns, rows: sh.rows,
+    }), sh.sheet.slice(0, 31));
+  }
+  XLSX.writeFile(wb, name + '_통합본.xlsx');
+}
+
+/* 인원별 금액 PDF — 공지 메일에 붙이는 용도 */
+function noticePersonsPdf(round, type, persons){
+  const nTot = persons.reduce((a,p) => a + p.cnt, 0);
+  const aTot = persons.reduce((a,p) => a + p.amount, 0);
+  const byBranch = new Map();
+  persons.forEach(p => {
+    const k = (p.retailer ? p.retailer + ' ' : '') + p.branch;
+    if(!byBranch.has(k)) byBranch.set(k, []);
+    byBranch.get(k).push(p);
+  });
+  const w = window.open('', '_blank', 'width=1000,height=840');
+  if(!w){ alert('팝업이 차단되었습니다. 이 사이트의 팝업을 허용해주세요.'); return; }
+  const e = _esc, won = n => Math.round(n||0).toLocaleString('ko-KR') + '원';
+  w.document.write(`<!doctype html><html lang="ko"><head><meta charset="utf-8">
+  <title>${e(type?.name||'')} ${e(round.period_label)} 인원별 금액</title>
+  <style>
+    @page { size:A4; margin:12mm; }
+    body { font-family:"맑은 고딕","Malgun Gothic",sans-serif; color:#1a1a1a; margin:0; padding:22px 26px; }
+    h1 { font-size:18px; margin:4px 0 2px; }
+    .sub { font-size:11.5px; color:#6e7375; margin-bottom:16px; }
+    .eyebrow { font-size:10.5px; letter-spacing:.08em; color:#6e7375; text-transform:uppercase; }
+    .grp { margin-bottom:14px; break-inside:avoid; }
+    .ghead { display:flex; background:#3d4448; color:#fff; padding:6px 10px; font-size:12.5px; font-weight:600; }
+    .ghead .r { margin-left:auto; }
+    table { border-collapse:collapse; width:100%; font-size:11.5px; }
+    th { background:#f4f5f5; font-weight:600; padding:5px 8px; text-align:left; border-bottom:1px solid #d9dcde; }
+    td { border-bottom:1px solid #eceeef; padding:4px 8px; }
+    .n { text-align:right; font-variant-numeric:tabular-nums; }
+    .tot { margin-top:14px; padding:9px 12px; background:#f4f5f5; font-weight:700; display:flex; }
+    .tot .r { margin-left:auto; }
+    .foot { margin-top:14px; font-size:10px; color:#6e7375; line-height:1.7; }
+    .noprint { margin-bottom:14px; }
+    .btn { font:inherit; font-size:12.5px; padding:7px 14px; border:1px solid #3d4448;
+           background:#3d4448; color:#fff; border-radius:5px; cursor:pointer; }
+    @media print { .noprint { display:none; } body { padding:0; } }
+  </style></head><body>
+  <div class="noprint"><button class="btn" onclick="window.print()">인쇄 / PDF 저장</button></div>
+  <div class="eyebrow">JLR KOREA 정산 포털</div>
+  <h1>${e(type?.name||'')} · ${e(round.period_label)} — 인원별 금액</h1>
+  <div class="sub">${byBranch.size}개 지점 · ${persons.length}명 · ${nTot.toLocaleString('ko-KR')}건</div>
+  ${[...byBranch.entries()].map(([k, list]) => `
+    <div class="grp">
+      <div class="ghead"><span>${e(k)}</span>
+        <span class="r">${list.reduce((a,p)=>a+p.cnt,0).toLocaleString('ko-KR')}건 ·
+          ${won(list.reduce((a,p)=>a+p.amount,0))}</span></div>
+      <table><thead><tr><th>판매자</th><th class="n">건수</th><th class="n">금액</th></tr></thead><tbody>
+        ${list.map(p => `<tr><td>${e(p.person)}</td>
+          <td class="n">${p.cnt.toLocaleString('ko-KR')}</td>
+          <td class="n">${won(p.amount)}</td></tr>`).join('')}
+      </tbody></table>
+    </div>`).join('')}
+  <div class="tot"><span>합계 ${persons.length}명</span>
+    <span class="r">${nTot.toLocaleString('ko-KR')}건 · ${won(aTot)}</span></div>
+  <div class="foot">
+    판매자 정보가 실제와 다르면 포털에서 <b>건별로 수정 요청</b>을 보내주십시오.
+    JLR Korea 가 승인하면 반영됩니다.<br>출력 ${new Date().toLocaleString('ko-KR')}
+  </div></body></html>`);
+  w.document.close();
+}
+
 async function openNoticeSummary(){
   if(!currentRoundId) return;
   const { data: round } = await sb.from('rounds')
@@ -12784,6 +12984,8 @@ async function openNoticeSummary(){
   <div class="noprint">
     <button class="btn" onclick="window.print()">인쇄 / PDF 저장</button>
     <button class="btn g" id="cp">표 내용 복사</button>
+    <button class="btn g" id="pp" style="display:none;">인원별 금액 PDF</button>
+    <button class="btn g" id="xl">엑셀 내려받기 (통합본)</button>
     <span style="font-size:11.5px;color:#6e7375;align-self:center;">
       이 창을 그대로 캡처해 메일에 붙이시면 됩니다</span>
   </div>
@@ -12837,8 +13039,29 @@ async function openNoticeSummary(){
       navigator.clipboard.writeText(t).then(function(){ 
         var b=document.getElementById('cp'); b.textContent='복사됨'; setTimeout(function(){b.textContent='표 내용 복사';},1500); });
     };
+    // 계산은 부모 창(포털)에서 한다 — 로그인 세션과 라이브러리가 거기 있다
+    document.getElementById('xl').onclick = function(){
+      var b=this; b.disabled=true; b.textContent='만드는 중...';
+      Promise.resolve(window.opener.__noticeXlsx())
+        .then(function(){ b.textContent='엑셀 내려받기 (통합본)'; b.disabled=false; })
+        .catch(function(e){ alert('엑셀 생성 실패: ' + (e && e.message || e)); b.disabled=false;
+                            b.textContent='엑셀 내려받기 (통합본)'; });
+    };
+    document.getElementById('pp').onclick = function(){ window.opener.__noticePdf(); };
+    if(window.opener && window.opener.__noticeHasPersons)
+      document.getElementById('pp').style.display = '';
   <\/script></body></html>`);
   w.document.close();
+
+  /* 새 창에서 부를 수 있게 부모 창에 걸어둔다 */
+  const persons = await noticePersons(round);
+  window.__noticeHasPersons = persons.length > 0;
+  window.__noticeXlsx = () => noticeExportXlsx(round, type, claims, rows, T);
+  window.__noticePdf  = () => noticePersonsPdf(round, type, persons);
+  if(persons.length){
+    const pb = w.document.getElementById('pp');
+    if(pb) pb.style.display = '';
+  }
   await logAudit('NOTICE_SUMMARY','ROUND', currentRoundId, { label: `${type.name} · ${round.period_label}` });
 }
 
