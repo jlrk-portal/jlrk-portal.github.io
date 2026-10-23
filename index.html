@@ -4938,7 +4938,7 @@ function eo3vBlankRows(rows, cols = ['M','N']){
   return out;
 }
 
-async function eo3vFillTemplate(tplBuf, { inputFills, coverDate }){
+async function eo3vFillTemplate(tplBuf, { inputFills, coverDate, relabel }){
   const zip = await JSZip.loadAsync(tplBuf);
   let wbXml = await zip.file('xl/workbook.xml').async('string');
   const relsXml = await zip.file('xl/_rels/workbook.xml.rels').async('string');
@@ -4954,6 +4954,32 @@ async function eo3vFillTemplate(tplBuf, { inputFills, coverDate }){
     let t = relTargets[e.rid] || '';
     return t.startsWith('/') ? t.slice(1) : 'xl/' + t.replace(/^\.\//,'');
   };
+
+  /* Text(Description) 의 월·분기를 이번 회차에 맞춘다.
+     설명은 템플릿 안에 박혀 있다 (직전 회차 바우처를 그대로 쓰기 때문).
+     셀 위치가 템플릿마다 다르므로 공유문자열을 패턴으로 고친다.
+     '_202608' 처럼 밑줄 뒤에 오는 월과 'FY27 Q2' 만 건드린다 — 금액이나
+     날짜를 건드리지 않게 범위를 좁혔다. (2026-10-23) */
+  if(relabel && relabel.ym) try {
+    const changed = [];
+    const fix = (txt) => txt
+      .replace(/_(20\d{2}(?:0[1-9]|1[0-2]))(?=_|\b)/g, '_' + relabel.ym)
+      .replace(/\bFY\d{2}\s*Q[1-4]\b/g, relabel.label);
+    for(const p of ['xl/sharedStrings.xml', ...sheetEntries.map(e => pathOf(e.name))]){
+      if(!p || !zip.file(p)) continue;
+      let xml = await zip.file(p).async('string');
+      const next = xml.replace(/<t(\s[^>]*)?>([^<]*)<\/t>/g, (m0, attr, inner) => {
+        const f = fix(inner);
+        if(f !== inner && changed.length < 8) changed.push(inner.slice(0,70) + ' → ' + f.slice(0,70));
+        return f === inner ? m0 : `<t${attr||''}>${f}</t>`;
+      });
+      if(next !== xml) zip.file(p, next);
+    }
+    if(changed.length) console.log('[바우처 설명 변경]', changed);
+  } catch(e){
+    // 설명을 못 고쳐도 바우처 자체는 나와야 한다. 숫자는 코드가 채우므로 안전하다.
+    console.warn('[바우처 설명 변경 실패 — 월 표기를 손으로 고쳐주세요]', e);
+  }
 
   // 입력 시트별 셀 채우기
   for(const [sheetName, cells] of Object.entries(inputFills)){
@@ -4988,6 +5014,25 @@ async function eo3vFillTemplate(tplBuf, { inputFills, coverDate }){
     zip.file('[Content_Types].xml', ct);
   }
   return await zip.generateAsync({ type:'blob' });
+}
+
+/* 회차의 '정산월' 에서 바우처 기준월(정산월 − 1)과 회계분기 라벨을 낸다.
+   매니저 기준(2026-10-23): 2026-10 정산 = 9월 사용분 → 202609.
+   JLR 회계연도는 4월 시작 — 202609 는 FY27 Q2. */
+function eoVoucherPeriod(round){
+  // period_ym 이 먼저. 없으면 기간 라벨에서 YYYYMM 을 긁는다.
+  let ym = String(round.period_ym || '').replace(/\D/g,'');
+  if(!/^20\d{4}$/.test(ym)){
+    const m = String(round.period_label||'').match(/(20\d{2})[-.]?(0[1-9]|1[0-2])/);
+    ym = m ? m[1] + m[2] : '';
+  }
+  if(!/^20\d{4}$/.test(ym)) return null;      // 분기 회차 등 — 손대지 않는다
+  let y = +ym.slice(0,4), mo = +ym.slice(4);
+  mo -= 1; if(mo === 0){ mo = 12; y -= 1; }   // 정산월 − 1
+  const vym = `${y}${String(mo).padStart(2,'0')}`;
+  const fy = (mo >= 4 ? y + 1 : y) - 2000;            // 4월 시작
+  const q  = Math.floor(((mo - 4 + 12) % 12) / 3) + 1; // 4~6=Q1
+  return { ym: vym, label: `FY${fy} Q${q}` };
 }
 
 async function generateEngineOilVouchers(round, type){
@@ -5044,6 +5089,8 @@ async function generateEngineOilVouchers(round, type){
     }));
     const R = (n) => Math.round(n);
     const per = sanitizeFilename(round.period_label);
+    // 바우처 기준월 = 정산월 − 1 (2026-10 정산 = 9월 사용분 → 202609)
+    const vper = eoVoucherPeriod(round);
 
     // 프리셋에 해당하는 바우처를 개별 파일로 순차 다운로드
     const files = [];
@@ -5053,7 +5100,7 @@ async function generateEngineOilVouchers(round, type){
       const cells = eo3vBlankRows(rows);
       Object.entries(rmap).forEach(([vc, v]) => { const r = rows[vc]; if(!r) return; cells['M'+r] = R(v.customer.jg); cells['N'+r] = R(v.customer.lr); });
       files.push({ name:`Engine Oil Package_사용반환금_${per}.xlsx`,
-        blob: await eo3vFillTemplate(bufs.saveback, { inputFills: { 'AP_input reqeust': cells }, coverDate: date }) });
+        blob: await eo3vFillTemplate(bufs.saveback, { inputFills: { 'AP_input reqeust': cells }, coverDate: date, relabel: vper }) });
     }
     if(eo.comps.includes('support')){
       const wb = xsFixBook(XLSX.read(new Uint8Array(bufs.support), { type:'array' }));
@@ -5065,7 +5112,7 @@ async function generateEngineOilVouchers(round, type){
         if(rC[vc]){ cC['M'+rC[vc]] = R(v.castrol.jg); cC['N'+rC[vc]] = R(v.castrol.lr); }
       });
       files.push({ name:`Engine Oil Package_Retailer Support_${per}.xlsx`,
-        blob: await eo3vFillTemplate(bufs.support, { inputFills: { 'AP_input reqeust (VME)': cV, 'AP_input reqeust (Castrol)': cC }, coverDate: date }) });
+        blob: await eo3vFillTemplate(bufs.support, { inputFills: { 'AP_input reqeust (VME)': cV, 'AP_input reqeust (Castrol)': cC }, coverDate: date, relabel: vper }) });
     }
     if(eo.comps.includes('incentive')){
       const wb = xsFixBook(XLSX.read(new Uint8Array(bufs.incentive), { type:'array' }));
@@ -5073,7 +5120,7 @@ async function generateEngineOilVouchers(round, type){
       const cells = eo3vBlankRows(rows);
       Object.entries(rmap).forEach(([vc, v]) => { const r = rows[vc]; if(!r || !v.incentive) return; cells['I'+r] = R(v.incentive); });
       files.push({ name:`Engine Oil Package_Sales Incentive_${per}.xlsx`,
-        blob: await eo3vFillTemplate(bufs.incentive, { inputFills: { 'AP_input reqeust': cells }, coverDate: date }) });
+        blob: await eo3vFillTemplate(bufs.incentive, { inputFills: { 'AP_input reqeust': cells }, coverDate: date, relabel: vper }) });
     }
 
     for(const f of files){
@@ -5090,6 +5137,8 @@ async function generateEngineOilVouchers(round, type){
     }
     await logAudit('EO3V_VOUCHER','ROUND',round.id,{label:`${type.name} · ${round.period_label}`, files: files.map(f=>f.name)});
     alert(`바우처 ${files.length}개 다운로드 완료:\n- ` + files.map(f=>f.name).join('\n- ')
+      + (vper ? `\n\n설명(Text) 기준월: ${vper.label} · ${vper.ym} (정산월 − 1)` 
+              : '\n\n⚠ 정산 월이 설정되지 않아 설명의 월을 바꾸지 못했습니다. 회차에서 정산 월을 넣어주세요.')
       + '\n\n표지 PDF는 엑셀에서 [파일 > 다른 이름으로 저장 > PDF]로 저장하세요.');
     await renderRoundDetail();
   }catch(err){
@@ -11667,7 +11716,9 @@ function ymFromSrName(name){
    그 달이 반만 들어간 채로 남아 더 나쁘다. (2026-10-23) */
 /* 겹치면 건너뛸 때 집을 열. 045 의 유니크 조합 그대로다 (058). */
 const DEDUP_COLS = {
-  turnover_lines:     'stl_no,stl_line,part_no,claim_acct,inv_no,item_type',
+  // ⚠ 인보이스완료일·원가합계·수량까지 넣어야 한다. 그게 빠지면 취소/정정 쌍
+  //    (금액 부호만 다른 두 줄)이 같은 줄로 보여 한쪽이 지워진다. (061)
+  turnover_lines:     'stl_no,stl_line,part_no,claim_acct,inv_no,item_type,inv_date,cost_sum,qty',
   sales_report_lines: 'ym,vin,retail_date',
 };
 
