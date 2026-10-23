@@ -960,6 +960,17 @@
         기간 라벨에 <code>2026-09</code> 나 <code>9월</code> 이 있으면 자동으로 채워집니다.</div>
     </div>
     <div class="hint">예산 집행 집계 기준입니다. 기간 라벨을 "FY27 Q1" 형식으로 입력하면 자동으로 채워집니다.</div>
+    <div class="field"><label>기준 기간 — 정산의 '대상' 이 되는 기간</label>
+      <input id="r_basis_label" placeholder="예: 2026-09 · FY27 Q2 · FY27 Q1, Q2">
+      <div class="hint">
+        <b>정산월</b>은 정산을 <b>진행하는</b> 월, <b>기준월</b>은 정산의 <b>대상이 되는</b> 기간입니다.
+        바우처의 설명·파일명이 이 값을 따릅니다.<br>
+        엔진오일(월정산) 정산월 2026-10 · 기준 <b>2026-09</b> ·
+        리콜 업셀링 정산월 2026-10 · 기준 <b>FY27 Q2</b> ·
+        Welcome Back 기준 <b>FY27 Q1, Q2</b><br>
+        월단위 유형이면 <code>2026-09</code> 형식으로 적어주세요 — 비우면 정산월의 직전 달로 넣습니다.
+      </div>
+    </div>
     <div class="field"><label>청구 마감일시</label><input id="r_claim_due_at" type="datetime-local"></div>
     <div class="hint" id="r_ar_hint" style="display:none; color:var(--accent-ar);">
       ※ AR(JLRK가 청구하는 유형)은 청구 마감일시를 쓰지 않습니다. 회차 생성 후 상세화면에서 청구금액·근거를 입력하고, 이의제기 마감일시를 설정하게 됩니다.
@@ -3065,7 +3076,8 @@ async function renderEngineOilRoundDetail(round, type){
   document.getElementById('rd_title').textContent = `${type.name} · ${round.period_label}`;
   document.getElementById('rd_status').innerHTML =
     `<span class="badge ${round.status==='DRAFT'?'badge-off':'badge-ap'}">${ROUND_STATUS_LABEL[round.status]||round.status}</span>`;
-  document.getElementById('rd_meta').textContent = `${eo.ar ? 'AR' : 'AP'} · 시스템 산출 (${eo.label}) · 리테일러 확인만`;
+  document.getElementById('rd_meta').textContent = `${eo.ar ? 'AR' : 'AP'} · 시스템 산출 (${eo.label}) · 리테일러 확인만`
+    + (round.basis_label ? ` · 기준 ${round.basis_label}` : '');
   document.getElementById('rd_due').textContent = round.invoice_issue_date
     ? `${type?.requires_invoice ? '세금계산서' : '바우처'} 발행일 ${round.invoice_issue_date}`
     : '발행일 미설정';
@@ -4965,11 +4977,15 @@ async function eo3vFillTemplate(tplBuf, { inputFills, coverDate, relabel }){
      셀 위치가 템플릿마다 다르므로 공유문자열을 패턴으로 고친다.
      '_202608' 처럼 밑줄 뒤에 오는 월과 'FY27 Q2' 만 건드린다 — 금액이나
      날짜를 건드리지 않게 범위를 좁혔다. (2026-10-23) */
-  if(relabel && relabel.ym) try {
+  if(relabel && (relabel.ym || relabel.label)) try {
     const changed = [];
-    const fix = (txt) => txt
-      .replace(/_(20\d{2}(?:0[1-9]|1[0-2]))(?=_|\b)/g, '_' + relabel.ym)
-      .replace(/\bFY\d{2}\s*Q[1-4]\b/g, relabel.label);
+    // 기준이 분기면 월 토큰은 그대로 두고 'FY27 Q2' 만 고친다
+    const fix = (txt) => {
+      let t = txt;
+      if(relabel.ym) t = t.replace(/_(20\d{2}(?:0[1-9]|1[0-2]))(?=_|\b)/g, '_' + relabel.ym);
+      if(relabel.label) t = t.replace(/\bFY\d{2}\s*Q[1-4](?:\s*,\s*Q[1-4])*\b/g, relabel.label);
+      return t;
+    };
     for(const p of ['xl/sharedStrings.xml', ...sheetEntries.map(e => pathOf(e.name))]){
       if(!p || !zip.file(p)) continue;
       let xml = await zip.file(p).async('string');
@@ -5033,16 +5049,34 @@ async function eo3vFillTemplate(tplBuf, { inputFills, coverDate, relabel }){
    매니저 기준(2026-10-23): 2026-10 정산 = 9월 사용분 → 202609.
    JLR 회계연도는 4월 시작 — 202609 는 FY27 Q2. */
 function eoVoucherPeriod(round){
-  // period_ym 이 먼저. 없으면 기간 라벨에서 YYYYMM 을 긁는다.
-  let ym = String(round.period_ym || '').replace(/\D/g,'');
+  /* 회차에 적힌 '기준월' 을 그대로 쓴다. 예전에는 정산월 − 1 로 추측했는데,
+     라벨이 진행월인 회차(RS 2026-10)와 대상월인 회차(SP 2026-09)가 섞여
+     있어 SP 쪽이 한 달 더 당겨졌다. (2026-10-23 지적) */
+  let ym = String(round.basis_ym || '').replace(/\D/g,'');
   if(!/^20\d{4}$/.test(ym)){
-    const m = String(round.period_label||'').match(/(20\d{2})[-.]?(0[1-9]|1[0-2])/);
+    const m = String(round.basis_label || '').match(/(20\d{2})[-.]?(0[1-9]|1[0-2])(?!\d)/);
     ym = m ? m[1] + m[2] : '';
   }
-  if(!/^20\d{4}$/.test(ym)) return null;      // 분기 회차 등 — 손대지 않는다
-  let y = +ym.slice(0,4), mo = +ym.slice(4);
-  mo -= 1; if(mo === 0){ mo = 12; y -= 1; }   // 정산월 − 1
-  const vym = `${y}${String(mo).padStart(2,'0')}`;
+  // 기준월이 아직 안 적힌 옛 회차만 예전처럼 정산월 − 1 로 메운다
+  if(!/^20\d{4}$/.test(ym) && !round.basis_label){
+    let p = String(round.period_ym || '').replace(/\D/g,'');
+    if(!/^20\d{4}$/.test(p)){
+      const m2 = String(round.period_label||'').match(/(20\d{2})[-.]?(0[1-9]|1[0-2])(?!\d)/);
+      p = m2 ? m2[1] + m2[2] : '';
+    }
+    if(/^20\d{4}$/.test(p)){
+      let y = +p.slice(0,4), mo = +p.slice(4) - 1;
+      if(mo === 0){ mo = 12; y -= 1; }
+      ym = `${y}${String(mo).padStart(2,'0')}`;
+    }
+  }
+  // 기준이 분기면(FY27 Q2 · FY27 Q1, Q2) 월은 손대지 않고 라벨만 고친다
+  if(!/^20\d{4}$/.test(ym)){
+    const lbl = String(round.basis_label || '').trim();
+    return /FY\d{2}/.test(lbl) ? { ym: null, label: lbl, file: lbl } : null;
+  }
+  const y = +ym.slice(0,4), mo = +ym.slice(4);
+  const vym = ym;
   const fy = (mo >= 4 ? y + 1 : y) - 2000;            // 4월 시작
   const q  = Math.floor(((mo - 4 + 12) % 12) / 3) + 1; // 4~6=Q1
   return { ym: vym, label: `FY${fy} Q${q}` };
@@ -5155,7 +5189,7 @@ async function generateEngineOilVouchers(round, type){
     const vper = eoVoucherPeriod(round);
     // 파일명도 기준월로. 바우처는 'YYYYMM' 표기다 (매니저 예시 2026-10-23:
     // 'Engine Oil Package_사용반환금_202609'). 월 회차가 아니면 기간 라벨.
-    const per = vper ? vper.ym : sanitizeFilename(round.period_label);
+    const per = sanitizeFilename(vper ? (vper.ym || vper.file) : round.period_label);
 
     // 프리셋에 해당하는 바우처를 개별 파일로 순차 다운로드
     const files = [];
@@ -5299,7 +5333,7 @@ async function generateEngineOilSpVoucher(round, type, s){
     setP('바우처 파일을 만드는 중...');
     const buffer = await buildVoucherFromTemplate(tplBuffer, { inputCells, coverCells, images: [], inputSheetName, coverSheetName });
     const vp = eoVoucherPeriod(round);
-    const perAr = vp ? vp.ym : sanitizeFilename(round.period_label);
+    const perAr = sanitizeFilename(vp ? (vp.ym || vp.file) : round.period_label);
     const fname = `AR Voucher_${perAr}_Engine Oil Package_Sales payment.xlsx`;
     const blob = new Blob([buffer], { type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     const url = URL.createObjectURL(blob);
@@ -7090,7 +7124,8 @@ async function loadRounds(){
       openRoundDetail(r.id);
     });
     tr.innerHTML = `
-      <td>${r.period_label}${(r.fiscal_year || r.period_ym)
+      <td>${r.period_label}${r.basis_label && r.basis_label !== r.period_label
+        ? `<div class="hint">기준 ${String(r.basis_label).replace(/[<>]/g,'')}</div>` : ''}${(r.fiscal_year || r.period_ym)
         ? `<div class="hint">${r.fiscal_year || ''}${r.fiscal_quarter ? ' ' + r.fiscal_quarter : ''}${
             r.period_ym ? (r.fiscal_year ? ' · ' : '') + r.period_ym.slice(0,4) + '-' + r.period_ym.slice(4) : ''}</div>`
         : ''}</td>
@@ -7121,12 +7156,36 @@ document.getElementById('newRoundBtn').addEventListener('click', () => {
   document.getElementById('r_fiscal_year').value = '';
   document.getElementById('r_fiscal_quarter').value = '';
   document.getElementById('r_claim_due_at').value = '';
+  const bEl = document.getElementById('r_basis_label');
+  if(bEl){ bEl.value = ''; bEl.dataset.touched = ''; }
   if(activeTypes.length === 0){ alert('먼저 [정산 유형 관리]에서 유형을 하나 만들어야 합니다.'); return; }
   updateRoundPanelForType();
   openPanel('roundPanel');
 });
 
 // 선택한 유형이 AR이면 청구 마감일시 입력을 숨기고 안내를 표시
+/* 월단위 유형이면 기준월을 정산월의 직전 달로 미리 채워준다 (고쳐 쓸 수 있다) */
+function suggestBasis(){
+  const t = activeTypes.find(x => x.id === document.getElementById('r_type_id').value);
+  const bEl = document.getElementById('r_basis_label');
+  if(!bEl || bEl.dataset.touched === '1') return;
+  if(t?.period === 'MONTHLY'){
+    const ym = (document.getElementById('r_period_ym')?.value || '').replace('-', '');
+    if(/^20\d{4}$/.test(ym)){
+      let y = +ym.slice(0,4), m = +ym.slice(4) - 1;
+      if(m === 0){ m = 12; y -= 1; }
+      bEl.value = `${y}-${String(m).padStart(2,'0')}`;
+      return;
+    }
+  }
+  bEl.value = document.getElementById('r_period_label').value.trim();
+}
+['r_period_ym','r_period_label'].forEach(id =>
+  document.getElementById(id)?.addEventListener('input', suggestBasis));
+document.getElementById('r_basis_label')?.addEventListener('input', (e) => {
+  e.target.dataset.touched = e.target.value.trim() ? '1' : '';
+});
+
 function updateRoundPanelForType(){
   const typeId = document.getElementById('r_type_id').value;
   const t = activeTypes.find(x => x.id === typeId);
@@ -7187,10 +7246,22 @@ document.getElementById('saveRoundBtn').addEventListener('click', async () => {
   if(tSel?.period === 'MONTHLY' && !period_ym){
     alert('월단위 정산유형입니다. 정산 월을 선택해주세요.'); return;
   }
+  // 기준월 — 비우면 월정산은 직전 달, 그 외는 기간 라벨
+  let basis_label = (document.getElementById('r_basis_label')?.value || '').trim();
+  if(!basis_label){
+    if(period_ym){
+      let y = +period_ym.slice(0,4), m = +period_ym.slice(4) - 1;
+      if(m === 0){ m = 12; y -= 1; }
+      basis_label = `${y}-${String(m).padStart(2,'0')}`;
+    } else basis_label = period_label;
+  }
+  const bm = basis_label.match(/(20\d{2})[-.]?(0[1-9]|1[0-2])(?!\d)/);
+  const basis_ym = bm ? bm[1] + bm[2] : null;
+
   const { error } = await sb.from('rounds').insert({
     type_id, period_label,
     claim_due_at: claim_due_at ? new Date(claim_due_at).toISOString() : null,
-    fiscal_year, fiscal_quarter, period_ym,
+    fiscal_year, fiscal_quarter, period_ym, basis_label, basis_ym,
     status: 'DRAFT'
   });
   if(error){ alert('생성 실패: ' + error.message); return; }
@@ -12943,7 +13014,7 @@ async function noticePersons(round){
 async function noticeExportXlsx(round, type, claims, rows, T){
   // 파일명에 못 쓰는 글자는 '-' 로 바꾼다. 지워버리면 '사용반환금Retailer' 처럼 붙는다.
   const safe = v => String(v ?? '').replace(/[\\/:*?"<>|]/g, '-').replace(/\s+/g, ' ').trim();
-  const name = `${safe(type?.name || '정산')}_${safe(roundFileLabel(round, type))}`;
+  const name = `${safe(type?.name || '정산')}_${safe(roundFileLabel(round))}`;
   const wb = XLSX.utils.book_new();
   const isAR = type?.direction === 'AR';
   const hasLines = T.lines > 0;
@@ -13065,11 +13136,10 @@ function noticePersonsPdf(round, type, persons){
 /* 파일에 쓸 기간 표기. 엔진오일은 '정산월 − 1' 이 내용의 월이다
    (2026-10 정산 = 9월 사용분). 매니저 기준(2026-10-23).
    그 외 유형은 회차 기간을 그대로 쓴다. */
-function roundFileLabel(round, type){
-  const isEo = /Engine Oil/i.test(String(type?.code || '')) || /엔진오일/.test(type?.name || '');
-  if(!isEo) return round.period_label;
-  const v = eoVoucherPeriod(round);
-  return v ? `${v.ym.slice(0,4)}-${v.ym.slice(4)}` : round.period_label;
+function roundFileLabel(round){
+  // 회차에 적힌 기준 기간을 그대로 쓴다 (유형을 가리지 않는다)
+  const b = String(round.basis_label || '').trim();
+  return b || round.period_label;
 }
 
 /* 회차 집계 — 공지용 요약과 마스터 파일이 같은 숫자를 쓰도록 한 곳에서 낸다 */
