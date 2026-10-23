@@ -1093,7 +1093,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 14:04';
+const BUILD = '10-23 14:11';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -3026,6 +3026,7 @@ function eoConfirmPanel(round, type, claims, confirmed, total){
   } else if(['CONFIRMED','VOUCHERED'].includes(round.status)){
     foot = `<div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;
          padding:10px 12px; border-top:1px solid var(--surface3);">
+      <button class="btn btn-sm btn-ghost" id="eoReread">원본 다시 읽기 (금액·확정 그대로)</button>
       <button class="btn btn-sm btn-ghost" id="eoReopen">원본 다시 올리기 (DRAFT로)</button>
       <button class="btn btn-sm btn-ghost" id="eoMaster" style="margin-left:auto;">마스터 파일 내려받기</button>
       <button class="btn btn-sm" id="eoVoucher">${round.status === 'VOUCHERED'
@@ -3054,6 +3055,97 @@ function eoConfirmPanel(round, type, claims, confirmed, total){
 }
 
 /* 위 박스의 버튼을 묶는다 (P&D 의 pndBindConfirm 과 같은 역할) */
+/* 완료된 회차에서 금액을 건드리지 않고 원본만 다시 읽는다.
+   로우데이터·판매/환불 구분값만 채우고, 청구·확정·바우처는 손대지 않는다.
+   금액이 지금과 다르면 아무것도 바꾸지 않고 차이를 보여준다. (2026-10-23) */
+async function rereadEngineOilRaw(round, type, host){
+  const eo = eoPreset(type);
+  let box = host.querySelector('#eoRereadBox');
+  if(box){ box.remove(); return; }
+  box = document.createElement('div');
+  box.id = 'eoRereadBox'; box.className = 'info-card'; box.style.marginTop = '10px';
+  const need = eo.src === 'coupon' ? '쿠폰 클레임 원본'
+             : eo.src === 'sp' ? '쿠폰북 정산내역 원본 (판매대금)'
+             : eo.src === 'sales' ? '쿠폰북 원본' : '쿠폰 클레임 + 쿠폰북 원본';
+  box.innerHTML = `<div class="section-label" style="margin-top:0;">원본 다시 읽기</div>
+    <div class="hint" style="margin-bottom:8px;">
+      <b>금액과 확정은 그대로 둡니다.</b> 리테일러 엑셀에 들어갈 원본 행과
+      결재용 요약표의 판매/환불 구분값만 채웁니다.<br>
+      다시 계산한 금액이 지금과 <b>한 원이라도 다르면 아무것도 바꾸지 않고</b> 차이를 보여드립니다.
+    </div>
+    <div class="field" style="max-width:600px;"><label>${need}</label>
+      <input type="file" accept=".xlsx,.xls" id="eoRrFile"></div>
+    <div class="hint" id="eoRrMsg"></div>`;
+  host.appendChild(box);
+
+  box.querySelector('#eoRrFile').onchange = async (ev) => {
+    const f = ev.target.files[0]; if(!f) return;
+    const msg = box.querySelector('#eoRrMsg');
+    const P = (h) => { msg.innerHTML = h; };
+    try{
+      P('읽는 중...');
+      const buf = await f.arrayBuffer();
+      const coupon = (eo.src === 'coupon' || eo.src === 'both') ? await parseEngineOilCoupon(buf, type, round.id) : null;
+      const sales  = (eo.src === 'sales'  || eo.src === 'both') ? await parseEngineOilSales(buf, type, round.id) : null;
+      const sp     = (eo.src === 'sp') ? await parseEngineOilSalesPayment(buf, type, round.id) : null;
+
+      const { data: allWs } = await sb.from('workshops')
+        .select('id, code, name, vendor_code, customer_code, retailer_id, retailers(code,name)').eq('is_active', true);
+      const bd = eo3vBuildBreakdown(coupon, sales, allWs, type, sp);
+
+      // 금액 대조 — 리테일러별로 지금 청구와 같은지
+      const { data: claims } = await sb.from('claims')
+        .select('retailer_id, approved_amount, retailers(code)').eq('round_id', round.id).is('workshop_id', null);
+      const now = new Map((claims||[]).map(c => [c.retailer_id, Math.round(Number(c.approved_amount||0))]));
+      const diff = [];
+      bd.retailers.forEach(rt => {
+        const a = Math.round(rt.total), b = now.get(rt.retailer_id);
+        if(b === undefined) diff.push(`${rt.code||''} 청구 없음 ← ${fmtWon(a)}`);
+        else if(a !== b) diff.push(`${rt.code||''} ${fmtWon(b)} → ${fmtWon(a)}`);
+      });
+      if(now.size !== bd.retailers.length)
+        diff.push(`리테일러 수 ${now.size} → ${bd.retailers.length}`);
+      if(diff.length){
+        P(`<span style="color:var(--danger);"><b>금액이 다릅니다 — 아무것도 바꾸지 않았습니다.</b><br>`
+          + diff.join('<br>') + '</span><br><span class="hint">같은 달 원본이 맞는지 확인해주세요. '
+          + '금액을 정말 바꾸셔야 한다면 [원본 다시 올리기 (DRAFT로)] 로 처음부터 다시 하셔야 합니다.</span>');
+        return;
+      }
+
+      // 금액이 같다 — 원본 행과 구분값만 갈아끼운다
+      P('금액 동일 확인. 원본 행을 넣는 중...');
+      const rawLines = [...(coupon?.lines || []), ...(sales?.lines || []), ...(sp?.lines || [])];
+      const wsByCode = new Map((allWs||[]).map(w => [w.code, w]));
+      await sb.from('engineoil_lines').delete().eq('round_id', round.id);
+      if(rawLines.length){
+        const payload = rawLines.map(L => {
+          const w = wsByCode.get(L.workshop_code);
+          return { ...L, round_id: round.id, retailer_id: w?.retailer_id || null,
+                   retailer_code: w?.retailers?.code || '' };
+        });
+        for(let i = 0; i < payload.length; i += 500)
+          await insertRetry('engineoil_lines', payload.slice(i, i+500), '원본 행');
+      }
+      // 요약(source_summary)의 지점 내역만 새로 — 합계는 같다는 걸 위에서 확인했다
+      const prev = round.source_summary || {};
+      const { data: up, error: uErr } = await sb.from('rounds')
+        .update({ source_summary: { ...prev, retailers: bd.retailers,
+                                    reread_at: new Date().toISOString() } })
+        .eq('id', round.id).select('id');
+      if(uErr || !up?.length) throw new Error(uErr ? uErr.message : '요약 저장 안 됨 (0건)');
+
+      await logAudit('EO_REREAD','ROUND', round.id,
+        { label: `${type.name} · ${round.period_label}`, lines: rawLines.length });
+      P(`<b>끝났습니다.</b> 원본 ${rawLines.length.toLocaleString('ko-KR')}행을 넣었습니다. `
+        + '금액·확정·바우처는 그대로입니다.');
+      setTimeout(() => renderRoundDetail(), 1200);
+    }catch(err){
+      console.error(err);
+      P(`<span style="color:var(--danger);">실패: ${err.message || err}</span>`);
+    }
+  };
+}
+
 function eoBindConfirm(round, type, claims, host){
   const save = host.querySelector('#eoDueSave');
   if(save) save.onclick = async () => {
@@ -3098,6 +3190,9 @@ function eoBindConfirm(round, type, claims, host){
 
   const mb = host.querySelector('#eoMaster');
   if(mb) mb.onclick = () => downloadMasterXlsx(mb);
+
+  const rr = host.querySelector('#eoReread');
+  if(rr) rr.onclick = () => rereadEngineOilRaw(round, type, host);
 
   const re = host.querySelector('#eoReopen');
   if(re) re.onclick = async () => {
