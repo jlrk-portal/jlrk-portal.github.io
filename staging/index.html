@@ -11396,7 +11396,18 @@ const TO_MAP = [
   ['retail_sum', ['품목소매가합계']],
   ['sale_sum',   ['품목판매단가합계']],
   ['split',      ['분할율','분할률']],
+  ['group_code', ['그룹코드']],
+  ['sale_no',    ['부품판매번호']],
+  // ★ ASAP 인센티브는 이 그룹이 'Accessories' 인 줄만 센다 (060)
+  ['part_group', ['부품그룹']],
+  ['part_class', ['부품클래스코드','부품 클래스 코드']],
   ['disc_code',  ['할인코드']],
+  ['recall_tc',  ['Recall/TC적용']],
+  ['recall_no',  ['Recall/TC번호']],
+  ['coupon_use', ['쿠폰적용']],
+  ['coupon_code',['쿠폰코드']],
+  ['odo',        ['주행거리']],
+  ['out_date',   ['차량출고일']],
   ['vin',        ['차대번호','VIN']],
   ['reg_date',   ['차량등록일','최초등록일']],
   ['brand',      ['브랜드']],
@@ -11410,8 +11421,8 @@ const TO_MAP = [
   ['tech',       ['작업자']],
 ];
 const TO_TEXT = new Set(['ro_no','stl_no','inv_no','part_no','vin']);
-const TO_NUM  = new Set(['stl_line','qty','cost','cost_sum','retail','retail_sum','sale_sum','split']);
-const TO_DATE = new Set(['in_date','ro_date','inv_date','reg_date']);
+const TO_NUM  = new Set(['stl_line','qty','cost','cost_sum','retail','retail_sum','sale_sum','split','odo']);
+const TO_DATE = new Set(['in_date','ro_date','inv_date','reg_date','out_date']);
 const TO_CHUNK = 2000;        // 한 번에 보낼 행수. 더 키우면 413 이 난다.
 
 /* 엑셀 날짜는 숫자(1900 기준 일련번호)로 오기도 하고 문자열로 오기도 한다 */
@@ -11720,7 +11731,7 @@ async function loadTurnoverFile(file, ym){
   const missing = ['ro_no','item_type','claim_acct','sale_sum'].filter(k => col[k] === undefined);
   if(missing.length) throw new Error('필수 열을 찾지 못했습니다: ' + missing.join(', '));
   // 27열 추출본에는 원가·담당SA 가 없다. 그걸 올리면 ASAP 인센티브를 못 낸다.
-  const noAsap = ['cost_sum','sa'].filter(k => col[k] === undefined);
+  const noAsap = ['cost_sum','sa','part_group'].filter(k => col[k] === undefined);
   if(noAsap.length && !confirm(
       '이 파일에는 ' + noAsap.join(' · ') + ' 열이 없습니다.\n'
     + '64열 Turn Over 원본이 아니라 추출본으로 보입니다.\n\n'
