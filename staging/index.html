@@ -11653,11 +11653,19 @@ async function insertRetry(table, rows, label){
   let size = rows.length;
   for(let at = 0; at < rows.length; ){
     const slice = rows.slice(at, at + size);
-    const { error } = await sb.from(table).insert(slice);
+    // 같은 정산라인이 여러 달 파일에 겹쳐 들어온다 — 겹치면 건너뛴다.
+    // (그냥 insert 하면 겹치는 줄 하나에 묶음 전체가 터진다)
+    const { error } = await sb.from(table)
+      .upsert(slice, { onConflict: 'dedup_key', ignoreDuplicates: true });
     if(!error){ at += slice.length; continue; }
-    const tmo = /timeout|57014|canceling statement/i.test(error.message || '');
-    if(tmo && size > 125){ size = Math.floor(size / 2); continue; }
-    throw new Error(`${label} 적재 실패: ${error.message}`);
+    const msg = error.message || '';
+    if(/timeout|57014|canceling statement/i.test(msg) && size > 125){
+      size = Math.floor(size / 2); continue;
+    }
+    if(/dedup_key/.test(msg) && /column|does not exist|42703|PGRST204/i.test(msg)){
+      throw new Error(`${label} 적재 실패 — 058 마이그레이션(겹치면 건너뛰기)을 먼저 돌려주세요.`);
+    }
+    throw new Error(`${label} 적재 실패: ${msg}`);
   }
 }
 
