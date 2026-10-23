@@ -27,7 +27,10 @@ create unique index if not exists asap_req_line_uniq
   on asap_line_requests (round_id, line_id, kind) where vin is null;
 
 -- 관리자 뷰도 차대 기준으로 (라인이 없을 수 있다)
-create or replace view asap_requests_admin as
+-- q.* 에 vin 이 끼면서 열 순서가 바뀐다 → create or replace 가 거부된다.
+-- (42P16 cannot change name of view column) 먼저 떨군다.
+drop view if exists asap_requests_admin;
+create view asap_requests_admin as
   select q.*, r.code as retailer_code, r.name as retailer_name,
          coalesce(t.vin, q.vin)              as line_vin,
          s.brand, s.model, s.customer, s.retail_date,
