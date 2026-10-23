@@ -52,7 +52,12 @@
   .btn-block{ width:100%; }
   .btn-ghost{ background:transparent; color:var(--text-mid); border:1px solid var(--border); }
   .btn-ghost:hover{ color:var(--text); border-color:var(--text-dim); }
-  .btn-danger{ background:transparent; color:var(--danger); border:1px solid rgba(207,47,59,.35); }
+  /* 되돌릴 수 없는 버튼. 눈에 들어와야 한다 (매니저 지시 2026-10-23) */
+  .btn-danger{ background:rgba(207,47,59,.07); color:var(--danger);
+               border:1px solid rgba(207,47,59,.55); font-weight:600; }
+  .btn-danger:hover{ background:var(--danger); color:#fff; border-color:var(--danger); }
+  .btn-danger:disabled{ background:transparent; color:var(--text-dim);
+                        border-color:var(--surface3); font-weight:400; }
   .btn-sm{ padding:6px 12px; font-size:12.5px; }
   #loginError{ color:var(--danger); font-size:12.5px; margin-top:12px; min-height:16px; }
 
@@ -1093,7 +1098,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 14:19';
+const BUILD = '10-23 14:28';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -3035,7 +3040,7 @@ function eoConfirmPanel(round, type, claims, confirmed, total){
           ? new Date(due.getTime() - new Date().getTimezoneOffset()*60000).toISOString().slice(0,16)
           : ''}"></div>
       <button class="btn btn-sm btn-ghost" id="eoDueSave">기한 저장 · 안내</button>
-      <button class="btn btn-sm" id="eoFinalize" style="margin-left:auto;">${allDone
+      <button class="btn btn-sm ${allDone ? '' : 'btn-danger'}" id="eoFinalize" style="margin-left:auto;">${allDone
         ? '전체 확정 완료 처리'
         : `전체 확정 완료 처리 (미확인 ${total-confirmed}곳 강제 포함)`}</button>
     </div>`;
@@ -3043,7 +3048,7 @@ function eoConfirmPanel(round, type, claims, confirmed, total){
     foot = `<div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;
          padding:10px 12px; border-top:1px solid var(--surface3);">
       <button class="btn btn-sm btn-ghost" id="eoReread">원본 다시 읽기 (금액·확정 그대로)</button>
-      <button class="btn btn-sm btn-ghost" id="eoReopen">원본 다시 올리기 (DRAFT로)</button>
+      <button class="btn btn-sm btn-danger" id="eoReopen">원본 다시 올리기 (DRAFT로)</button>
       <button class="btn btn-sm btn-ghost" id="eoMaster" style="margin-left:auto;">마스터 파일 내려받기</button>
       <button class="btn btn-sm" id="eoVoucher">${round.status === 'VOUCHERED'
         ? '바우처 다시 생성' : '바우처 생성'}${vCount>1 ? ` (${vCount}개 파일)` : ''}</button>
@@ -4595,7 +4600,7 @@ async function renderOneDmsRoundDetail(round, type){
       vs.appendChild(p);
     }
     const re = document.createElement('button');
-    re.className = 'btn btn-ghost'; re.style.marginLeft = '8px'; re.textContent = '원본 다시 올리기 (DRAFT로)';
+    re.className = 'btn btn-danger'; re.style.marginLeft = '8px'; re.textContent = '원본 다시 올리기 (DRAFT로)';
     re.addEventListener('click', async () => {
       if(!confirm('DRAFT로 되돌리면 리테일러 확정도 초기화됩니다. 계속할까요?')) return;
       await sb.from('claims').delete().eq('round_id', round.id);
@@ -8151,7 +8156,7 @@ function pndConfirmPanel(round, claims, rets){
           ? new Date(new Date(round.confirm_due_at).getTime() - new Date().getTimezoneOffset()*60000)
               .toISOString().slice(0,16) : ''}"></div>
       <button class="btn btn-sm btn-ghost" id="pndDueSave">기한 저장·안내</button>
-      <button class="btn btn-sm btn-ghost" id="pndForce" ${done === rows.length ? 'disabled' : ''}>미확정 일괄 확정</button>
+      <button class="btn btn-sm btn-danger" id="pndForce" ${done === rows.length ? 'disabled' : ''}>미확정 일괄 확정</button>
       ${['OPEN','PUBLISHED'].includes(round.status)
         ? '<button class="btn btn-sm" id="pndClose" style="margin-left:auto;">확정 마감 · 세금계산서 요청</button>'
         : '<span class="badge badge-ap" style="margin-left:auto;">세금계산서 요청됨</span>'}
@@ -12140,8 +12145,8 @@ async function renderBaseMonths(){
         : `<span class="badge badge-off">${!r.to ? 'TO 없음' : 'SR 없음'}</span>`}</td>
       <td class="muted">${last ? new Date(last).toLocaleDateString('ko-KR') : '—'}</td>
       <td style="text-align:right;">
-        ${r.to ? `<button class="btn btn-ghost btn-sm to-del" data-ym="${r.ym}">TO 삭제</button>` : ''}
-        ${r.sr ? `<button class="btn btn-ghost btn-sm sr-del" data-ym="${r.ym}" style="margin-left:4px;">SR 삭제</button>` : ''}
+        ${r.to ? `<button class="btn btn-danger btn-sm to-del" data-ym="${r.ym}">TO 삭제</button>` : ''}
+        ${r.sr ? `<button class="btn btn-danger btn-sm sr-del" data-ym="${r.ym}" style="margin-left:4px;">SR 삭제</button>` : ''}
       </td></tr>`; }).join('')}</tbody></table></div>`;
   host.querySelectorAll('.to-del').forEach(b => b.onclick = async () => {
     if(!confirm(`${b.dataset.ym} Turn Over 를 삭제합니다.\n이 달이 걸린 캠페인은 검증을 다시 돌려야 합니다. 계속할까요?`)) return;
@@ -12579,7 +12584,7 @@ async function renderVinLists(){
       <td>${l.kind === 'RECALL' ? '리콜 대상' : '대상 차대'}</td>
       <td style="text-align:right;">${Number(l.n).toLocaleString('ko-KR')}</td>
       <td class="muted">${new Date(l.created_at).toLocaleDateString('ko-KR')}</td>
-      <td style="text-align:right;"><button class="btn btn-ghost btn-sm vl-del" data-id="${l.id}">삭제</button></td>
+      <td style="text-align:right;"><button class="btn btn-danger btn-sm vl-del" data-id="${l.id}">삭제</button></td>
     </tr>`).join('')}</tbody></table>`;
   host.querySelectorAll('.vl-del').forEach(b => b.onclick = async () => {
     if(!confirm('이 목록을 삭제합니다. 이 목록을 쓰는 검증 조건은 통과 처리됩니다. 계속할까요?')) return;
@@ -12815,7 +12820,7 @@ function renderConds(){
           <option value="ng" ${c.level!=='wn'?'selected':''}>불일치 시 검증실패</option>
           <option value="wn" ${c.level==='wn'?'selected':''}>불일치 시 확인필요</option>
         </select>
-        <button class="btn btn-ghost btn-sm cond-del" data-ci="${i}" style="margin-left:auto;">삭제</button>
+        <button class="btn btn-danger btn-sm cond-del" data-ci="${i}" style="margin-left:auto;">삭제</button>
       </div>
       <div class="hint" style="margin:6px 0 9px;">${D.desc}</div>
       ${D.fields.length ? `<div class="${D.fields.length>2?'row3':'row2'}">
@@ -13084,7 +13089,7 @@ function odsAttachPanel(round){
           f.size ? (f.size/1024).toLocaleString('ko-KR', {maximumFractionDigits:0}) + ' KB' : ''}</td>
         <td class="muted" style="width:150px;">${f.at ? new Date(f.at).toLocaleDateString('ko-KR') : ''}</td>
         <td style="text-align:right; width:70px;">
-          <button class="btn btn-ghost btn-sm ods-del" data-i="${i}">삭제</button></td>
+          <button class="btn btn-danger btn-sm ods-del" data-i="${i}">삭제</button></td>
       </tr>`).join('')}</tbody></table>`
       : '<div class="hint" style="margin-top:8px;">올려둔 원본이 없습니다.</div>'}
   </div>`;
