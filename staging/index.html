@@ -10765,8 +10765,23 @@ async function loadRetailerClaims(){
       </tr></tfoot>
       </table>`;
 
-    if(showUploadArea){
-      bodyHtml += `<div class="action-row"><button class="btn btn-sm group-submit-btn">전체 제출</button></div>`;
+    /* 다 낸 뒤에도 [전체 제출] 이 그대로 떠 있어서, 누르면
+       '제출할 금액을 하나 이상 입력해주세요' 만 나왔다. 리테일러가
+       제출이 안 된 줄 알고 문의가 들어왔다. (2026-10-23)
+       남은 곳이 없으면 버튼을 빼고 '제출 완료' 를 보여준다. */
+    const pending = items.filter(c => ['NOT_SUBMITTED','REJECTED'].includes(c.status)).length;
+    if(showUploadArea && pending > 0){
+      bodyHtml += `<div class="action-row">
+        <button class="btn btn-sm group-submit-btn">미제출 ${pending}곳 제출</button>
+        <span class="hint" style="align-self:center;">금액을 적은 지점만 제출됩니다.</span></div>`;
+    } else if(showUploadArea){
+      const sent = items.filter(c => c.status !== 'NOT_SUBMITTED').length;
+      const amt  = items.reduce((a,c) => a + Number(c.claimed_amount || 0), 0);
+      bodyHtml += `<div class="action-row" style="align-items:center;">
+        <span class="badge badge-ap">제출 완료</span>
+        <span class="hint">${sent}곳 · ${fmtWon(amt)} 제출되었습니다.
+          마감 전까지는 각 줄의 [제출취소] 로 고칠 수 있습니다.
+          따로 확정 버튼은 없습니다 — 이대로 두시면 됩니다.</span></div>`;
     }
 
     card.innerHTML = bodyHtml;
@@ -11044,7 +11059,14 @@ async function submitGroup(card, items, file, eviFiles){
     if(amount == null){ continue; } // 비워둔 지점은 제출 대상에서 제외
     updates.push({ claimId: rowEl.dataset.claimId, amount });
   }
-  if(updates.length === 0){ alert('제출할 금액을 하나 이상 입력해주세요.'); return; }
+  if(updates.length === 0){
+    const already = items.filter(c => c.status !== 'NOT_SUBMITTED').length;
+    alert(already === items.length
+      ? `이미 ${already}곳 모두 제출되었습니다. 추가로 하실 일은 없습니다.\n`
+        + '금액을 고치시려면 해당 줄의 [제출취소] 를 누른 뒤 다시 적어주세요.'
+      : '제출할 금액을 하나 이상 입력해주세요.\n(이미 제출된 줄은 [제출취소] 후 수정할 수 있습니다)');
+    return;
+  }
 
   let sharedFilePath = null;
   if(file){
