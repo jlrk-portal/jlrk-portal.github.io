@@ -1092,7 +1092,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 13:11';
+const BUILD = '10-23 13:12';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -13069,6 +13069,12 @@ function odsPrintConfirm(round, type, claims){
    ================================================================ */
 
 /* 그 회차의 원본 행을 유형에 맞게 긁어온다. [{sheet, columns, rows}] */
+/* retailer_id → 'AJ 아주네트웍스' (청구에 이미 딸려온 이름을 쓴다) */
+function rtCode(rid, claims){
+  const c = (claims||[]).find(x => x.retailer_id === rid);
+  return c ? `${c.retailers?.code||''} ${c.retailers?.name||''}`.trim() : '';
+}
+
 async function noticeRawSheets(round, type, claims){
   const out = [];
   const code = String(type?.code || '');
@@ -13102,7 +13108,46 @@ async function noticeRawSheets(round, type, claims){
     return out;
   }
 
-  // ② 픽업&딜리버리 — pnd_lines
+  // ② 캠페인 (리콜 업셀링 · 시즈널 · Welcome Back) — campaign_lines / campaign_ro
+  {
+    const L = await sbAll(() => sb.from('campaign_lines').select('*')
+      .eq('round_id', round.id).order('retailer_id').order('ro_no').order('src_row'), '캠페인 라인');
+    if(L.length){
+      out.push({ sheet:'원본 청구라인', columns:[
+        { key:'retailer_code', label:'리테일러', w:10 }, { key:'workshop', label:'지점', w:14 },
+        { key:'ro_no', label:'RO번호', w:14 }, { key:'vin', label:'차대번호', w:20 },
+        { key:'invoice_date', label:'인보이스일', w:12, align:'center' },
+        { key:'part_no', label:'품번', w:16 }, { key:'part_name', label:'품명', w:26 },
+        { key:'qty', label:'수량', w:7, type:'num' },
+        { key:'retail', label:'소비자가', w:12, type:'num' },
+        { key:'sale', label:'판매가', w:12, type:'num' },
+        { key:'discount', label:'할인적용', w:12, type:'num' },
+        { key:'rate', label:'할인율', w:9, type:'num' },
+        { key:'jlrk', label:'JLRK 지원금', w:13, type:'num' },
+        { key:'verdict', label:'검증', w:8, align:'center' },
+        { key:'warns', label:'경고', w:30 },
+      ], rows: L.map(x => ({ ...x, retailer_code: rtCode(x.retailer_id, claims),
+                             warns: (x.warns||[]).join(' · ') })) });
+      const R = await sbAll(() => sb.from('campaign_ro').select('*')
+        .eq('round_id', round.id).order('retailer_id').order('ro_no'), '캠페인 RO');
+      if(R.length) out.push({ sheet:'원본 RO', columns:[
+        { key:'retailer_code', label:'리테일러', w:10 }, { key:'workshop', label:'지점', w:14 },
+        { key:'ro_no', label:'RO번호', w:14 }, { key:'vin', label:'차대번호', w:20 },
+        { key:'model', label:'모델', w:20 },
+        { key:'in_date', label:'입고일', w:11, align:'center' },
+        { key:'reg_date', label:'등록일', w:11, align:'center' },
+        { key:'parts', label:'품목수', w:8, type:'num' },
+        { key:'claim_jlrk', label:'청구 JLRK', w:13, type:'num' },
+        { key:'to_jlrk', label:'마감 JLRK', w:13, type:'num' },
+        { key:'verdict', label:'검증', w:8, align:'center' },
+        { key:'decision', label:'판정', w:12, align:'center' },
+        { key:'note', label:'메모', w:26 },
+      ], rows: R.map(x => ({ ...x, retailer_code: rtCode(x.retailer_id, claims) })) });
+      return out;
+    }
+  }
+
+  // ③ 픽업&딜리버리 — pnd_lines
   if(/PND|Pick/i.test(code)){
     const L = await sbAll(() => sb.from('pnd_lines').select('*')
       .eq('round_id', round.id).order('verdict').order('svc_date'), '원본');
@@ -13117,6 +13162,23 @@ async function noticeRawSheets(round, type, claims){
   const users = [];
   (claims||[]).forEach(c => (c.detail?.users || []).forEach(u =>
     users.push({ ...u, _rt: `${c.retailers?.code||''} ${c.retailers?.name||''}` })));
+  if(!users.length){
+    /* 리테일러가 파일로 올리는 유형은 원본이 DB 행이 아니라 첨부파일이다.
+       적어도 '누가 무엇을 올렸는지' 는 통합본에 남긴다. (2026-10-23) */
+    const withFile = (claims||[]).filter(c => c.file_path || c.detail?.evidence_paths?.length);
+    if(withFile.length) out.push({ sheet:'제출 파일', columns:[
+      { key:'rt', label:'리테일러', w:20 }, { key:'ws', label:'지점', w:16 },
+      { key:'status', label:'상태', w:10, align:'center' },
+      { key:'amount', label:'청구 금액', w:14, type:'num' },
+      { key:'file', label:'제출 파일', w:52 },
+    ], rows: withFile.map(c => ({
+      rt: `${c.retailers?.code||''} ${c.retailers?.name||''}`.trim(),
+      ws: c.workshops?.name || '', status: CLAIM_STATUS_LABEL[c.status] || c.status,
+      amount: Number(c.approved_amount ?? c.claimed_amount ?? 0),
+      file: [c.file_path, ...(c.detail?.evidence_paths||[])].filter(Boolean).join(' / '),
+    })) });
+    return out;
+  }
   if(users.length){
     const keys = Object.keys(users[0]).filter(k => k !== '_rt');
     out.push({ sheet:'원본 (전체)', columns:[
