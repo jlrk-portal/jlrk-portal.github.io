@@ -11456,11 +11456,16 @@ async function loadBaseData(){
 
 async function renderBaseMonths(){
   const host = document.getElementById('baseMonths');
-  const [{ data: tm }, { data: pm }, { data: sr }] = await Promise.all([
+  const [{ data: tm }, { data: pm }, srRes] = await Promise.all([
     sb.from('turnover_months').select('*'),
     sb.from('part_price_months').select('*'),
     sb.from('sales_report_months').select('*'),
   ]);
+  const sr = srRes.data;
+  // Sales Report 표가 아직 없는 환경(= 055 미적용)에서는 적재 카드를 숨긴다.
+  // 눌렀는데 에러가 나는 버튼을 보여주는 것보다 안 보이는 편이 낫다.
+  const srCard = document.getElementById('srLoadBtn')?.closest('.info-card');
+  if(srCard) srCard.style.display = srRes.error ? 'none' : '';
   const months = new Map();
   (tm||[]).forEach(r => months.set(r.ym, { ym:r.ym, to:r }));
   (pm||[]).forEach(r => months.set(r.ym, { ...(months.get(r.ym)||{ym:r.ym}), pp:r }));
