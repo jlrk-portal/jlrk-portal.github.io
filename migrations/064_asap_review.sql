@@ -79,6 +79,25 @@ language sql immutable as $$
 $$;
 
 
+-- ── 엔진: 전시차 판정에 이 이력도 함께 본다 ─────────────────────
+--  기존 asap_support_vins(손으로 올린 것) 과 합집합으로 본다.
+create or replace function asap_showroom_window(p_from date, p_to date, p_months int)
+returns table (vin text)
+language sql stable as $$
+  select distinct s.vin
+    from asap_support_vins s, lateral asap_fy_range(s.period_label) r
+   where s.kind = 'SHOWROOM' and r.d_from is not null
+     and (r.d_from - make_interval(months => p_months))::date <= p_to
+     and (r.d_to   + make_interval(months => p_months))::date >= p_from
+  union
+  select distinct h.vin
+    from asap_showroom_support h, lateral asap_fy_range(h.fy_label) r
+   where r.d_from is not null
+     and (r.d_from - make_interval(months => p_months))::date <= p_to
+     and (r.d_to   + make_interval(months => p_months))::date >= p_from
+$$;
+
+
 -- ── 라인 산출 — 이제 '제외' 와 '검토 사유' 를 따로 돌려준다
 drop function if exists asap_lines(date, date, uuid);
 
@@ -141,8 +160,8 @@ show_vin as (
   select vin from asap_showroom_window(p_from, p_to, (select sm from cfg))
 ),
 promo_vin as (
-  select vin, string_agg(distinct coalesce(support_type,'프로모션'), ', ') as kinds
-    from asap_support_vins where kind = 'PROMO' group by vin
+  -- 손으로 올린 것 + 프로모션 정산 이력 (066)
+  select vin, string_agg(kinds, ', ') as kinds from asap_promo_window() group by vin
 ),
 base as (
   select t.id as line_id, t.vin, t.inv_date, t.part_no, t.part_name, t.part_group, t.claim_acct,
