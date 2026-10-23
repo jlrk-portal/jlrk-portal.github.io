@@ -1093,7 +1093,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 13:42';
+const BUILD = '10-23 13:53';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -5430,41 +5430,84 @@ async function generateEngineOilSpVoucher(round, type, s){
     // 입력시트의 설명도 같이 (P7 하나만 고치면 아래 행은 =$P$7 로 따라온다)
     inputCells['P7'] = { value: `${basis} ${desc}`.trim(), isString: true };
 
-    /* 결재용 요약표 — 세 번째 시트. 지난 회차 기간이 탭 이름에 남아 있고,
-       값은 외부 통합문서를 VLOOKUP 해서 열 때마다 깨진다. 숫자로 채운다. */
+    /* 결재용 요약표 — 세 번째 시트.
+       ⚠ 양식 버전마다 열이 다르다. 실측 —
+          9월 양식  C=리테일러 D=Workshop  E/F=Package G/H=Full  I/J=Partial  K=Total
+          8월 양식  F=Retailer G=Workshop  H/I=Package J/K=Full  L/M=Partial  N=Total
+       그래서 고정 열을 쓰지 않고 머리글(Package Sale / Full Refund /
+       Partial Refund / Total / Workshop)로 찾는다. (2026-10-23) */
     const sumSheetName = readWb.SheetNames.find(n => n !== inputSheetName && n !== coverSheetName);
     const sheetFills = {};
     let sumNote = '';
     if(sumSheetName){
       const sw = readWb.Sheets[sumSheetName];
-      // 행 찾기 — O열 Customer code(KR…MIS) 우선, 없으면 D열 Workshop 라벨
-      const byCust = new Map(), byLabel = new Map();
-      for(let r = 5; r <= 60; r++){
-        const o = sw['O'+r], d = sw['D'+r];
-        if(o && o.v) byCust.set(String(o.v).trim(), r);
-        if(d && d.v) byLabel.set(String(d.v).trim(), r);
+      const rng = sw['!ref'] ? XLSX.utils.decode_range(sw['!ref']) : null;
+      const txt = (r, c) => { const cell = sw[XLSX.utils.encode_cell({ r, c })];
+        return cell == null ? '' : String(cell.v ?? '').replace(/\s+/g,' ').trim(); };
+      /* 머리글 행을 '먼저' 찾고, 그 행을 다시 훑는다. 한 번에 하면
+         'Workshop' 이 'Package Sale' 보다 왼쪽에 있어서 놓친다. (실측) */
+      let hdrRow = -1, col = {};
+      if(rng) for(let r = rng.s.r; r <= Math.min(rng.s.r + 20, rng.e.r); r++){
+        for(let c = rng.s.c; c <= rng.e.c; c++)
+          if(txt(r, c).toLowerCase() === 'package sale'){ hdrRow = r; break; }
+        if(hdrRow === r) break;
       }
-      // 먼저 0 으로 비운다 — 안 그러면 지난 회차 값이 남는다
-      const cells = {};
-      byLabel.forEach((r, lbl) => {
-        if(lbl === 'Workshop' || lbl === 'Total') return;
-        ['E','F','G','H','I','J','K'].forEach(c => { cells[c+r] = 0; });
-      });
-      let hit = 0, miss = [];
-      (s.retailers||[]).forEach(rt => (rt.workshops||[]).forEach(w => {
-        if(!w.sp) return;
-        const r = byCust.get(String(w.customer_code||'').trim()) || byLabel.get(String(w.code||'').trim());
-        if(!r){ miss.push(w.code); return; }
-        const sp = w.sp, R = n => Math.round(n || 0);
-        cells['E'+r] = sp.sale?.n || 0;  cells['F'+r] = R(sp.sale?.amt);
-        cells['G'+r] = sp.full?.n || 0;  cells['H'+r] = R(sp.full?.amt);
-        cells['I'+r] = sp.part?.n || 0;  cells['J'+r] = R(sp.part?.amt);
-        cells['K'+r] = R((sp.sale?.amt||0) + (sp.full?.amt||0) + (sp.part?.amt||0));
-        hit++;
-      }));
-      sheetFills[sumSheetName] = cells;
-      sumNote = ` · 요약표 ${hit}개 지점`
-        + (miss.length ? ` <span style="color:var(--accent-ar);">(미배치 ${miss.join(', ')})</span>` : '');
+      if(hdrRow >= 0) for(let c = rng.s.c; c <= rng.e.c; c++){
+        const v = txt(hdrRow, c).toLowerCase();
+        if(v === 'package sale')         col.pkg  = c;
+        else if(v === 'full refund')     col.full = c;
+        else if(v === 'partial refund')  col.part = c;
+        else if(v === 'total')           col.tot  = c;
+        else if(v === 'workshop')        col.ws   = c;
+      }
+      if(hdrRow < 0 || col.pkg == null){
+        sumNote = ' · <span style="color:var(--accent-ar);">요약표를 찾지 못해 그대로 두었습니다 '
+                + '(Package Sale 머리글이 없습니다).</span>';
+      } else {
+        // 업체코드(KR…MIS)가 들어 있는 열을 찾는다 — 행 매칭에 가장 확실하다
+        let custCol = -1;
+        for(let c = rng.s.c; c <= rng.e.c && custCol < 0; c++)
+          for(let r = hdrRow + 1; r <= Math.min(hdrRow + 40, rng.e.r); r++)
+            if(/^KR\d+MIS$/i.test(txt(r, c))){ custCol = c; break; }
+        const byCust = new Map(), byLabel = new Map();
+        for(let r = hdrRow + 1; r <= rng.e.r; r++){
+          if(custCol >= 0 && txt(r, custCol)) byCust.set(txt(r, custCol), r);
+          if(col.ws != null){
+            const lbl = txt(r, col.ws);
+            if(lbl && lbl !== 'Total') byLabel.set(lbl, r);
+          }
+        }
+        const at = (r, c) => XLSX.utils.encode_cell({ r, c });
+        const hasSplit = (s.retailers||[]).some(rt => (rt.workshops||[])
+          .some(w => w.sp && (w.sp.sale || w.sp.full || w.sp.part)));
+        const cells = {};
+        let hit = 0; const miss = [];
+        if(hasSplit){
+          // 먼저 0 으로 비운다 — 안 그러면 지난 회차 값이 남는다
+          byLabel.forEach(r => {
+            [col.pkg, col.full, col.part].forEach(c => { if(c != null){ cells[at(r,c)] = 0; cells[at(r,c+1)] = 0; } });
+            if(col.tot != null) cells[at(r, col.tot)] = 0;
+          });
+          (s.retailers||[]).forEach(rt => (rt.workshops||[]).forEach(w => {
+            if(!w.sp) return;
+            const r = byCust.get(String(w.customer_code||'').trim())
+                   ?? byLabel.get(String(w.code||'').trim());
+            if(r == null){ miss.push(w.code); return; }
+            const R = n => Math.round(n || 0), sp = w.sp;
+            if(col.pkg  != null){ cells[at(r,col.pkg)]  = sp.sale?.n || 0; cells[at(r,col.pkg+1)]  = R(sp.sale?.amt); }
+            if(col.full != null){ cells[at(r,col.full)] = sp.full?.n || 0; cells[at(r,col.full+1)] = R(sp.full?.amt); }
+            if(col.part != null){ cells[at(r,col.part)] = sp.part?.n || 0; cells[at(r,col.part+1)] = R(sp.part?.amt); }
+            if(col.tot  != null)  cells[at(r,col.tot)]  = R((sp.sale?.amt||0)+(sp.full?.amt||0)+(sp.part?.amt||0));
+            hit++;
+          }));
+        }
+        if(Object.keys(cells).length) sheetFills[sumSheetName] = cells;
+        sumNote = hasSplit
+          ? ` · 요약표 ${hit}개 지점`
+            + (miss.length ? ` <span style="color:var(--accent-ar);">(미배치 ${miss.join(', ')})</span>` : '')
+          : ' · <span style="color:var(--accent-ar);">요약표는 그대로 두었습니다 — '
+            + '판매/환불 구분값이 없습니다. 원본을 다시 올리면 채워집니다.</span>';
+      }
     }
 
     setP('바우처 파일을 만드는 중...');
@@ -9784,6 +9827,14 @@ function dateToExcelSerial(d){
 }
 
 // 시트 XML에서 특정 셀의 값만 교체 (s= 스타일 속성은 보존)
+/* 셀 값은 숫자·문자열·{value,isString} 세 형태로 들어온다. 섞여 들어와서
+   객체가 그대로 <v> 에 박히면 엑셀이 '복구했습니다' 를 띄운다. (2026-10-23)
+   한 군데서 풀어준다. */
+function cellSpec(v){
+  if(v && typeof v === 'object' && 'value' in v) return { value: v.value, isString: !!v.isString };
+  return { value: v, isString: typeof v === 'string' };
+}
+
 function setCellInSheetXml(xml, ref, value, isString){
   const re = new RegExp('<c r="' + ref + '"([^>]*?)(/>|>[\\s\\S]*?</c>)');
   const m = xml.match(re);
@@ -9828,8 +9879,8 @@ async function buildVoucherFromTemplate(tplBuffer, { inputCells, coverCells, ima
   if(inputPath && zip.file(inputPath)){
     let xml = await zip.file(inputPath).async('string');
     for(const [ref, val] of Object.entries(inputCells)){
-      const r = setCellInSheetXml(xml, ref, val, false);
-      xml = r.xml;
+      const c = cellSpec(val);
+      xml = setCellInSheetXml(xml, ref, c.value, c.isString).xml;
     }
     zip.file(inputPath, xml);
   }
@@ -9840,7 +9891,10 @@ async function buildVoucherFromTemplate(tplBuffer, { inputCells, coverCells, ima
       const p = pathOf(sname);
       if(!p || !zip.file(p)) continue;
       let xml = await zip.file(p).async('string');
-      for(const [ref, val] of Object.entries(cells)) xml = setCellInSheetXml(xml, ref, val, false).xml;
+      for(const [ref, val] of Object.entries(cells)){
+        const c = cellSpec(val);
+        xml = setCellInSheetXml(xml, ref, c.value, c.isString).xml;
+      }
       zip.file(p, xml);
     }
   }
@@ -9870,8 +9924,8 @@ async function buildVoucherFromTemplate(tplBuffer, { inputCells, coverCells, ima
   if(coverPath && zip.file(coverPath)){
     let xml = await zip.file(coverPath).async('string');
     for(const [ref, cfg] of Object.entries(coverCells)){
-      const r = setCellInSheetXml(xml, ref, cfg.value, !!cfg.isString);
-      xml = r.xml;
+      const c = cellSpec(cfg);
+      xml = setCellInSheetXml(xml, ref, c.value, c.isString).xml;
     }
     zip.file(coverPath, xml);
   }
