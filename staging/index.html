@@ -1092,7 +1092,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 13:34';
+const BUILD = '10-23 13:35';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -9820,6 +9820,14 @@ async function buildVoucherFromTemplate(tplBuffer, { inputCells, coverCells, ima
       for(const [ref, val] of Object.entries(cells)) xml = setCellInSheetXml(xml, ref, val, false).xml;
       zip.file(p, xml);
     }
+  }
+
+  /* 합계행이 수식이다 (=SUM(F7:F27)). 셀을 숫자로 덮었으니 열 때 다시 계산시킨다. */
+  if(!/fullCalcOnLoad/.test(wbXml)){
+    wbXml = /<calcPr[^>]*\/>/.test(wbXml)
+      ? wbXml.replace(/<calcPr([^>]*)\/>/, '<calcPr$1 fullCalcOnLoad="1"/>')
+      : wbXml.replace('</workbook>', '<calcPr fullCalcOnLoad="1"/></workbook>');
+    zip.file('xl/workbook.xml', wbXml);
   }
 
   // --- 1-c) 시트 이름 바꾸기 (탭에 지난 회차 기간이 남아 있다) ---
