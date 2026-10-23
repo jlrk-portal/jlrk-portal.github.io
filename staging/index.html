@@ -12774,7 +12774,9 @@ async function noticePersons(round){
 
 /* 리테일러 통합본 엑셀 — 요약 + 인원별 + 원본 */
 async function noticeExportXlsx(round, type, claims, rows, T){
-  const name = `${String(type?.name||'정산').replace(/[\\/:*?"<>|]/g,'')}_${round.period_label}`;
+  // 파일명에 못 쓰는 글자는 '-' 로 바꾼다. 지워버리면 '사용반환금Retailer' 처럼 붙는다.
+  const safe = v => String(v ?? '').replace(/[\\/:*?"<>|]/g, '-').replace(/\s+/g, ' ').trim();
+  const name = `${safe(type?.name || '정산')}_${safe(round.period_label)}`;
   const wb = XLSX.utils.book_new();
   const isAR = type?.direction === 'AR';
   const hasLines = T.lines > 0;
