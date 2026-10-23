@@ -1098,7 +1098,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 15:20';
+const BUILD = '10-23 15:43';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -9014,6 +9014,29 @@ async function asapReviewFlags(rows){
    빼는 건 사람이 라인 단위로 정한다. 뺀 것에는 사유가 남는다.
    ================================================================ */
 
+/* 전시장 코드(HSU·KCCI…)를 사람이 읽는 이름으로. Sales Report 에는 코드만
+   들어 있어서 이름을 따로 둔다 — asap_config.showroom_names 에 넣으면 그걸 쓴다.
+   없으면 '리테일러명 · 코드' 로 적어도 어디인지는 알게 한다. (2026-10-23) */
+let _asapSrNames = null, _asapRtByCode = null;
+async function asapLoadNames(){
+  if(_asapSrNames) return;
+  const [{ data: cfg }, { data: rts }] = await Promise.all([
+    sb.from('asap_config').select('v').eq('k','showroom_names').maybeSingle(),
+    sb.from('retailers').select('code,name'),
+  ]);
+  _asapSrNames = cfg?.v || {};
+  _asapRtByCode = new Map((rts||[]).map(r => [r.code, r.name]));
+}
+function asapBranchLabel(scope, branch){
+  if(scope !== 'SALES') return branch;
+  const nm = _asapSrNames?.[branch];
+  if(nm) return `${nm} (${branch})`;
+  const u = String(branch||'').toUpperCase();
+  const hit = [...(_asapRtByCode?.keys() || [])].sort((a,b)=>b.length-a.length)
+                .find(c => u.startsWith(c.toUpperCase()));
+  return hit ? `${_asapRtByCode.get(hit)} · ${branch}` : branch;
+}
+
 const ASAP_SUP = {
   SHOWROOM: { label:'전시차 지원', cols:['차대번호','지원분기','비고'],
               sample:[['SALCA2BN7MA685259','FY27 Q2','2026 전시차'],
@@ -9125,6 +9148,7 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
     <div class="hint">불러오는 중...</div>`;
   host.appendChild(box);
 
+  await asapLoadNames();
   const { data, error } = await sb.rpc('asap_lines_json', { p_from: from, p_to: to, p_round: round.id });
   if(error){ box.innerHTML = `<div class="hint" style="color:var(--danger);">라인을 불러오지 못했습니다: ${error.message}</div>`; return; }
   const all = (data || []).map(x => ({ ...x,
