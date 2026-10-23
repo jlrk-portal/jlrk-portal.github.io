@@ -11558,10 +11558,18 @@ const TO_CHUNK = 2000;        // 한 번에 보낼 행수. 더 키우면 413 이
 /* 엑셀 날짜는 숫자(1900 기준 일련번호)로 오기도 하고 문자열로 오기도 한다 */
 function xlDate(v){
   if(v === null || v === undefined || v === '') return null;
-  if(v instanceof Date) return v.toISOString().slice(0,10);
+  /* ⚠ toISOString() 을 쓰면 안 된다. SheetJS 는 '그 날 자정(로컬)' 으로 Date 를
+     만들기 때문에, 한국(UTC+9)에서 UTC 로 돌리면 하루 전으로 밀린다.
+     실측 2026-10-23: 원본 2026-07-21 이 DB 에 2026-07-20 으로 들어가 있었다.
+     분기 경계가 통째로 어긋나 집계가 틀어졌다. 로컬 날짜 그대로 쓴다. */
+  const ymd = (d) => isNaN(d) ? null
+    : `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  if(v instanceof Date) return ymd(v);
   if(typeof v === 'number'){
-    const d = new Date(Date.UTC(1899,11,30) + v*86400000);
-    return isNaN(d) ? null : d.toISOString().slice(0,10);
+    // 엑셀 일련값은 '날짜' 그 자체다. 로컬 자정으로 만들어 그대로 읽는다.
+    const base = new Date(1899, 11, 30);
+    const d = new Date(base.getFullYear(), base.getMonth(), base.getDate() + Math.round(v));
+    return ymd(d);
   }
   const s = String(v).trim().replace(/[./]/g,'-');
   const m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
