@@ -1098,7 +1098,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 17:03';
+const BUILD = '10-23 17:04';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -9364,10 +9364,11 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
         <td class="as-fold" style="font-variant-numeric:tabular-nums; white-space:nowrap; cursor:pointer;"
             title="접기/펼치기">${fold ? '▸' : '▾'} ${esc2(r.vin)}</td>
         <td style="text-align:center; white-space:nowrap;">${g.length.toLocaleString('ko-KR')}건</td>
-        <td colspan="3" class="hint">${fold
+        <td colspan="2" class="hint">${fold
           ? esc2(uniq(g.map(x => x.part_name).filter(Boolean)).slice(0,3).join(', '))
           : ''}</td>
         <td style="text-align:center;">${esc2(r.model_code || '—')}</td>
+        <td></td>
         <td style="text-align:right; white-space:nowrap;"><b>${fmtWon(cost)}</b></td>
         <td style="text-align:right; white-space:nowrap;"><b>${fmtWon(amt)}</b></td>
         <td class="hint">${cellSum(g)}</td></tr>`;
@@ -9379,10 +9380,11 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
       return `<tr data-id="${x.line_id}" style="${dim}">
         <td>${st === 'HARD' ? '' : `<input type="checkbox" class="as-ck" data-id="${x.line_id}" ${picked.has(x.line_id)?'checked':''}>`}</td>
         <td><span class="badge ${BADGE[st]}">${LABEL[st]}</span></td>
-        ${inGroup ? '<td></td><td></td><td></td>' : `
+        ${inGroup ? '<td></td><td></td><td></td><td></td>' : `
         <td style="white-space:nowrap;">${x.scope === 'SALES' ? '전시장' : '서비스'}</td>
         <td>${esc2(asapBranchLabel(x.scope, x.branch))}</td>
-        <td>${esc2(x.person || '(미기재)')}</td>`}
+        <td>${esc2(x.person || '(미기재)')}</td>
+        <td style="font-variant-numeric:tabular-nums; white-space:nowrap;">${esc2(x.vin)}</td>`}
         <td style="text-align:center; white-space:nowrap;">${esc2(x.inv_date)}</td>
         <td style="white-space:nowrap;">${esc2(x.part_no)}</td>
         <td>${esc2(x.part_name)}</td>
