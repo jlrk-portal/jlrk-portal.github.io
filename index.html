@@ -912,6 +912,7 @@
       <input type="file" id="f_voucher_template" accept=".xlsx">
       <div class="hint" id="voucherTemplateStatus">아직 업로드된 템플릿이 없습니다.</div>
     </div>
+    <div id="eoTplFields"></div>
     <div class="hint">
       실제 결재 올리는 원본 AP Voucher 파일을 그대로 업로드하세요. 생성 시 이 파일의 서식·색상·표는 절대 건드리지 않고,
       'AP_input reqeust' 시트에서 지점 vendor code가 일치하는 행을 찾아 금액(I/J/M/N) 칸에만 값을 채워 넣습니다.
@@ -1092,7 +1093,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 13:35';
+const BUILD = '10-23 13:42';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -2126,6 +2127,7 @@ function openTypePanel(t){
   document.getElementById('voucherTemplateStatus').textContent = t?.voucher_template_path
     ? `업로드됨: ${t.voucher_template_path.split('/').pop()}`
     : '아직 업로드된 템플릿이 없습니다.';
+  renderEoTplFields(t);
   document.getElementById('f_form_template').value = '';
   document.getElementById('formTemplateStatus').textContent = t?.form_template_path
     ? `업로드됨: ${t.form_template_path.split('/').pop()}`
@@ -3025,7 +3027,6 @@ function eoConfirmPanel(round, type, claims, confirmed, total){
     foot = `<div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;
          padding:10px 12px; border-top:1px solid var(--surface3);">
       <button class="btn btn-sm btn-ghost" id="eoReopen">원본 다시 올리기 (DRAFT로)</button>
-      <button class="btn btn-sm btn-ghost" id="eoTplSwap">바우처 양식 교체</button>
       <button class="btn btn-sm btn-ghost" id="eoMaster" style="margin-left:auto;">마스터 파일 내려받기</button>
       <button class="btn btn-sm" id="eoVoucher">${round.status === 'VOUCHERED'
         ? '바우처 다시 생성' : '바우처 생성'}${vCount>1 ? ` (${vCount}개 파일)` : ''}</button>
@@ -3097,37 +3098,6 @@ function eoBindConfirm(round, type, claims, host){
 
   const mb = host.querySelector('#eoMaster');
   if(mb) mb.onclick = () => downloadMasterXlsx(mb);
-
-  /* 바우처 양식(템플릿) 교체 — 양식이 바뀌면 여기서 올린다.
-     설명·시트 이름·요약표는 생성할 때 이번 회차 값으로 덮으므로,
-     직전 회차 바우처를 그대로 양식으로 올려도 된다. (2026-10-23) */
-  const ts = host.querySelector('#eoTplSwap');
-  if(ts) ts.onclick = () => {
-    let box = host.querySelector('#eoTplBox2');
-    if(box){ box.remove(); return; }
-    box = document.createElement('div');
-    box.id = 'eoTplBox2'; box.className = 'info-card'; box.style.marginTop = '10px';
-    const LABEL = { saveback:'사용반환금', support:'Retailer Support',
-                    incentive:'Sales Incentive', salespayment:'판매대금 (AR)' };
-    box.innerHTML = `<div class="section-label" style="margin-top:0;">바우처 양식 교체</div>
-      <div class="hint" style="margin-bottom:8px;">올린 양식은 이후 회차에도 계속 쓰입니다.
-        설명·탭 이름·요약표는 생성할 때 그 회차 값으로 덮어쓰니, 직전 회차 바우처를 그대로 올리셔도 됩니다.</div>
-      ${Object.keys(EO3V_TPL).map(k => `<div class="field" style="max-width:560px;">
-         <label>${LABEL[k] || k}</label><input type="file" accept=".xlsx" data-tpl="${k}"></div>`).join('')}
-      <div class="hint" id="eoTplMsg" style="margin-top:6px;"></div>`;
-    host.appendChild(box);
-    box.querySelectorAll('input[type=file]').forEach(inp => inp.onchange = async () => {
-      const f = inp.files[0]; if(!f) return;
-      const msg = box.querySelector('#eoTplMsg');
-      msg.textContent = `${f.name} 올리는 중...`;
-      const { error } = await sb.storage.from('settlements')
-        .upload(EO3V_TPL[inp.dataset.tpl], f, { upsert:true });
-      if(error){ msg.innerHTML = `<span style="color:var(--danger);">업로드 실패: ${error.message}</span>`; return; }
-      inp.disabled = true;
-      msg.innerHTML = `<b>${LABEL[inp.dataset.tpl]}</b> 양식을 바꿨습니다. 이제 [바우처 생성]을 누르시면 새 양식으로 나옵니다.`;
-      await logAudit('VOUCHER_TPL','ROUND', round.id, { label: inp.dataset.tpl + ' ← ' + f.name });
-    });
-  };
 
   const re = host.querySelector('#eoReopen');
   if(re) re.onclick = async () => {
@@ -4987,6 +4957,59 @@ function downloadOneDmsRetailerXlsx(claim, round){
    저장된 템플릿 3개 + 확정 내역(source_summary) → xlsx 3개 + rawdata 통합 → ZIP
    템플릿은 Storage: voucher-templates/eo3v-{saveback|support|incentive}.xlsx
    ================================================================ */
+/* 엔진오일 유형의 바우처 양식 — 한 유형이 템플릿을 여러 개 쓴다
+   (사용반환금 + Retailer Support). 유형 마스터에서 구성요소별로 올린다.
+   매니저 지적(2026-10-23): 양식 교체는 회차가 아니라 유형에서. */
+const EO3V_TPL_LABEL = {
+  saveback:'사용반환금', support:'Retailer Support',
+  incentive:'Sales Incentive', salespayment:'판매대금 (AR)',
+};
+async function renderEoTplFields(t){
+  const host = document.getElementById('eoTplFields');
+  if(!host) return;
+  host.innerHTML = '';
+  const eo = t ? eoPreset(t) : null;
+  if(!eo || !eo.comps?.length){
+    document.getElementById('f_voucher_template')?.closest('.field')
+      ?.style.setProperty('display', '');
+    return;
+  }
+  // 엔진오일은 아래 칸을 쓰므로 위의 단일 업로드는 숨긴다 (생성기가 안 본다)
+  document.getElementById('f_voucher_template')?.closest('.field')
+    ?.style.setProperty('display', 'none');
+
+  host.innerHTML = `<div class="section-label">바우처 양식 — ${esc2(t.name)}</div>
+    <div class="hint" style="margin-bottom:8px;">이 유형이 쓰는 양식입니다. 올리면 이후 모든 회차에 적용됩니다.
+      설명·탭 이름·요약표는 생성할 때 그 회차 값으로 덮으니, <b>직전 회차 바우처를 그대로 올리셔도 됩니다.</b></div>
+    ${eo.comps.map(k => `<div class="field" style="max-width:600px;">
+        <label>${EO3V_TPL_LABEL[k] || k}</label>
+        <input type="file" accept=".xlsx" data-eotpl="${k}">
+        <div class="hint" data-eost="${k}">확인 중...</div>
+      </div>`).join('')}`;
+
+  for(const k of eo.comps){
+    const st = host.querySelector(`[data-eost="${k}"]`);
+    const { data } = await sb.storage.from('settlements').list('voucher-templates');
+    const want = EO3V_TPL[k].split('/').pop();
+    const f = (data||[]).find(x => x.name === want);
+    st.innerHTML = f
+      ? `올라와 있음 — ${want} · ${new Date(f.updated_at || f.created_at).toLocaleString('ko-KR')}`
+      : `<span style="color:var(--accent-ar);">아직 없습니다 (${want})</span>`;
+  }
+
+  host.querySelectorAll('input[type=file]').forEach(inp => inp.onchange = async () => {
+    const f = inp.files[0]; if(!f) return;
+    const k = inp.dataset.eotpl;
+    const st = host.querySelector(`[data-eost="${k}"]`);
+    st.textContent = `${f.name} 올리는 중...`;
+    const { error } = await sb.storage.from('settlements').upload(EO3V_TPL[k], f, { upsert:true });
+    if(error){ st.innerHTML = `<span style="color:var(--danger);">업로드 실패: ${error.message}</span>`; return; }
+    st.innerHTML = `<b>바꿨습니다</b> — ${f.name} · ${new Date().toLocaleString('ko-KR')}`;
+    await logAudit('VOUCHER_TPL','TYPE', t.id, { label: `${EO3V_TPL_LABEL[k]||k} ← ${f.name}` });
+  });
+}
+const esc2 = v => String(v ?? '').replace(/[<>&"]/g, m => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[m]));
+
 const EO3V_TPL = {
   saveback:  'voucher-templates/eo3v-saveback.xlsx',
   support:   'voucher-templates/eo3v-support.xlsx',
