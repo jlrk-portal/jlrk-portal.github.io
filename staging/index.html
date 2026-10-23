@@ -1098,7 +1098,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 14:28';
+const BUILD = '10-23 14:47';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -8945,6 +8945,256 @@ function openRoundEdit(round, type){
   openPanel('roundPanel');
 }
 
+/* ================================================================
+   ASAP 액세서리 인센티브 — 분기 고르면 Turn Over 로 자동 계산
+   (2026-10-23) 엔진은 DB 함수(asap_summary/asap_lines)에 있다.
+   한 분기 35만 행이라 브라우저로는 못 센다.
+   ================================================================ */
+
+const isAsapIncentive = (t) => /ASAP[_ ]?INCENTIVE/i.test(String(t?.code || ''))
+  || (t?.source_config?.preset === 'ASAP_ADMIN_UPLOAD' && /인센티브|Incentive/i.test(t?.name || ''));
+
+/* 'FY27 Q2' → 2026-07-01 ~ 2026-09-30 (JLR 회계연도는 4월 시작) */
+function asapQuarterRange(label){
+  const m = String(label || '').match(/FY(\d{2})\s*Q([1-4])/i);
+  if(!m) return null;
+  const fy = +m[1], q = +m[2];
+  const y = q <= 3 ? 2000 + fy - 1 : 2000 + fy;
+  const sm = q <= 3 ? 4 + (q - 1) * 3 : 1;
+  const from = new Date(y, sm - 1, 1);
+  const to   = new Date(y, sm + 2, 0);        // 그 분기 마지막 날
+  const f = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  return { from: f(from), to: f(to) };
+}
+
+/* 지점·전시장 → 리테일러.
+   Service 는 Turn Over 의 AS지점('강동 서비스센터'), Sales 는 Sales Report 의
+   전시장 코드('KCCI'). 둘이 생김새가 달라 따로 푼다. 실측 2026-10-23 —
+   Service 18/20 · Sales 18/18. 남는 둘은 이름이 다르게 적혀 있다. */
+const ASAP_BRANCH_ALIAS = { '부산센텀':'HS-BC', '서초':'KCC-SC' };
+async function asapRetailerResolver(){
+  const [{ data: ws }, { data: rts }, { data: cfg }] = await Promise.all([
+    sb.from('workshops').select('code, name, retailer_id, retailers(code,name)').eq('is_active', true),
+    sb.from('retailers').select('id, code, name'),
+    sb.from('asap_config').select('v').eq('k','branch_alias').maybeSingle(),
+  ]);
+  const alias = { ...ASAP_BRANCH_ALIAS, ...(cfg?.v || {}) };
+  const norm = v => String(v ?? '').replace(/\s/g,'');
+  const byName = new Map(), byCode = new Map();
+  (ws||[]).forEach(w => { byName.set(norm(w.name), w); byCode.set(norm(w.code), w); });
+  const rtByCode = new Map((rts||[]).map(r => [r.code, r]));
+  const codesLong = (rts||[]).map(r => r.code).sort((a,b) => b.length - a.length);
+  return (scope, branch) => {
+    if(scope === 'SERVICE'){
+      const k = norm(String(branch).replace(/서비스센터\s*$/,''));
+      const w = byName.get(k) || byCode.get(norm(alias[k] || ''));
+      return w ? rtByCode.get(w.retailers?.code) : null;
+    }
+    const u = String(branch||'').toUpperCase();
+    const hit = codesLong.find(c => u.startsWith(c.toUpperCase()));
+    return hit ? rtByCode.get(hit) : null;
+  };
+}
+
+async function renderAsapRoundDetail(round, type){
+  document.getElementById('claimsTable').style.display = 'none';
+  document.getElementById('rd_title').textContent = `${type.name} · ${round.period_label}`;
+  document.getElementById('rd_status').innerHTML =
+    `<span class="badge ${round.status==='DRAFT'?'badge-off':'badge-ap'}">${ROUND_STATUS_LABEL[round.status]||round.status}</span>`;
+  document.getElementById('rd_meta').textContent =
+    'AP · 시스템 산출 (Turn Over 액세서리) · 리테일러 확인만'
+    + (round.basis_label ? ` · 기준 ${round.basis_label}` : '');
+  document.getElementById('rd_due').textContent = round.confirm_due_at
+    ? `확정 기한 ${new Date(round.confirm_due_at).toLocaleString('ko-KR')}` : '확정 기한 미설정';
+
+  const { data: claims } = await sb.from('claims')
+    .select('*, retailers(code,name)').eq('round_id', round.id).order('created_at');
+  const confirmed = (claims||[]).filter(c => c.confirmed_at).length;
+  const total = claims?.length || 0;
+  document.getElementById('rd_progress').textContent = total ? `확정 ${confirmed} / ${total}` : '공지 전';
+
+  ['rd_actions','reviewSection','invoiceSection','voucherSection'].forEach(id => {
+    const el = document.getElementById(id); if(el) el.innerHTML = '';
+  });
+  const host = document.getElementById('reviewSection');
+
+  if(round.status !== 'DRAFT'){
+    const panel = document.createElement('div');
+    panel.innerHTML = eoConfirmPanel(round, { ...type, source_config:{} }, claims, confirmed, total);
+    host.appendChild(panel);
+    eoBindConfirm(round, type, claims || [], panel);
+  }
+
+  // ── 계산 카드
+  const q = asapQuarterRange(round.basis_label || round.period_label) || { from:'', to:'' };
+  const card = document.createElement('div');
+  card.className = 'info-card';
+  card.innerHTML = `
+    <div class="section-label" style="margin-top:0;">Turn Over 로 자동 계산</div>
+    <div class="hint" style="margin-bottom:10px;">
+      대상: 청구계정 <b>일반 · 원가장착(ACC) · 부품판매(개인)</b> 중
+      <b>부품그룹 Accessories</b> · 차대번호 있는 라인.
+      요율 <b>L663 15% / 그 외 7%</b> (모델은 IQM 우선) · 올림 10,000원 단위.<br>
+      판매구분은 Sales Report 로 가립니다 — 그 분기에 판 차면 <b>Sales</b>(전시장·영업사원),
+      아니면 <b>Service</b>(AS지점·담당SA). 시승차·커티시카·특수차는 빠집니다.
+    </div>
+    <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap;">
+      <div class="field" style="margin:0;"><label style="font-size:11px;">기간 시작 (인보이스완료일)</label>
+        <input type="date" id="asFrom" value="${q.from}"></div>
+      <div class="field" style="margin:0;"><label style="font-size:11px;">기간 끝</label>
+        <input type="date" id="asTo" value="${q.to}"></div>
+      <button class="btn btn-sm" id="asCalc">계산하기</button>
+      <span class="hint" style="align-self:center;">${q.from
+        ? `기준 기간 <b>${round.basis_label || round.period_label}</b> 로 채웠습니다. 고치실 수 있습니다.`
+        : '<span style="color:var(--accent-ar);">기준 기간에서 분기를 읽지 못했습니다. 날짜를 직접 넣어주세요.</span>'}</span>
+    </div>
+    <div id="asResult" style="margin-top:12px;"></div>`;
+  host.appendChild(card);
+
+  const out = card.querySelector('#asResult');
+  let last = null;        // { from, to, rows, byRt, T }
+
+  card.querySelector('#asCalc').onclick = async () => {
+    const from = card.querySelector('#asFrom').value, to = card.querySelector('#asTo').value;
+    if(!from || !to){ alert('기간을 넣어주세요.'); return; }
+    const btn = card.querySelector('#asCalc');
+    btn.disabled = true; btn.textContent = '계산 중...';
+    out.innerHTML = '<div class="hint">Turn Over 를 세는 중입니다 — 20초쯤 걸립니다.</div>';
+    try{
+      const { data, error } = await sb.rpc('asap_summary', { p_from: from, p_to: to });
+      if(error) throw new Error(error.message);
+      const rows = (data||[]).map(x => ({ ...x,
+        lines:Number(x.lines), vins:Number(x.vins),
+        cost_sum:Number(x.cost_sum), amount:Number(x.amount) }));
+      const resolve = await asapRetailerResolver();
+      const byRt = new Map(); const unmatched = new Map();
+      rows.forEach(r => {
+        const rt = resolve(r.scope, r.branch);
+        if(!rt){ unmatched.set(r.branch, (unmatched.get(r.branch)||0) + r.amount); return; }
+        if(!byRt.has(rt.id)) byRt.set(rt.id, { id:rt.id, code:rt.code, name:rt.name,
+          sales:0, service:0, amount:0, lines:0, people:0 });
+        const g = byRt.get(rt.id);
+        g[r.scope === 'SALES' ? 'sales' : 'service'] += r.amount;
+        g.amount += r.amount; g.lines += r.lines; g.people++;
+      });
+      const T = { amount: rows.reduce((a,r)=>a+r.amount,0), lines: rows.reduce((a,r)=>a+r.lines,0),
+                  people: rows.length,
+                  sales: rows.filter(r=>r.scope==='SALES').reduce((a,r)=>a+r.amount,0),
+                  service: rows.filter(r=>r.scope==='SERVICE').reduce((a,r)=>a+r.amount,0) };
+      last = { from, to, rows, byRt, T };
+      const rtRows = [...byRt.values()].sort((a,b)=>a.code.localeCompare(b.code));
+      const un = [...unmatched.entries()];
+      out.innerHTML = `
+        ${un.length ? `<div class="info-card" style="border-color:#e0b050; background:#fff8ec; margin-bottom:10px;">
+          <b>리테일러를 못 찾은 지점 ${un.length}곳 · ${fmtWon(un.reduce((a,x)=>a+x[1],0))}</b>
+          <div class="hint" style="margin-top:4px;">${un.map(x=>`${esc2(x[0])} ${fmtWon(x[1])}`).join(' · ')}
+            <br>이 금액은 공지에 들어가지 않습니다. 지점 마스터의 이름과 맞는지 확인해주세요.</div></div>` : ''}
+        <div style="display:flex; gap:10px; margin-bottom:10px; flex-wrap:wrap;">
+          ${[['대상 인원', T.people+'명'], ['대상 라인', T.lines.toLocaleString('ko-KR')+'건'],
+             ['Sales', fmtWon(T.sales)], ['Service', fmtWon(T.service)], ['합계', fmtWon(T.amount)]]
+            .map(([k,v]) => `<div style="flex:1; min-width:120px; border:1px solid var(--surface3);
+              border-radius:6px; padding:10px 12px;"><div class="hint">${k}</div>
+              <div style="font-size:17px; font-weight:700; margin-top:2px;">${v}</div></div>`).join('')}
+        </div>
+        <div style="overflow-x:auto;"><table style="min-width:620px;"><thead><tr>
+          <th>리테일러</th><th class="c" style="text-align:center;">인원</th>
+          <th style="text-align:right;">건수</th><th style="text-align:right;">Sales</th>
+          <th style="text-align:right;">Service</th><th style="text-align:right;">합계</th>
+        </tr></thead><tbody>
+          ${rtRows.map(r => `<tr><td>${esc2(r.code)} ${esc2(r.name)}</td>
+            <td style="text-align:center;">${r.people}</td>
+            <td style="text-align:right;">${r.lines.toLocaleString('ko-KR')}</td>
+            <td style="text-align:right;">${fmtWon(r.sales)}</td>
+            <td style="text-align:right;">${fmtWon(r.service)}</td>
+            <td style="text-align:right;"><b>${fmtWon(r.amount)}</b></td></tr>`).join('')}
+        </tbody><tfoot><tr><td>합계 ${rtRows.length}개사</td>
+          <td style="text-align:center;">${T.people}</td>
+          <td style="text-align:right;">${T.lines.toLocaleString('ko-KR')}</td>
+          <td style="text-align:right;">${fmtWon(T.sales)}</td>
+          <td style="text-align:right;">${fmtWon(T.service)}</td>
+          <td style="text-align:right;">${fmtWon(T.amount)}</td></tr></tfoot></table></div>
+        <div class="action-row">
+          <button class="btn btn-sm btn-ghost" id="asDetail">지점·판매자별 펼쳐보기</button>
+          <button class="btn btn-sm" id="asPublish" style="margin-left:auto;">${round.status === 'DRAFT'
+            ? '리테일러에 정산내역 공지' : '다시 계산해서 정정 공지'}</button>
+        </div>
+        <div id="asDetailBox"></div>`;
+
+      out.querySelector('#asDetail').onclick = () => {
+        const box = out.querySelector('#asDetailBox');
+        if(box.innerHTML){ box.innerHTML = ''; return; }
+        const byBranch = new Map();
+        rows.forEach(r => {
+          const k = r.scope + '|' + r.branch;
+          if(!byBranch.has(k)) byBranch.set(k, []);
+          byBranch.get(k).push(r);
+        });
+        box.innerHTML = [...byBranch.entries()].map(([k, list]) => {
+          const [sc, br] = k.split('|');
+          return `<div style="border:1px solid var(--surface3); border-radius:6px; margin-top:8px;">
+            <div style="display:flex; gap:10px; padding:7px 10px; background:var(--surface2);
+                 font-size:12.5px; font-weight:600;">
+              <span class="badge ${sc==='SALES'?'badge-ap':'badge-off'}">${sc==='SALES'?'Sales':'Service'}</span>
+              <span>${esc2(br)}</span>
+              <span style="margin-left:auto;">${list.reduce((a,x)=>a+x.lines,0).toLocaleString('ko-KR')}건 ·
+                ${fmtWon(list.reduce((a,x)=>a+x.amount,0))}</span></div>
+            <table><tbody>${list.map(x => `<tr><td>${esc2(x.person||'(미기재)')}</td>
+              <td style="text-align:right;">${x.lines.toLocaleString('ko-KR')}건</td>
+              <td style="text-align:right;">${fmtWon(x.cost_sum)}</td>
+              <td style="text-align:right;"><b>${fmtWon(x.amount)}</b></td></tr>`).join('')}
+            </tbody></table></div>`;
+        }).join('');
+      };
+
+      out.querySelector('#asPublish').onclick = () => asapPublish(round, type, last);
+    }catch(e){
+      out.innerHTML = `<div class="hint" style="color:var(--danger);">계산 실패: ${e.message || e}</div>`;
+    }finally{ btn.disabled = false; btn.textContent = '계산하기'; }
+  };
+}
+
+/* 계산 결과를 청구로 올린다 — 금액이 그대로인 리테일러의 확정은 유지한다 */
+async function asapPublish(round, type, last){
+  if(!last){ alert('먼저 [계산하기] 를 눌러주세요.'); return; }
+  const rtRows = [...last.byRt.values()];
+  if(!rtRows.length){ alert('공지할 내역이 없습니다.'); return; }
+  if(!confirm(`${rtRows.length}개사 · ${fmtWon(last.T.amount)} 을 리테일러에 공지합니다.\n`
+    + `기간 ${last.from} ~ ${last.to}\n\n계속할까요?`)) return;
+  try{
+    const changed = [];
+    for(const r of rtRows){
+      const { data: ex } = await sb.from('claims').select('id, approved_amount, confirmed_at')
+        .eq('round_id', round.id).eq('retailer_id', r.id).is('workshop_id', null).maybeSingle();
+      const amount = Math.round(r.amount);
+      const prev = ex ? Math.round(Number(ex.approved_amount)) : null;
+      const diff = (prev === null || prev !== amount);
+      const payload = { round_id: round.id, retailer_id: r.id, workshop_id: null,
+        status:'SUBMITTED', approved_amount: amount,
+        detail: { scope_sales: Math.round(r.sales), scope_service: Math.round(r.service),
+                  lines: r.lines, people: r.people, from: last.from, to: last.to },
+        confirmed_at: diff ? null : (ex?.confirmed_at ?? null),
+        submitted_at: new Date().toISOString() };
+      const { error } = ex ? await sb.from('claims').update(payload).eq('id', ex.id)
+                           : await sb.from('claims').insert(payload);
+      if(error) throw error;
+      if(diff) changed.push(r);
+    }
+    await sb.from('rounds').update({
+      status: round.status === 'DRAFT' ? 'PUBLISHED' : round.status,
+      source_summary: { preset:'ASAP_INCENTIVE', from:last.from, to:last.to,
+        computed_at: new Date().toISOString(),
+        grand: { amount: last.T.amount, sales: last.T.sales, service: last.T.service,
+                 lines: last.T.lines, people: last.T.people },
+        people: last.rows },
+    }).eq('id', round.id);
+    await logAudit('ASAP_PUBLISH','ROUND', round.id,
+      { label: `${type.name} · ${round.period_label}`, amount: last.T.amount });
+    alert(`공지했습니다 — ${rtRows.length}개사 · ${fmtWon(last.T.amount)}\n`
+      + (changed.length ? `금액이 바뀐 ${changed.length}개사에만 다시 통지됩니다.` : '금액 변동 없음.'));
+    await renderRoundDetail();
+  }catch(e){ alert('공지 실패: ' + (e.message || e)); }
+}
+
 async function renderRoundDetail(){
   const { data: round, error } = await sb.from('rounds').select('*, settlement_types(*)').eq('id', currentRoundId).single();
   if(error || !round){ alert('회차를 불러오지 못했습니다.'); switchView('rounds'); return; }
@@ -8962,6 +9212,8 @@ async function renderRoundDetail(){
   //   ⚠️ AR 분기보다 먼저 봐야 한다. SP 는 direction='AR' 이라 아래 AR 분기에 먼저 걸리면
   //      원본 업로드·미리보기가 없는 일반 수동입력 화면으로 떨어진다.
   if(isEnginePreset(type)){ return renderEngineOilRoundDetail(round, type); }
+  // ASAP 액세서리 인센티브 — Turn Over 로 자동 계산 (수기 입력 화면으로 떨어지면 안 된다)
+  if(isAsapIncentive(type)){ return renderAsapRoundDetail(round, type); }
   // AR(JLRK → 리테일러 청구)은 흐름이 반대라 별도 화면으로 분기
   if(type.direction === 'AR'){ return renderARRoundDetail(round, type); }
   document.getElementById('claimsTable').style.display = 'table'; // AR에서 돌아온 경우 복구
