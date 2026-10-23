@@ -644,6 +644,11 @@
       </div>
 
       <div class="info-card" style="margin-bottom:14px;">
+        <div class="section-label" style="margin-top:0;">DB 사용량</div>
+        <div id="dbSize"><div class="hint">불러오는 중...</div></div>
+      </div>
+
+      <div class="info-card" style="margin-bottom:14px;">
         <div class="section-label" style="margin-top:0;">적재 현황</div>
         <div id="baseMonths"><div class="hint">불러오는 중...</div></div>
       </div>
@@ -1128,7 +1133,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 23:07';
+const BUILD = '10-23 23:26';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -13376,18 +13381,95 @@ async function loadBaseData(){
   await Promise.all([renderBaseMonths(), renderVinLists(), renderIqmStatus()]);
 }
 
+/* 적재 현황 + DB 용량.
+   매니저 설명(2026-10-23): Supabase 무료 플랜이라 DB 500MB 가 상한이고,
+   "최종 정산된 회차의 구조랑 금액만 남기고 나머지는 로컬 폴더로 백업"
+   하는 게 목표다. 그래서 어느 달을 지워도 되는지 눈으로 보여준다.
+   지우는 건 전부 사람이 누른다 — 자동 삭제는 없다. */
+const MB = (b) => Number(b || 0) / 1048576;
+const mbTxt = (b) => MB(b) >= 100 ? MB(b).toFixed(0) + ' MB'
+                   : MB(b) >= 1   ? MB(b).toFixed(1) + ' MB'
+                   :                (Number(b||0)/1024).toFixed(0) + ' KB';
+
+async function renderDbSize(){
+  const host = document.getElementById('dbSize');
+  if(!host) return;
+  const [tot, tab] = await Promise.all([ sb.rpc('db_total_size'), sb.rpc('db_sizes') ]);
+  if(tot.error || !tot.data?.length){
+    host.innerHTML = `<div class="hint">용량을 읽지 못했습니다 — SQL 082 가 적용됐는지 확인해주세요.
+      ${tot.error ? `<br>${esc2(tot.error.message)}` : ''}</div>`;
+    return;
+  }
+  const t = tot.data[0];
+  const pct = Number(t.pct_of_free || 0);
+  const over = pct >= 100, near = pct >= 80;
+  const rows = (tab.data || []).filter(x => MB(x.total_bytes) >= 1).slice(0, 8);
+  host.innerHTML = `
+    <div style="display:flex; gap:14px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">
+      <div><div class="hint">DB 사용량</div>
+        <div style="font-size:19px; font-weight:700; ${over ? 'color:var(--danger);'
+          : near ? 'color:var(--accent-ar);' : ''}">${esc2(t.pretty)}</div></div>
+      <div><div class="hint">무료 플랜 500MB 대비</div>
+        <div style="font-size:19px; font-weight:700; ${over ? 'color:var(--danger);'
+          : near ? 'color:var(--accent-ar);' : ''}">${pct}%</div></div>
+      <div style="flex:1; min-width:200px;">
+        <div style="height:9px; background:var(--surface3); border-radius:5px; overflow:hidden;">
+          <div style="height:9px; width:${Math.min(pct,100)}%;
+               background:${over ? 'var(--danger)' : near ? 'var(--accent-ar)' : 'var(--accent)'};"></div></div>
+        ${over ? '<div class="hint" style="color:var(--danger); margin-top:4px;">한도를 넘었습니다. 아래에서 다 쓴 달을 지워주세요.</div>' : ''}
+      </div>
+      <button class="btn btn-sm btn-ghost" id="dbSizeRefresh">새로고침</button>
+    </div>
+    <div style="overflow-x:auto;"><table class="as-sub" style="min-width:520px;"><thead><tr>
+      <th>테이블</th><th style="text-align:right;">전체</th><th style="text-align:right;">표</th>
+      <th style="text-align:right;">인덱스</th><th style="text-align:right;">행</th>
+    </tr></thead><tbody>
+      ${rows.map(x => `<tr>
+        <td>${esc2(x.table_name)}</td>
+        <td style="text-align:right;"><b>${mbTxt(x.total_bytes)}</b></td>
+        <td style="text-align:right;">${mbTxt(x.table_bytes)}</td>
+        <td style="text-align:right;">${mbTxt(x.index_bytes)}</td>
+        <td style="text-align:right;">${Number(x.rows||0).toLocaleString('ko-KR')}</td></tr>`).join('')}
+    </tbody></table></div>`;
+  document.getElementById('dbSizeRefresh').onclick = () => renderDbSize();
+}
+
 async function renderBaseMonths(){
   const host = document.getElementById('baseMonths');
-  const [{ data: tm }, { data: pm }, srRes] = await Promise.all([
+  const [{ data: tm }, { data: pm }, srRes, rdRes, ruRes] = await Promise.all([
     sb.from('turnover_months').select('*'),
     sb.from('part_price_months').select('*'),
     sb.from('sales_report_months').select('*'),
+    sb.from('rounds').select('id, period_label, status, source_summary, type_id'),
+    sb.from('campaign_rules').select('price_ym, type_id, round_id').eq('is_active', true),
   ]);
   const sr = srRes.data;
-  // Sales Report 표가 아직 없는 환경(= 055 미적용)에서는 적재 카드를 숨긴다.
-  // 눌렀는데 에러가 나는 버튼을 보여주는 것보다 안 보이는 편이 낫다.
   const srCard = document.getElementById('srLoadBtn')?.closest('.info-card');
   if(srCard) srCard.style.display = srRes.error ? 'none' : '';
+
+  /* 어느 달이 아직 쓰이고 있는가.
+     ① 회차가 그 달을 기간에 담고 있는데 아직 스냅샷을 안 담았으면 '사용 중'
+     ② 스냅샷을 담았으면 그 회차는 저장된 라인으로 돌므로 원천이 필요 없다
+     ③ 부품가격은 캠페인 검증 규칙의 기준월(price_ym)로 걸린다 */
+  const needTO = new Map();     // ym -> [회차 설명]
+  (rdRes.data || []).forEach(r => {
+    const ss = r.source_summary || {};
+    const from = ss.from, to = ss.to;
+    if(!from || !to) return;
+    const snapped = !!ss.snapshot_at;
+    for(let y = +from.slice(0,4), m = +from.slice(5,7); ; m++){
+      if(m > 12){ m = 1; y++; }
+      const ym = `${y}${String(m).padStart(2,'0')}`;
+      if(ym > to.slice(0,4) + to.slice(5,7)) break;
+      if(!snapped){
+        if(!needTO.has(ym)) needTO.set(ym, []);
+        needTO.get(ym).push(r.period_label);
+      }
+      if(ym === to.slice(0,4) + to.slice(5,7)) break;
+    }
+  });
+  const needPP = new Set((ruRes.data || []).map(x => x.price_ym).filter(Boolean));
+
   const months = new Map();
   (tm||[]).forEach(r => months.set(r.ym, { ym:r.ym, to:r }));
   (pm||[]).forEach(r => months.set(r.ym, { ...(months.get(r.ym)||{ym:r.ym}), pp:r }));
@@ -13395,15 +13477,27 @@ async function renderBaseMonths(){
   const rows = [...months.values()].sort((a,b) => b.ym.localeCompare(a.ym));
   if(!rows.length){ host.innerHTML = '<div class="hint">아직 적재된 데이터가 없습니다.</div>'; return; }
   const none = '<span class="hint">없음</span>';
-  host.innerHTML = `<div style="overflow-x:auto;"><table style="min-width:860px;"><thead><tr>
+  host.innerHTML = `
+    <div class="hint" style="margin-bottom:8px;">
+      회차에 <b>[원본 읽어 회차에 담기]</b> 를 한 달은 계산 결과가 회차에 저장돼 있어
+      원천을 지워도 됩니다. 원본 xlsx 는 로컬에 두시고, 필요하면 그 달만 다시 올리시면 됩니다.
+    </div>
+    <div style="overflow-x:auto;"><table style="min-width:980px;"><thead><tr>
       <th>월</th><th style="text-align:right;">Turn Over 행</th><th style="text-align:right;">부품 행</th>
       <th style="text-align:right;">부품가격 품번</th><th style="text-align:right;">Sales Report 행</th>
-      <th style="text-align:center;">ASAP</th><th>마지막 적재</th><th></th>
+      <th style="text-align:center;">ASAP</th><th>정리</th><th>마지막 적재</th><th></th>
     </tr></thead><tbody>
     ${rows.map(r => {
-      // ASAP 인센티브를 내려면 그 달에 Turn Over(64열 원본) 와 Sales Report 가 둘 다 있어야 한다
       const ok = !!r.to && !!r.sr;
       const last = [r.to?.loaded_at, r.pp?.loaded_at, r.sr?.loaded_at].filter(Boolean).sort().pop();
+      const using = needTO.get(r.ym) || [];
+      const ppUsed = r.pp && needPP.has(r.ym);
+      const free = r.to && !using.length;
+      const tag = using.length
+        ? `<span class="badge badge-warn">사용 중</span>
+           <div class="hint">${esc2(using.slice(0,2).join(', '))} 미스냅샷</div>`
+        : free ? '<span class="badge badge-ap">지워도 됨</span>'
+               : (ppUsed ? '<span class="badge badge-warn">부품가격 사용 중</span>' : '');
       return `<tr>
       <td><b>${r.ym.slice(0,4)}-${r.ym.slice(4)}</b></td>
       <td style="text-align:right;">${r.to ? Number(r.to.lines).toLocaleString('ko-KR') : none}</td>
@@ -13413,26 +13507,47 @@ async function renderBaseMonths(){
       <td style="text-align:center;">${ok
         ? '<span class="badge badge-ap">가능</span>'
         : `<span class="badge badge-off">${!r.to ? 'TO 없음' : 'SR 없음'}</span>`}</td>
+      <td>${tag}</td>
       <td class="muted">${last ? new Date(last).toLocaleDateString('ko-KR') : '—'}</td>
-      <td style="text-align:right;">
+      <td style="text-align:right; white-space:nowrap;">
         ${r.to ? `<button class="btn btn-danger btn-sm to-del" data-ym="${r.ym}">TO 삭제</button>` : ''}
+        ${r.pp ? `<button class="btn btn-danger btn-sm pp-del" data-ym="${r.ym}" style="margin-left:4px;">부품가격 삭제</button>` : ''}
         ${r.sr ? `<button class="btn btn-danger btn-sm sr-del" data-ym="${r.ym}" style="margin-left:4px;">SR 삭제</button>` : ''}
       </td></tr>`; }).join('')}</tbody></table></div>`;
+
   host.querySelectorAll('.to-del').forEach(b => b.onclick = async () => {
-    if(!confirm(`${b.dataset.ym} Turn Over 를 삭제합니다.\n이 달이 걸린 캠페인은 검증을 다시 돌려야 합니다. 계속할까요?`)) return;
+    const using = needTO.get(b.dataset.ym) || [];
+    if(!confirm(`${b.dataset.ym} Turn Over 를 삭제합니다.\n`
+      + (using.length
+          ? `\n⚠ 아직 회차에 담지 않은 회차가 있습니다: ${using.join(', ')}\n그 회차는 계산을 못 합니다.\n`
+          : '\n이 달을 쓰는 회차는 이미 라인을 담아둬서 영향이 없습니다.\n')
+      + '\n원본 xlsx 는 로컬에 있어야 합니다. 계속할까요?')) return;
     b.disabled = true;
     try{ await deleteMonthChunked('turnover_lines', b.dataset.ym, 'toProgress', 'Turn Over'); }
     catch(e){ alert(e.message); b.disabled = false; return; }
     await logAudit('TO_DELETE','BASE',null,{ label: b.dataset.ym });
-    await renderBaseMonths();
+    await renderBaseMonths(); await renderDbSize();
+  });
+  host.querySelectorAll('.pp-del').forEach(b => b.onclick = async () => {
+    const used = needPP.has(b.dataset.ym);
+    if(!confirm(`${b.dataset.ym} 부품가격 마스터를 삭제합니다.\n`
+      + (used ? '\n⚠ 이 달을 기준월로 쓰는 캠페인 검증 규칙이 있습니다.\n'
+              : '\n이 달을 기준월로 쓰는 캠페인 규칙이 없습니다.\n')
+      + '\n계속할까요?')) return;
+    b.disabled = true;
+    try{ await deleteMonthChunked('part_prices', b.dataset.ym, 'ppProgress', '부품가격'); }
+    catch(e){ alert(e.message); b.disabled = false; return; }
+    await logAudit('PP_DELETE','BASE',null,{ label: b.dataset.ym });
+    await renderBaseMonths(); await renderDbSize();
   });
   host.querySelectorAll('.sr-del').forEach(b => b.onclick = async () => {
-    if(!confirm(`${b.dataset.ym} Sales Report 를 삭제합니다.\n이 달이 걸린 ASAP 인센티브는 다시 계산해야 합니다. 계속할까요?`)) return;
+    if(!confirm(`${b.dataset.ym} Sales Report 를 삭제합니다.\n`
+      + '판매구분(전시장/서비스) 판정에 쓰입니다. 담지 않은 회차가 있으면 다시 계산해야 합니다.\n\n계속할까요?')) return;
     b.disabled = true;
     try{ await deleteMonthChunked('sales_report_lines', b.dataset.ym, 'srProgress', 'Sales Report'); }
     catch(e){ alert(e.message); b.disabled = false; return; }
     await logAudit('SR_DELETE','BASE',null,{ label: b.dataset.ym });
-    await renderBaseMonths();
+    await renderBaseMonths(); await renderDbSize();
   });
 }
 
@@ -13456,7 +13571,7 @@ document.getElementById('toLoadBtn')?.addEventListener('click', async () => {
       }
       await loadTurnoverFile(f, ym);
     }
-    await renderBaseMonths();
+    await renderBaseMonths(); await renderDbSize();
   }catch(e){
     baseProgress('toProgress', `<span style="color:var(--danger);">적재 실패: ${e.message || e}</span>`);
   }finally{ btn.disabled = false; }
@@ -13571,7 +13686,7 @@ document.getElementById('srLoadBtn')?.addEventListener('click', async () => {
       }
       await loadSalesReportFile(f, ym);
     }
-    await renderBaseMonths();
+    await renderBaseMonths(); await renderDbSize();
   }catch(e){
     baseProgress('srProgress', `<span style="color:var(--danger);">적재 실패: ${e.message || e}</span>`);
   }finally{ btn.disabled = false; }
@@ -13633,8 +13748,17 @@ async function insertRetry(table, rows, label){
   }
 }
 
+const MONTH_DEL_RPC = {
+  turnover_lines:     'turnover_delete_ym',
+  sales_report_lines: 'sales_report_delete_ym',
+  part_prices:        'part_prices_delete_ym',
+};
 async function deleteMonthChunked(table, ym, progressId, label){
-  const rpc = table === 'turnover_lines' ? 'turnover_delete_ym' : 'sales_report_delete_ym';
+  /* ⚠ 예전에는 turnover 가 아니면 전부 sales_report_delete_ym 으로 보냈다.
+     part_prices 를 지우라고 하면 엉뚱하게 Sales Report 가 지워진다.
+     표마다 함수를 명시한다. (2026-10-23) */
+  const rpc = MONTH_DEL_RPC[table];
+  if(!rpc) throw new Error(`${label}: 월 삭제 함수가 없습니다 (${table})`);
   let gone = 0;
   for(let i = 0; i < 400; i++){
     const { data, error } = await sb.rpc(rpc, { p_ym: ym, p_limit: 20000 });
@@ -13822,7 +13946,7 @@ document.getElementById('ppLoadBtn')?.addEventListener('click', async () => {
     await flush();
     P(`<b>${ym}</b> 부품가격 적재 완료 — ${sent.toLocaleString('ko-KR')}품번`);
     await logAudit('PP_LOAD','BASE',null,{ label:`${ym} · ${sent}품번` });
-    await renderBaseMonths();
+    await renderBaseMonths(); await renderDbSize();
   }catch(e){ P(`<span style="color:var(--danger);">적재 실패: ${e.message||e}</span>`); }
   finally{ btn.disabled = false; }
 });
