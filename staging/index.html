@@ -5088,9 +5088,11 @@ async function generateEngineOilVouchers(round, type){
       };
     }));
     const R = (n) => Math.round(n);
-    const per = sanitizeFilename(round.period_label);
     // 바우처 기준월 = 정산월 − 1 (2026-10 정산 = 9월 사용분 → 202609)
     const vper = eoVoucherPeriod(round);
+    // 파일명도 기준월로 간다. 월 회차가 아니면(분기 등) 기간 라벨을 그대로 쓴다.
+    const per = vper ? `${vper.ym.slice(0,4)}-${vper.ym.slice(4)}`
+                     : sanitizeFilename(round.period_label);
 
     // 프리셋에 해당하는 바우처를 개별 파일로 순차 다운로드
     const files = [];
@@ -5219,7 +5221,9 @@ async function generateEngineOilSpVoucher(round, type, s){
 
     setP('바우처 파일을 만드는 중...');
     const buffer = await buildVoucherFromTemplate(tplBuffer, { inputCells, coverCells, images: [], inputSheetName, coverSheetName });
-    const fname = `AR Voucher_${sanitizeFilename(round.period_label)}_Engine Oil Package_Sales payment.xlsx`;
+    const vp = eoVoucherPeriod(round);
+    const perAr = vp ? `${vp.ym.slice(0,4)}-${vp.ym.slice(4)}` : sanitizeFilename(round.period_label);
+    const fname = `AR Voucher_${perAr}_Engine Oil Package_Sales payment.xlsx`;
     const blob = new Blob([buffer], { type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a'); a.href = url; a.download = fname;
