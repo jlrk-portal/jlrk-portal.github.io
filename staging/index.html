@@ -1128,7 +1128,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 19:16';
+const BUILD = '10-23 19:20';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -15154,6 +15154,7 @@ async function renderAsapRetailerCard(listEl, round, items){
       <div class="hint">내역을 불러오는 중입니다...</div></div></div>`;
   listEl.appendChild(card);
 
+  await asapLoadNames();
   const [lineRes, reqRes] = await Promise.all([
     sb.rpc('asap_my_lines', { p_round: round.id }),
     sb.from('asap_line_requests').select('*').eq('round_id', round.id)
@@ -15171,7 +15172,10 @@ async function renderAsapRetailerCard(listEl, round, items){
   const reqs = new Map((reqRes.data || []).map(r => [r.line_id + '|' + r.kind, r]));
 
   const isOut  = (x) => !!x.hard_excluded || x.decision === 'EXCLUDE';
-  const live   = all.filter(x => !isOut(x));
+  // +/- 가 맞물려 서로 지워진 라인은 금액이 0원이라 화면에서는 뺀다.
+  // 담당자가 '6건 0원' 으로 뜨면 보기만 어렵다. 엑셀에는 그대로 들어간다.
+  const live   = all.filter(x => !isOut(x) && !x.net_zero);
+  const nz     = all.filter(x => !isOut(x) &&  x.net_zero);
   const outs   = all.filter(isOut);
   const due    = round.confirm_due_at ? new Date(round.confirm_due_at) : null;
   const over   = due && due < new Date();
@@ -15344,7 +15348,7 @@ async function renderAsapRetailerCard(listEl, round, items){
         <div style="border:1px solid var(--surface3); border-radius:6px; margin-top:8px; overflow:hidden;">
           <div style="display:flex; gap:10px; align-items:center; padding:7px 10px;
                background:var(--surface2); font-size:12.5px; font-weight:600;">
-            <span>${esc2(branch)}</span><span class="hint">${people.length}명</span>
+            <span>${esc2(asapBranchLabel(tab, branch))}</span><span class="hint">${people.length}명</span>
             <span style="margin-left:auto;">${people.flatMap(p=>p[1]).length.toLocaleString('ko-KR')}건 ·
               ${won(tot(people.flatMap(p=>p[1])))}</span></div>
           <table class="as-sub"><thead><tr><th>담당자</th>
@@ -15394,6 +15398,9 @@ async function renderAsapRetailerCard(listEl, round, items){
                 </td></tr>${formRow(x, 'APPEAL', 7)}`).join('')}
             </tbody></table></div>`).join('')}` : ''}
 
+      ${nz.length ? `<div class="hint" style="margin-top:12px;">
+        같은 품번에서 <b>+/- 가 맞물려 서로 지워진 라인 ${nz.length}건</b>은 금액이 0원이라
+        위 목록에서 뺐습니다. 내려받으시는 엑셀에는 그대로 들어 있습니다.</div>` : ''}
       <div class="hint" id="asRtMsg" style="margin-top:10px;"></div>`;
 
     const $ = (q) => card.querySelector(q);
