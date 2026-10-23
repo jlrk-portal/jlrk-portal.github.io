@@ -1092,7 +1092,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 13:22';
+const BUILD = '10-23 13:26';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -11914,7 +11914,8 @@ const SR_CHUNK = 1000;
 async function loadSalesReportFile(file, ym){
   const P = h => baseProgress('srProgress', h);
   P(`<b>${ym}</b> · ${file.name} 읽는 중...`);
-  const wb = xsFixBook(XLSX.read(await file.arrayBuffer(), { type:'array', cellDates:true }));
+  // 날짜는 숫자 그대로 받는다 (Turn Over 와 같은 이유 — 위 주석 참고)
+  const wb = xsFixBook(XLSX.read(await file.arrayBuffer(), { type:'array' }));
   // 'Retail' 시트. 이름이 조금 달라도 찾아낸다 (Wholesale 과 헷갈리면 안 된다).
   const name = wb.SheetNames.find(n => n.replace(/\s/g,'').toLowerCase() === 'retail')
             || wb.SheetNames.find(n => /retail/i.test(n) && !/whole/i.test(n));
@@ -12080,7 +12081,11 @@ async function deleteMonthChunked(table, ym, progressId, label){
 async function loadTurnoverFile(file, ym){
   const P = h => baseProgress('toProgress', h);
   P(`<b>${ym}</b> · ${file.name} 읽는 중...`);
-  const wb = xsFixBook(XLSX.read(await file.arrayBuffer(), { type:'array', cellDates:true }));
+  /* cellDates 를 쓰지 않는다. 엑셀은 날짜를 '1900-01-01 부터 며칠째' 라는
+     숫자로 담는데(2026-07-21 = 46224), 라이브러리가 이걸 '날짜+시각' 으로
+     바꿀 때 오차가 생겨 '7/20 23:59:08' 처럼 돌려준다. 날짜만 떼면 하루 전이다.
+     인보이스일에 시각은 애초에 없다 — 숫자 그대로 받아 xlDate 가 환산한다. */
+  const wb = xsFixBook(XLSX.read(await file.arrayBuffer(), { type:'array' }));
   const ws = wb.Sheets[wb.SheetNames[0]];
   const aoa = XLSX.utils.sheet_to_json(ws, { header:1, raw:true, defval:null });
   if(aoa.length < 2) throw new Error('빈 파일입니다.');
@@ -12115,7 +12120,7 @@ async function loadTurnoverFile(file, ym){
       const raw = aoa[i]?.[col.inv_date];
       if(raw === null || raw === undefined || raw === '') continue;
       dateProbe = ` · 인보이스완료일 첫 값 <b>${xlDate(raw)}</b>`
-        + ` <span class="hint">(원본 ${raw instanceof Date
+        + ` <span class="hint">(엑셀 원값 ${raw instanceof Date
             ? raw.toLocaleDateString('ko-KR') : String(raw).slice(0,24)})</span>`;
       break;
     }
