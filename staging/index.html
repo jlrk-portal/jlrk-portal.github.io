@@ -1092,7 +1092,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 12:55';
+const BUILD = '10-23 12:59';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -11976,6 +11976,8 @@ function ymFromSrName(name){
 /* 타임아웃이 나면 묶음을 반으로 줄여 다시 보낸다. 중간에 죽으면
    그 달이 반만 들어간 채로 남아 더 나쁘다. (2026-10-23) */
 /* 겹치면 건너뛸 때 집을 열. 045 의 유니크 조합 그대로다 (058). */
+const sentHint = (n) => `${n.toLocaleString('ko-KR')}행까지 보냄`;
+
 const DEDUP_COLS = {
   // ⚠ 인보이스완료일·원가합계·수량까지 넣어야 한다. 그게 빠지면 취소/정정 쌍
   //    (금액 부호만 다른 두 줄)이 같은 줄로 보여 한쪽이 지워진다. (061)
@@ -11989,10 +11991,24 @@ async function insertRetry(table, rows, label){
     const slice = rows.slice(at, at + size);
     // 같은 정산라인이 여러 달 파일에 겹쳐 들어온다 — 겹치면 건너뛴다.
     // (그냥 insert 하면 겹치는 줄 하나에 묶음 전체가 터진다)
-    const { error } = await sb.from(table)
-      .upsert(slice, { onConflict: DEDUP_COLS[table], ignoreDuplicates: true });
+    let error = null;
+    // 망이 잠깐 끊기면 'TypeError: Failed to fetch' 가 난다. 몇 번 다시 보낸다.
+    for(let tryNo = 1; tryNo <= 4; tryNo++){
+      try{
+        const r = await sb.from(table)
+          .upsert(slice, { onConflict: DEDUP_COLS[table], ignoreDuplicates: true });
+        error = r.error;
+      }catch(e){ error = e; }
+      if(!error || !/Failed to fetch|NetworkError|network|load failed/i.test(error.message || '')) break;
+      await new Promise(r => setTimeout(r, 800 * tryNo));
+      error = Object.assign(new Error(error.message), { _net: true });
+    }
     if(!error){ at += slice.length; continue; }
     const msg = error.message || '';
+    if(/Failed to fetch|NetworkError|network|load failed/i.test(msg)){
+      throw new Error(`${label} 적재 실패 — 네트워크가 끊겼습니다 (${sentHint(at)}). `
+        + '잠시 뒤 같은 파일을 다시 올려주세요. 이미 들어간 부분은 다시 올려도 중복되지 않습니다.');
+    }
     if(/timeout|57014|canceling statement/i.test(msg) && size > 125){
       size = Math.floor(size / 2); continue;
     }
@@ -12057,7 +12073,21 @@ async function loadTurnoverFile(file, ym){
   }
 
   const total = aoa.length - hi - 1;
-  P(`<b>${ym}</b> · ${total.toLocaleString('ko-KR')}행 확인. 기존 ${ym} 데이터를 지우는 중...`);
+
+  /* 읽어낸 날짜를 눈으로 확인할 수 있게 찍는다. 날짜가 하루 밀려 들어간
+     적이 있어, 넣기 전에 보이는 편이 낫다. (2026-10-23) */
+  let dateProbe = '';
+  if(col.inv_date !== undefined){
+    for(let i = hi + 1; i < Math.min(hi + 400, aoa.length); i++){
+      const raw = aoa[i]?.[col.inv_date];
+      if(raw === null || raw === undefined || raw === '') continue;
+      dateProbe = ` · 인보이스완료일 첫 값 <b>${xlDate(raw)}</b>`
+        + ` <span class="hint">(원본 ${raw instanceof Date
+            ? raw.toLocaleDateString('ko-KR') : String(raw).slice(0,24)})</span>`;
+      break;
+    }
+  }
+  P(`<b>${ym}</b> · ${total.toLocaleString('ko-KR')}행 확인${dateProbe}. 기존 ${ym} 데이터를 지우는 중...`);
   await deleteMonthChunked('turnover_lines', ym, 'toProgress', 'Turn Over');
 
   let sent = 0, batch = [];
