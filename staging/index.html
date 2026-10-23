@@ -1128,7 +1128,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 19:07';
+const BUILD = '10-23 19:16';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -9704,6 +9704,129 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
   draw();
 }
 
+/* 리테일러가 올린 판매자 정정 · 이의신청 — 매니저가 받거나 반려한다.
+   받으면 asap_line_overrides 에 쌓여 asap_lines 가 그걸로 다시 계산한다.
+   턴오버 원본은 건드리지 않는다. (매니저 지시 2026-10-23) */
+async function renderAsapRequestCard(round, host, onChanged){
+  const box = document.createElement('div');
+  box.className = 'info-card';
+  host.appendChild(box);
+  const RQ = { SELLER:'판매자 정정', APPEAL:'이의신청' };
+
+  const draw = async () => {
+    const { data, error } = await sb.from('asap_requests_admin')
+      .select('*').eq('round_id', round.id).order('created_at');
+    if(error){
+      box.innerHTML = `<div class="hint" style="color:var(--danger);">리테일러 신청을 불러오지 못했습니다: ${esc2(error.message)}</div>`;
+      return;
+    }
+    const rows = data || [];
+    const open = rows.filter(r => r.status === 'OPEN');
+    if(!rows.length){ box.style.display = 'none'; return; }
+    box.style.display = '';
+    const S = { OPEN:['badge-warn','검토 대기'], ACCEPTED:['badge-ap','반영함'], REJECTED:['badge-danger','반려'] };
+
+    box.innerHTML = `
+      <div class="section-label" style="margin-top:0;">리테일러 신청 ${rows.length}건
+        ${open.length ? `<span class="badge badge-warn" style="margin-left:6px;">검토 대기 ${open.length}</span>` : ''}</div>
+      <div class="hint" style="margin-bottom:8px;">
+        <b>판매자 정정</b>을 받으면 그 라인의 구분·지점·담당자가 바뀌어 다시 계산됩니다 (턴오버 원본은 그대로).
+        <b>이의신청</b>을 받으면 제외를 풀어 정산에 넣습니다. 반려하실 때는 사유를 적어주세요 — 리테일러 화면에 그대로 보입니다.
+      </div>
+      <div style="overflow-x:auto;"><table style="min-width:1100px;"><thead><tr>
+        <th>상태</th><th>종류</th><th>리테일러</th><th>차대번호</th><th>품번</th><th>품명</th>
+        <th style="text-align:right;">원가합계</th><th>신청 내용</th><th style="width:180px;"></th>
+      </tr></thead><tbody>
+        ${rows.map(r => `<tr data-rq="${r.id}">
+          <td><span class="badge ${S[r.status][0]}">${S[r.status][1]}</span></td>
+          <td style="white-space:nowrap;">${RQ[r.kind] || r.kind}</td>
+          <td style="white-space:nowrap;">${esc2(r.retailer_code || '')}</td>
+          <td style="font-variant-numeric:tabular-nums; white-space:nowrap;">${esc2(r.vin || '')}</td>
+          <td style="white-space:nowrap;">${esc2(r.part_no || '')}</td>
+          <td>${esc2(r.part_name || '')}</td>
+          <td style="text-align:right; white-space:nowrap;">${fmtWon(Number(r.cost_sum || 0))}</td>
+          <td class="hint">${r.kind === 'SELLER'
+              ? `현재 ${esc2(r.workshop || r.sa || '—')} → <b>${esc2(
+                  (r.new_scope === 'SALES' ? '전시장 ' : '서비스 ') + (r.new_branch || '') + ' · ' + (r.new_person || ''))}</b>`
+              : ''}${r.reason ? `<div>${esc2(r.reason)}</div>` : ''}
+            ${r.admin_note ? `<div style="color:var(--danger);">반려 — ${esc2(r.admin_note)}</div>` : ''}</td>
+          <td style="text-align:right; white-space:nowrap;">
+            ${r.status === 'OPEN'
+              ? `<button class="btn btn-sm btn-ok" data-act="ok" data-id="${r.id}">받기</button>
+                 <button class="btn btn-sm btn-danger" data-act="no" data-id="${r.id}">반려</button>`
+              : `<button class="btn btn-sm btn-ghost" data-act="undo" data-id="${r.id}">되돌리기</button>`}
+          </td></tr>`).join('')}
+      </tbody></table></div>
+      <div class="hint" id="asRqMsg" style="margin-top:6px;"></div>
+      ${open.length ? '' : '<div class="hint">대기 중인 신청이 없습니다.</div>'}`;
+
+    const say = (m, bad) => { const el = box.querySelector('#asRqMsg');
+      el.textContent = m; el.style.color = bad ? 'var(--danger)' : 'var(--muted)'; };
+
+    box.querySelectorAll('[data-act]').forEach(b => b.onclick = async () => {
+      const id = +b.dataset.id, r = rows.find(x => x.id === id);
+      const { data: { user } } = await sb.auth.getUser();
+      b.disabled = true;
+      try{
+        if(b.dataset.act === 'ok'){
+          if(r.kind === 'SELLER'){
+            const { error } = await sb.from('asap_line_overrides').upsert({
+              round_id: round.id, line_id: r.line_id, new_scope: r.new_scope,
+              new_branch: r.new_branch, new_person: r.new_person,
+              source_req: r.id, note: r.reason || null, created_by: user?.id || null },
+              { onConflict:'round_id,line_id' });
+            if(error) throw error;
+          }else{
+            // 이의신청을 받으면 제외를 푼다
+            const { error } = await sb.from('asap_line_decisions').delete()
+              .eq('round_id', round.id).eq('line_id', r.line_id);
+            if(error) throw error;
+          }
+          const { error: e2 } = await sb.from('asap_line_requests')
+            .update({ status:'ACCEPTED', admin_note: null,
+                      resolved_at: new Date().toISOString(), resolved_by: user?.id || null })
+            .eq('id', id).select('id');
+          if(e2) throw e2;
+          await logAudit('ASAP_REQ_ACCEPT','ROUND', round.id,
+            { label: `${RQ[r.kind]} · ${r.retailer_code} · ${r.vin}` });
+          say('받았습니다. [계산하기] 를 다시 누르면 금액에 반영됩니다.');
+        }else if(b.dataset.act === 'no'){
+          const note = (box.querySelector('#rqNote_' + id)?.value || '').trim();
+          if(!note){
+            b.disabled = false;
+            b.insertAdjacentHTML('beforebegin',
+              `<input id="rqNote_${id}" placeholder="반려 사유 (리테일러에게 보입니다)"
+                      style="padding:4px 6px; margin-right:4px; min-width:200px;">`);
+            say('반려 사유를 적고 [반려] 를 한 번 더 눌러주세요.', true);
+            return;
+          }
+          const { error } = await sb.from('asap_line_requests')
+            .update({ status:'REJECTED', admin_note: note,
+                      resolved_at: new Date().toISOString(), resolved_by: user?.id || null })
+            .eq('id', id).select('id');
+          if(error) throw error;
+          await logAudit('ASAP_REQ_REJECT','ROUND', round.id,
+            { label: `${RQ[r.kind]} · ${r.retailer_code} · ${note}` });
+          say('반려했습니다.');
+        }else{
+          if(r.kind === 'SELLER'){
+            await sb.from('asap_line_overrides').delete()
+              .eq('round_id', round.id).eq('line_id', r.line_id);
+          }
+          const { error } = await sb.from('asap_line_requests')
+            .update({ status:'OPEN', admin_note: null, resolved_at: null, resolved_by: null })
+            .eq('id', id).select('id');
+          if(error) throw error;
+          say('검토 대기로 되돌렸습니다.');
+        }
+      }catch(e){ b.disabled = false; say('실패: ' + (e.message || e), true); return; }
+      await draw();
+      onChanged && onChanged();
+    });
+  };
+  await draw();
+}
+
 async function renderAsapRoundDetail(round, type){
   document.getElementById('claimsTable').style.display = 'none';
   document.getElementById('rd_title').textContent = `${type.name} · ${round.period_label}`;
@@ -9732,6 +9855,12 @@ async function renderAsapRoundDetail(round, type){
     host.appendChild(panel);
     eoBindConfirm(round, type, claims || [], panel);
   }
+
+  // ── 리테일러가 올린 신청 (판매자 정정 · 이의신청) — 있으면 먼저 본다
+  await renderAsapRequestCard(round, host, () => {
+    const b = document.getElementById('asCalc');
+    if(b){ b.textContent = '다시 계산하기'; b.classList.remove('btn-ghost'); }
+  });
 
   // ── 지원 이력 (전시차 · 프로모션) — 엑셀로 올린다
   await renderAsapSupportCard(round, host);
@@ -12176,7 +12305,14 @@ async function loadRetailerClaims(){
       await renderPndRetailerCard(listEl, round, items);
       continue;
     }
-    // 관리자 선업로드 유형(ASAP Incentive 등) — 확인 / 수정본 회신 카드
+    // ASAP Incentive — 라인까지 보고, 판매자 정정·이의신청을 올리는 카드.
+    // ⚠ isAdminUploadType 보다 먼저. 아래로 떨어지면 '제출됨 / 산정 파일'
+    //    같은 수기정산 화면이 떠서 아무것도 못 한다. (매니저 지적 2026-10-23)
+    if(isAsapIncentive(round.settlement_types)){
+      await renderAsapRetailerCard(listEl, round, items);
+      continue;
+    }
+    // 관리자 선업로드 유형 — 확인 / 수정본 회신 카드
     if(isAdminUploadType(round.settlement_types)){
       await renderAdminUploadRetailerCard(listEl, round, items);
       continue;
@@ -14995,6 +15131,338 @@ const SELLER_REQ_BADGE = {
   APPROVED : '<span class="badge badge-ap">수정 반영됨</span>',
   REJECTED : '<span class="badge badge-off">요청 반려</span>',
 };
+
+/* ================================================================
+   ASAP Incentive — 리테일러 화면
+   매니저 지시(2026-10-23): "리테일러에서는 내가 계산한 내역을 하나씩
+   볼수있게, 지점별, 전시장, 서비스별, 직원별로 볼수있게 하고, 엑셀파일로
+   내려받아서 턴오버리포트 기준 필드는 당연히 들어가야하고 인센티브
+   계산된 금액을 확인할수있어야하고, 만약에 실제판매자가 다른 경우 실제
+   판매자를 입력할 수 있게 ... 내가 제외시킨걸 사유를 적어서 이의신청을
+   할수있게도 해야해"
+   라인은 asap_my_lines() 로 받는다 — DB 가 my_retailer() 로 잘라 준다.
+   ================================================================ */
+const ASAP_RQ = { SELLER:'판매자 정정', APPEAL:'이의신청' };
+
+async function renderAsapRetailerCard(listEl, round, items){
+  const c = items[0];
+  const won = (n) => fmtWon(Math.round(Number(n) || 0));
+  const card = document.createElement('div');
+  card.className = 'claim-card';
+  card.innerHTML = `<div class="claim-head"><div>
+      <div class="claim-name">${esc2(round.settlement_types?.name || 'ASAP Incentive')} · ${esc2(round.period_label)}</div>
+      <div class="hint">내역을 불러오는 중입니다...</div></div></div>`;
+  listEl.appendChild(card);
+
+  const [lineRes, reqRes] = await Promise.all([
+    sb.rpc('asap_my_lines', { p_round: round.id }),
+    sb.from('asap_line_requests').select('*').eq('round_id', round.id)
+  ]);
+  if(lineRes.error){
+    card.innerHTML = `<div class="claim-head"><div>
+      <div class="claim-name">${esc2(round.settlement_types?.name||'')} · ${esc2(round.period_label)}</div>
+      <div class="hint" style="color:var(--danger);">내역을 불러오지 못했습니다 — ${esc2(lineRes.error.message)}</div>
+      </div></div>`;
+    return;
+  }
+  const all = (lineRes.data || []).map(x => ({ ...x,
+    cost_sum: Number(x.cost_sum) || 0, rate: Number(x.rate) || 0,
+    incentive: Number(x.incentive) || 0, flags: x.flags || [] }));
+  const reqs = new Map((reqRes.data || []).map(r => [r.line_id + '|' + r.kind, r]));
+
+  const isOut  = (x) => !!x.hard_excluded || x.decision === 'EXCLUDE';
+  const live   = all.filter(x => !isOut(x));
+  const outs   = all.filter(isOut);
+  const due    = round.confirm_due_at ? new Date(round.confirm_due_at) : null;
+  const over   = due && due < new Date();
+  const openRq = () => [...reqs.values()].filter(r => r.status === 'OPEN');
+
+  let tab = 'SALES', openPerson = null, form = null;   // form: {lineId, kind}
+
+  const tot = (rows, f) => rows.reduce((a, x) => a + (f ? f(x) : x.incentive), 0);
+  const sales   = live.filter(x => x.scope === 'SALES');
+  const service = live.filter(x => x.scope === 'SERVICE');
+
+  /* ── 엑셀 — 턴오버 원본 필드 + 계산 결과. 제외된 라인도 사유와 같이 넣는다 */
+  const TO_COLS = [
+    ['적재월','ym'], ['RO번호','ro_no'], ['서비스타입','svc_type'], ['차량입고일','in_date'],
+    ['RO발행일','ro_date'], ['정산번호','stl_no'], ['정산라인번호','stl_line'],
+    ['청구유형','claim_type'], ['청구계정','claim_acct'], ['인보이스번호','inv_no'],
+    ['인보이스상태','inv_status'], ['인보이스완료일','inv_date'], ['품목유형','item_type'],
+    ['부품그룹','part_group'], ['품목코드','part_no'], ['품목명','part_name'],
+    ['품목수량','qty'], ['품목소매가','retail'], ['품목소매가합계','retail_sum'],
+    ['품목판매단가합계','sale_sum'], ['품목원가','cost'], ['품목원가합계','cost_sum'],
+    ['분할율','split'], ['할인코드','disc_code'], ['차대번호','vin'], ['차량등록일','reg_date'],
+    ['브랜드','brand'], ['모델','model'], ['시리즈','series'], ['AS딜러','dealer'],
+    ['AS지점','workshop'], ['담당SA','sa'], ['작업자','tech'], ['고객명','customer'],
+  ];
+  const downloadXlsx = () => {
+    const rows = all.map(x => {
+      const o = {};
+      TO_COLS.forEach(([k, f]) => { o[k] = x[f] ?? ''; });
+      o['구분']       = x.scope === 'SALES' ? '전시장' : '서비스';
+      o['지점/전시장'] = x.branch || '';
+      o['담당자']      = x.person || '';
+      o['모델코드']    = x.model_code || '';
+      o['요율']        = x.rate;
+      o['인센티브']    = x.incentive;
+      o['정산여부']    = isOut(x) ? '제외' : '정산';
+      o['제외 사유']   = x.hard_excluded || (x.decision === 'EXCLUDE' ? (x.decision_reason || '제외') : '');
+      o['검토 사유']   = (x.flags || []).join(' · ');
+      o['상계']        = x.net_zero ? 'O' : '';
+      return o;
+    });
+    const head = [...TO_COLS.map(([k]) => k), '구분','지점/전시장','담당자','모델코드',
+                  '요율','인센티브','정산여부','제외 사유','검토 사유','상계'];
+    const ws = XLSX.utils.json_to_sheet(rows, { header: head });
+    ws['!cols'] = head.map(h => ({ wch: Math.min(28, Math.max(10, h.length * 2 + 4)) }));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, '정산내역');
+    const sum = [
+      { 구분:'전시장 (Sales)',  건수: sales.length,   인센티브: tot(sales) },
+      { 구분:'서비스 (Service)', 건수: service.length, 인센티브: tot(service) },
+      { 구분:'정산 합계',        건수: live.length,    인센티브: tot(live) },
+      { 구분:'제외',             건수: outs.length,    인센티브: tot(outs) },
+    ];
+    XLSX.utils.book_append_sheet(wb,
+      XLSX.utils.json_to_sheet(sum, { header:['구분','건수','인센티브'] }), '요약');
+    XLSX.writeFile(wb, `ASAP_Incentive_${String(round.period_label).replace(/\s/g,'')}_정산내역.xlsx`);
+  };
+
+  /* ── 지점 → 직원 → 라인 */
+  const tree = (rows) => {
+    const byBranch = new Map();
+    rows.forEach(x => { const b = x.branch || '(미기재)';
+      if(!byBranch.has(b)) byBranch.set(b, new Map());
+      const p = x.person || '(미기재)';
+      const m = byBranch.get(b);
+      if(!m.has(p)) m.set(p, []);
+      m.get(p).push(x); });
+    return [...byBranch.entries()]
+      .map(([b, m]) => [b, [...m.entries()].sort((a, z) => tot(z[1]) - tot(a[1]))])
+      .sort((a, z) => tot(z[1].flatMap(p => p[1])) - tot(a[1].flatMap(p => p[1])));
+  };
+
+  const rqBadge = (lineId, kind) => {
+    const r = reqs.get(lineId + '|' + kind);
+    if(!r) return '';
+    const txt = { OPEN:'신청 접수됨', ACCEPTED:'반영됨', REJECTED:'반려' }[r.status] || r.status;
+    const cls = { OPEN:'badge-warn', ACCEPTED:'badge-ap', REJECTED:'badge-danger' }[r.status] || 'badge-off';
+    return `<span class="badge ${cls}">${ASAP_RQ[kind]} ${txt}</span>`
+      + (r.status === 'REJECTED' && r.admin_note ? `<div class="hint">${esc2(r.admin_note)}</div>` : '');
+  };
+
+  const formRow = (x, kind, cols) => {
+    if(!form || form.lineId !== x.line_id || form.kind !== kind) return '';
+    const cur = reqs.get(x.line_id + '|' + kind);
+    return `<tr><td colspan="${cols}" style="background:var(--surface2);">
+      <div style="display:flex; gap:6px; flex-wrap:wrap; align-items:center; padding:4px 0;">
+        ${kind === 'SELLER' ? `
+          <select id="rqScope" style="padding:5px 7px;">
+            <option value="SALES" ${(cur?.new_scope||x.scope)==='SALES'?'selected':''}>전시장 (Sales)</option>
+            <option value="SERVICE" ${(cur?.new_scope||x.scope)==='SERVICE'?'selected':''}>서비스 (Service)</option>
+          </select>
+          <input id="rqBranch" placeholder="실제 전시장/지점" value="${esc2(cur?.new_branch || '')}"
+                 style="padding:5px 7px; min-width:150px;">
+          <input id="rqPerson" placeholder="실제 담당자 이름" value="${esc2(cur?.new_person || '')}"
+                 style="padding:5px 7px; min-width:130px;">` : ''}
+        <input id="rqReason" placeholder="${kind==='SELLER'?'사유 (선택)':'이의신청 사유 — 꼭 적어주세요'}"
+               value="${esc2(cur?.reason || '')}" style="padding:5px 7px; flex:1; min-width:200px;">
+        <button class="btn btn-sm" data-rq="save">보내기</button>
+        <button class="btn btn-sm btn-ghost" data-rq="cancel">취소</button>
+        ${cur ? `<button class="btn btn-sm btn-ghost" data-rq="drop">신청 취소</button>` : ''}
+      </div></td></tr>`;
+  };
+
+  const lineRows = (rows) => rows.map(x => `
+    <tr data-line="${x.line_id}">
+      <td style="white-space:nowrap;">${esc2(x.inv_date || '')}</td>
+      <td style="white-space:nowrap;">${esc2(x.part_no || '')}</td>
+      <td>${esc2(x.part_name || '')}</td>
+      <td style="font-variant-numeric:tabular-nums; white-space:nowrap;">${esc2(x.vin || '')}</td>
+      <td style="text-align:right; white-space:nowrap;">${won(x.cost_sum)}</td>
+      <td style="text-align:right;">${(x.rate*100).toFixed(0)}%</td>
+      <td style="text-align:right; white-space:nowrap;"><b>${won(x.incentive)}</b></td>
+      <td style="text-align:right; white-space:nowrap;">
+        ${reqs.has(x.line_id + '|SELLER') ? rqBadge(x.line_id, 'SELLER')
+          : `<button class="btn btn-sm btn-ghost" data-seller="${x.line_id}">실제 판매자 다름</button>`}
+      </td></tr>${formRow(x, 'SELLER', 8)}`).join('');
+
+  const draw = () => {
+    const rows = tab === 'SALES' ? sales : service;
+    const t = tree(rows);
+    const canConfirm = round.status === 'PUBLISHED' && !c.confirmed_at && !openRq().length;
+    const outByWhy = new Map();
+    outs.forEach(x => { const k = x.hard_excluded || x.decision_reason || '제외';
+      if(!outByWhy.has(k)) outByWhy.set(k, []); outByWhy.get(k).push(x); });
+
+    card.innerHTML = `
+      <div class="claim-head">
+        <div>
+          <div class="claim-name">${esc2(round.settlement_types?.name || 'ASAP Incentive')} · ${esc2(round.period_label)}</div>
+          <div class="hint">JLR Korea 가 Turn Over 로 산출한 내역입니다 — 확인하시고, 다른 점이 있으면 알려주세요
+            <span class="badge badge-ap" style="margin-left:4px;">공지됨</span></div>
+          <div class="hint">${due ? `확정 기한 <b${over?' style="color:var(--danger);"':''}>${due.toLocaleString('ko-KR')}</b>${over?' (지났습니다)':''}`
+                                  : '확정 기한 미설정'}</div>
+        </div>
+        <div>${c.confirmed_at
+          ? '<span class="badge badge-ap">확정완료</span>'
+          : '<span class="badge badge-warn">확인 필요</span>'}</div>
+      </div>
+
+      <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;
+                  background:var(--surface2); border-radius:6px; padding:10px 12px; margin-bottom:10px;">
+        ${[['대상 건수', live.length.toLocaleString('ko-KR')+'건'],
+           ['전시장 (Sales)', won(tot(sales))],
+           ['서비스 (Service)', won(tot(service))],
+           ['정산 금액', won(Number(c.approved_amount || 0))]]
+          .map(([k,v],i) => `<div><div class="hint">${k}</div>
+            <div style="font-size:${i===3?'17px':'14px'}; font-weight:${i===3?'700':'600'};
+                 ${i===3?'color:var(--accent);':''}">${v}</div></div>`).join('')}
+        <div style="margin-left:auto; display:flex; gap:6px;">
+          <button class="btn btn-sm btn-ghost" id="asRtXlsx">엑셀 다운로드</button>
+          ${canConfirm ? '<button class="btn btn-sm" id="asRtConfirm">이대로 확인</button>' : ''}
+        </div>
+      </div>
+      ${Number(c.approved_amount||0) !== Math.ceil(tot(live)/10000)*10000 ? `<div class="hint"
+        style="margin:-4px 0 10px;">정산 금액은 담당자별로 만원 단위 올림하여 합산한 금액입니다.</div>` : ''}
+
+      ${openRq().length ? `<div class="info-card" style="border-color:#e0b050; background:#fff8ec; margin-bottom:10px;">
+        <b>보내신 신청 ${openRq().length}건을 JLR Korea 가 검토 중입니다.</b>
+        <div class="hint" style="margin-top:4px;">
+          ${[...new Set(openRq().map(r => ASAP_RQ[r.kind]))].join(' · ')} ·
+          검토가 끝나면 확인하실 수 있습니다.</div></div>` : ''}
+
+      <div class="action-row" style="margin-top:0;">
+        <button class="btn btn-sm ${tab==='SALES'?'':'btn-ghost'}" data-tab="SALES">전시장 (Sales) ${sales.length}건</button>
+        <button class="btn btn-sm ${tab==='SERVICE'?'':'btn-ghost'}" data-tab="SERVICE">서비스 (Service) ${service.length}건</button>
+        <span class="hint" style="align-self:center; margin-left:auto;">
+          담당자를 누르면 품목까지 펼쳐집니다</span>
+      </div>
+
+      ${t.length ? t.map(([branch, people]) => `
+        <div style="border:1px solid var(--surface3); border-radius:6px; margin-top:8px; overflow:hidden;">
+          <div style="display:flex; gap:10px; align-items:center; padding:7px 10px;
+               background:var(--surface2); font-size:12.5px; font-weight:600;">
+            <span>${esc2(branch)}</span><span class="hint">${people.length}명</span>
+            <span style="margin-left:auto;">${people.flatMap(p=>p[1]).length.toLocaleString('ko-KR')}건 ·
+              ${won(tot(people.flatMap(p=>p[1])))}</span></div>
+          <table class="as-sub"><thead><tr><th>담당자</th>
+            <th style="text-align:right;">건수</th><th style="text-align:right;">원가합계</th>
+            <th style="text-align:right;">인센티브</th><th style="width:70px;"></th></tr></thead><tbody>
+            ${people.map(([person, ls]) => {
+              const key = tab + '|' + branch + '|' + person;
+              const open = openPerson === key;
+              return `<tr data-person="${esc2(key)}" style="cursor:pointer;">
+                <td>${open?'▾':'▸'} ${esc2(person)}</td>
+                <td style="text-align:right;">${ls.length.toLocaleString('ko-KR')}</td>
+                <td style="text-align:right;">${won(tot(ls, x=>x.cost_sum))}</td>
+                <td style="text-align:right;"><b>${won(tot(ls))}</b></td>
+                <td style="text-align:right;" class="hint">${open?'접기':'펼치기'}</td></tr>
+              ${open ? `<tr><td colspan="5" style="padding:0;">
+                <table class="as-sub" style="margin:0;"><thead><tr>
+                  <th>인보이스완료일</th><th>품번</th><th>품명</th><th>차대번호</th>
+                  <th style="text-align:right;">원가합계</th><th style="text-align:right;">요율</th>
+                  <th style="text-align:right;">인센티브</th><th style="width:150px;"></th>
+                </tr></thead><tbody>${lineRows(ls)}</tbody></table></td></tr>` : ''}`;
+            }).join('')}
+          </tbody></table></div>`).join('')
+        : '<div class="hint" style="margin-top:8px;">해당 내역이 없습니다.</div>'}
+
+      ${outs.length ? `
+        <div class="section-label" style="margin-top:16px;">정산에서 빠진 내역 ${outs.length}건
+          <span class="hint" style="text-transform:none; letter-spacing:0; margin-left:6px;">
+            맞지 않다고 보시면 사유를 적어 이의신청해주세요</span></div>
+        ${[...outByWhy.entries()].map(([why, ls]) => `
+          <div style="border:1px solid var(--surface3); border-radius:6px; margin-top:8px; overflow:hidden;">
+            <div style="padding:7px 10px; background:var(--surface2); font-size:12.5px; font-weight:600;">
+              ${esc2(why)} <span class="hint">${ls.length}건 · ${won(tot(ls))}</span></div>
+            <table class="as-sub"><thead><tr>
+              <th>인보이스완료일</th><th>품번</th><th>품명</th><th>차대번호</th>
+              <th style="text-align:right;">원가합계</th><th style="text-align:right;">인센티브</th>
+              <th style="width:150px;"></th></tr></thead><tbody>
+              ${ls.map(x => `<tr>
+                <td style="white-space:nowrap;">${esc2(x.inv_date||'')}</td>
+                <td style="white-space:nowrap;">${esc2(x.part_no||'')}</td>
+                <td>${esc2(x.part_name||'')}</td>
+                <td style="font-variant-numeric:tabular-nums; white-space:nowrap;">${esc2(x.vin||'')}</td>
+                <td style="text-align:right; white-space:nowrap;">${won(x.cost_sum)}</td>
+                <td style="text-align:right; white-space:nowrap;">${won(x.incentive)}</td>
+                <td style="text-align:right;">
+                  ${reqs.has(x.line_id + '|APPEAL') ? rqBadge(x.line_id, 'APPEAL')
+                    : `<button class="btn btn-sm btn-ghost" data-appeal="${x.line_id}">이의신청</button>`}
+                </td></tr>${formRow(x, 'APPEAL', 7)}`).join('')}
+            </tbody></table></div>`).join('')}` : ''}
+
+      <div class="hint" id="asRtMsg" style="margin-top:10px;"></div>`;
+
+    const $ = (q) => card.querySelector(q);
+    const say = (m, bad) => { const el = $('#asRtMsg');
+      el.textContent = m; el.style.color = bad ? 'var(--danger)' : 'var(--muted)'; };
+
+    card.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => {
+      tab = b.dataset.tab; openPerson = null; form = null; draw(); });
+    card.querySelectorAll('[data-person]').forEach(tr => tr.onclick = () => {
+      const k = tr.dataset.person;
+      openPerson = openPerson === k ? null : k; form = null; draw(); });
+    card.querySelectorAll('[data-seller]').forEach(b => b.onclick = (e) => {
+      e.stopPropagation(); form = { lineId: +b.dataset.seller, kind:'SELLER' }; draw(); });
+    card.querySelectorAll('[data-appeal]').forEach(b => b.onclick = (e) => {
+      e.stopPropagation(); form = { lineId: +b.dataset.appeal, kind:'APPEAL' }; draw(); });
+    $('#asRtXlsx').onclick = () => downloadXlsx();
+
+    card.querySelectorAll('[data-rq]').forEach(b => b.onclick = async (e) => {
+      e.stopPropagation();
+      const act = b.dataset.rq;
+      if(act === 'cancel'){ form = null; draw(); return; }
+      const cur = reqs.get(form.lineId + '|' + form.kind);
+      if(act === 'drop'){
+        const { error } = await sb.from('asap_line_requests').delete().eq('id', cur.id);
+        if(error){ say('취소 실패: ' + error.message, true); return; }
+        reqs.delete(form.lineId + '|' + form.kind); form = null; draw();
+        say('신청을 취소했습니다.'); return;
+      }
+      const reason = ($('#rqReason')?.value || '').trim();
+      const payload = { round_id: round.id, line_id: form.lineId, retailer_id: c.retailer_id,
+                        kind: form.kind, reason: reason || null, status:'OPEN' };
+      if(form.kind === 'SELLER'){
+        payload.new_scope  = $('#rqScope').value;
+        payload.new_branch = ($('#rqBranch').value || '').trim() || null;
+        payload.new_person = ($('#rqPerson').value || '').trim() || null;
+        if(!payload.new_person){ say('실제 담당자 이름을 적어주세요.', true); return; }
+      }else if(!reason){ say('이의신청 사유를 적어주세요.', true); return; }
+      b.disabled = true;
+      const { data: { user } } = await sb.auth.getUser();
+      payload.created_by = user?.id || null;
+      const { data, error } = cur
+        ? await sb.from('asap_line_requests').update(payload).eq('id', cur.id).select('*')
+        : await sb.from('asap_line_requests').insert(payload).select('*');
+      if(error || !data || !data.length){
+        b.disabled = false;
+        say(error ? ('보내지 못했습니다: ' + error.message)
+                  : '반영되지 않았습니다. 새로고침 후 다시 시도해주세요.', true);
+        return;
+      }
+      reqs.set(form.lineId + '|' + form.kind, data[0]);
+      form = null; draw();
+      say('보냈습니다. JLR Korea 담당자가 검토합니다.');
+    });
+
+    const cb = $('#asRtConfirm');
+    if(cb) cb.onclick = async () => {
+      if(!confirm(`정산 금액 ${won(c.approved_amount)} 을(를) 확정할까요?\n확정 후에는 취소할 수 없습니다.`)) return;
+      const { data, error } = await sb.from('claims')
+        .update({ confirmed_at: new Date().toISOString() }).eq('id', c.id).select('id');
+      if(error || !data || !data.length){
+        say(error ? ('확정 실패: ' + error.message)
+                  : '확정이 반영되지 않았습니다. JLR Korea 담당자에게 확인해주세요.', true);
+        return;
+      }
+      await loadRetailerClaims();
+    };
+  };
+  draw();
+}
 
 /* ── 리테일러 화면 ───────────────────────────────────────────── */
 function sellerTableRetailer(rows, editable){
