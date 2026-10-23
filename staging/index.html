@@ -442,6 +442,8 @@
           <div class="info-item"><div class="k">청구 마감</div><div class="v" id="rd_due">—</div></div>
           <div class="info-item"><div class="k">제출 현황</div><div class="v" id="rd_progress">—</div></div>
         </div>
+        <div id="rd_basis" style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+             margin-top:12px; padding-top:12px; border-top:1px solid var(--surface3);"></div>
         <div class="action-row" id="rd_actions"></div>
       </div>
 
@@ -8577,10 +8579,47 @@ async function renderPndRetailerCard(listEl, round, items){
   });
 }
 
+/* 회차의 '기준 기간' — 정산의 대상이 되는 기간. 여기서 바로 고친다.
+   바우처 설명·파일명이 이 값을 따르므로 틀리면 바로 눈에 띄어야 한다.
+   (2026-10-23 — 라벨 하나에 진행월·대상월이 섞여 바우처가 틀어졌다) */
+function renderBasisRow(round, type){
+  const host = document.getElementById('rd_basis');
+  if(!host) return;
+  const cur = round.basis_label || '';
+  const esc = v => String(v ?? '').replace(/[<>"]/g, '');
+  // 월정산인데 정산월과 기준월이 같으면 둘 중 하나가 틀렸을 가능성이 높다
+  const warn = type?.period === 'MONTHLY' && round.period_ym && round.basis_ym === round.period_ym;
+  host.innerHTML = `
+    <span class="hint" style="min-width:0;">기준 기간 <span title="정산의 대상이 되는 기간입니다. 바우처 설명·파일명이 이 값을 따릅니다.">ⓘ</span></span>
+    <input id="rd_basis_in" value="${esc(cur)}" placeholder="예: 2026-09 · FY27 Q2 · FY27 Q1, Q2"
+           style="max-width:260px; padding:6px 8px;">
+    <button class="btn btn-sm btn-ghost" id="rd_basis_save">저장</button>
+    <span class="hint">정산월 <b>${esc(round.period_label)}</b>${round.period_ym
+      ? ` (${round.period_ym.slice(0,4)}-${round.period_ym.slice(4)})` : ''}</span>
+    ${warn ? '<span class="badge badge-warn">정산월과 같습니다 — 확인해주세요</span>' : ''}`;
+  const btn = host.querySelector('#rd_basis_save');
+  btn.onclick = async () => {
+    const v = host.querySelector('#rd_basis_in').value.trim();
+    if(!v){ alert('기준 기간을 입력해주세요.'); return; }
+    const m = v.match(/(20\d{2})[-.]?(0[1-9]|1[0-2])(?!\d)/);
+    btn.disabled = true;
+    const { data, error } = await sb.from('rounds')
+      .update({ basis_label: v, basis_ym: m ? m[1] + m[2] : null })
+      .eq('id', round.id).select('id');
+    if(error || !data?.length){
+      alert(error ? '저장 실패: ' + error.message : '저장되지 않았습니다 (0건).');
+      btn.disabled = false; return;
+    }
+    await logAudit('ROUND_BASIS','ROUND',round.id,{ label: v });
+    await renderRoundDetail();
+  };
+}
+
 async function renderRoundDetail(){
   const { data: round, error } = await sb.from('rounds').select('*, settlement_types(*)').eq('id', currentRoundId).single();
   if(error || !round){ alert('회차를 불러오지 못했습니다.'); switchView('rounds'); return; }
   const type = round.settlement_types;
+  renderBasisRow(round, type);   // 유형을 가리지 않는다 — 아래에서 화면이 갈리기 전에 그린다
 
   // One DMS License Fee (AR · 시스템 산출 · 로우데이터 업로드 → 자동 산출)
   if(type.source_config?.preset === 'ONE_DMS_AR'){ return renderOneDmsRoundDetail(round, type); }
