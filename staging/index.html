@@ -1128,7 +1128,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 18:41';
+const BUILD = '10-23 18:54';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -9382,6 +9382,7 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
 
   let filter = 'FLAG', page = 1, term = '';
   const folded = new Set();
+  const nzOpen = new Set();   // 상계된 줄을 펼쳐 본 차대
   const PAGE = 15;
   /* 카드가 튀지 않게 — 탭·검색이 그대로면 차대 순서를 고정한다.
      한 줄을 빼면 그 차대 합계가 줄어 순서가 바뀌고, 보고 있던 자리에
@@ -9501,7 +9502,24 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
     const cScope = one(g.map(x => x.scope)), cBranch = one(g.map(x => x.branch));
     const cPerson = one(g.map(x => x.person)), cModel = one(g.map(x => x.model_code));
     const priorParts = new Set((prior.show.get(vin)||[]).map(x => String(x.part_no||'').trim()).filter(Boolean));
-    const lines = g.slice().sort((x,y) => (x.net_zero?1:0) - (y.net_zero?1:0) || y.incentive - x.incentive);
+    /* 같은 품번은 품번대로 모은다. 품번 묶음 순서는 '정산이 남는 금액'
+       큰 순 — 봐야 할 것이 위로 온다. 상계된 줄은 아예 따로 뺀다.
+       (매니저 지적 2026-10-23) */
+    const partAmt = new Map();
+    g.forEach(x => { const k = x.part_no || '';
+      if(!partAmt.has(k)) partAmt.set(k, 0);
+      if(!x.net_zero) partAmt.set(k, partAmt.get(k) + x.incentive); });
+    const partRank = new Map([...partAmt.entries()]
+      .sort((a,b) => b[1] - a[1]).map(([k], i) => [k, i]));
+    const bySort = (x,y) => (partRank.get(x.part_no || '') - partRank.get(y.part_no || ''))
+      || String(x.inv_date||'').localeCompare(String(y.inv_date||''))
+      || (y.cost_sum - x.cost_sum);
+    const liveLines = g.filter(x => !x.net_zero).sort(bySort);
+    const nzLines   = g.filter(x =>  x.net_zero).sort(bySort);
+    const nzAmt   = nzLines.reduce((a,x) => a + x.cost_sum, 0);
+    const nzParts = new Set(nzLines.map(x => x.part_no)).size;
+    const nzShown = nzOpen.has(vin);
+    const COLS = 6 + (cDate ? 0 : 1) + (cRate != null ? 0 : 1);
 
     const info = [
       ['차대번호', esc2(vin)],
@@ -9544,7 +9562,8 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
         ${cRate != null ? '' : '<th style="text-align:right;">요율</th>'}
         <th style="text-align:right;">원가</th><th style="text-align:right;">인센티브</th>
         <th style="width:190px;"></th></tr></thead><tbody>
-        ${lines.map(x => { const st = state(x); const same = priorParts.has(String(x.part_no||'').trim());
+        ${(nzShown ? liveLines.concat(nzLines) : liveLines).map(x => {
+          const st = state(x); const same = priorParts.has(String(x.part_no||'').trim());
           return `<tr data-id="${x.line_id}" style="${x.net_zero?'opacity:.45;':''}">
           <td><span class="badge ${BADGE[st]}">${LABEL[st]}</span></td>
           ${cDate ? '' : `<td style="white-space:nowrap;">${esc2(x.inv_date)}</td>`}
@@ -9562,6 +9581,11 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
               : `<button class="btn btn-sm btn-ok" data-act="ok" data-id="${x.line_id}">승인</button>
                  <button class="btn btn-sm btn-danger" data-act="ex" data-id="${x.line_id}">제외</button>`}
           </td></tr>`; }).join('')}
+        ${nzLines.length ? `<tr><td colspan="${COLS}" class="hint"
+            style="background:rgba(0,0,0,.02); text-align:center;">
+            +/- 가 맞물려 <b>상계된 품목 ${nzParts}개 · ${nzLines.length}줄</b> ·
+            합계 ${fmtWon(nzAmt)} — 정산에는 영향이 없습니다
+            &nbsp;<a href="#" data-act="nz">${nzShown ? '접기' : '보기'}</a></td></tr>` : ''}
       </tbody></table>`}
     </div>`;
   };
@@ -9644,6 +9668,7 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
         const y = window.scrollY;                 // 처리 후 보던 자리로 돌아온다
         const back = () => window.scrollTo(0, y);
         if(act === 'fold'){ folded.has(vin) ? folded.delete(vin) : folded.add(vin); draw(); back(); return; }
+        if(act === 'nz'){ nzOpen.has(vin) ? nzOpen.delete(vin) : nzOpen.add(vin); draw(); back(); return; }
         btn.disabled = true;
         const open = g.filter(x => state(x) !== 'HARD' && !x.decision).map(x => x.line_id);
         let err = null, n = 0, msg = '', reason = rsn();
