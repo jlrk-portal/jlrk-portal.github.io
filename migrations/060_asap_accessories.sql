@@ -38,7 +38,13 @@ on conflict (k) do nothing;
 
 
 -- ── 엔진에 부품그룹 조건 추가 ─────────────────────────────────
-create or replace function asap_lines(
+--  반환 열이 늘어나므로(part_group) create or replace 로는 안 된다 —
+--    ERROR 42P13: cannot change return type of existing function
+--  먼저 내리고 다시 만든다. asap_summary 는 본문이 문자열이라 이 함수에
+--  의존 관계가 걸려 있지 않고, 열을 이름으로 집으므로 그대로 둬도 된다.
+drop function if exists asap_lines(date, date, uuid);
+
+create function asap_lines(
   p_from        date,
   p_to          date,
   p_showroom_list uuid default null
