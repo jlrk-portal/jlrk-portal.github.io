@@ -1128,7 +1128,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 19:54';
+const BUILD = '10-23 20:13';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -15210,47 +15210,262 @@ async function renderAsapRetailerCard(listEl, round, items){
      대쉬캠도 수리로 단 것일 수 있으니 이의신청을 막지 않는다.
      (매니저 지적 2026-10-23) */
   const allOut  = (v) => v.lines > 0 && v.out_lines === v.lines;
-  const live    = vins.filter(v => !allOut(v));
-  const sales   = vins.filter(v => v.scope === 'SALES');
-  const service = vins.filter(v => v.scope === 'SERVICE');
+  // 상계로 서로 지워져 0원이 된 차대는 보여줄 것이 없다 (매니저 지시 2026-10-23).
+  // 제외된 차대는 금액이 0이어도 남긴다 — 사유를 보고 이의신청하셔야 하니까.
+  const shown   = vins.filter(v => allOut(v) || v.amount > 0);
+  const live    = shown.filter(v => !allOut(v));
+  const sales   = shown.filter(v => v.scope === 'SALES');
+  const service = shown.filter(v => v.scope === 'SERVICE');
+  // 그 리테일러가 실제로 쓰는 지점 이름 — [실제 판매자 수정] 드롭다운에 쓴다
+  const brOf = (sc) => [...new Set(vins.filter(v => v.scope === sc)
+    .map(v => v.branch).filter(Boolean))].sort();
+  let lineCache = null, openVin = null;
+  const loadLines = async () => {
+    if(lineCache) return lineCache;
+    const { data, error } = await sb.rpc('asap_saved_lines', { p_round: round.id });
+    if(error){ alert('품목을 불러오지 못했습니다: ' + error.message); return []; }
+    lineCache = new Map();
+    (data || []).forEach(x => { if(!lineCache.has(x.vin)) lineCache.set(x.vin, []);
+      lineCache.get(x.vin).push(x); });
+    return lineCache;
+  };
   const sum = (a) => a.reduce((x, v) => x + v.amount, 0);
   const openRq = () => [...reqs.values()].filter(r => r.status === 'OPEN');
   const due  = round.confirm_due_at ? new Date(round.confirm_due_at) : null;
   const over = due && due < new Date();
-  const kind = (v) => [v.brand, v.series || v.model].filter(Boolean).join(' ') || (v.model_code || '—');
+  // 차종은 IQM(vehicle_line) 이 기준. 없을 때만 턴오버 값을 쓴다.
+  const kind = (v) => v.vehicle_line
+    ? v.vehicle_line + (v.model_year ? ` ${v.model_year}` : '')
+    : ([v.brand, v.series || v.model].filter(Boolean).join(' ') || v.model_code || '—');
 
   let tab = 'SALES', form = null;   // form: {vin, kind}
 
-  /* 엑셀 — 라인은 여기에만. 누르실 때 받아온다 (화면은 차대만 쓰니까) */
+  /* 엑셀 — 하우스 서식(xsSheet)으로. 숫자는 숫자 서식, 제목·요약·합계까지.
+     차대별 한 장 + 품목 한 장. (매니저 지적 2026-10-23: "서식도 없는
+     완전히 더러운 데이터 ... DMS 라이센스처럼 깔끔한 정산서처럼") */
   const downloadXlsx = async () => {
-    const { data, error } = await sb.rpc('asap_saved_lines', { p_round: round.id });
-    if(error){ alert('엑셀을 만들지 못했습니다: ' + error.message); return; }
-    const rows = (data || []).map(x => {
-      const o = { ...(x.raw || {}) };
-      delete o.id; delete o.loaded_at;
-      o['구분']        = x.scope === 'SALES' ? '전시장' : '서비스';
-      o['지점/전시장'] = x.branch || '';
-      o['담당자']      = x.person || '';
-      o['판매자 정정'] = x.seller_fixed ? 'O' : '';
-      o['모델코드']    = x.model_code || '';
-      o['요율']        = Number(x.rate) || 0;
-      o['인센티브(라인)'] = Math.round((Number(x.cost_sum)||0) * (Number(x.rate)||0));
-      o['정산여부']    = (x.hard_excluded || x.decision === 'EXCLUDE') ? '제외' : '정산';
-      o['제외 사유']   = x.hard_excluded || (x.decision === 'EXCLUDE' ? (x.decision_reason || '제외') : '');
-      o['검토 사유']   = (x.flags || []).join(' · ');
-      o['상계']        = x.net_zero ? 'O' : '';
-      return o;
-    });
+    const map = await loadLines();
+    const flat = [...map.values()].flat();
+    const period = round.basis_label || round.period_label;
+    const sumRow = (a) => a.reduce((x, v) => x + v.amount, 0);
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), '라인내역');
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(vins.map(v => ({
-      차대번호: v.vin, 구분: v.scope === 'SALES' ? '전시장' : '서비스',
-      '지점/전시장': asapBranchLabel(v.scope, v.branch), 담당자: v.person || '',
-      차종: kind(v), 고객명: v.customer || '', 판매일: v.retail_date || '',
-      요율: Number(v.rate) || 0, 원가합계: v.cost_sum, 인센티브: v.amount,
-      제외사유: v.out_why || '', 검토사유: v.flags || '',
-    }))), '차대별');
-    XLSX.writeFile(wb, `ASAP_Incentive_${String(round.period_label).replace(/\s/g,'')}_정산내역.xlsx`);
+
+    XLSX.utils.book_append_sheet(wb, xsSheet({
+      title: `ASAP Accessory Incentive 정산내역 — ${period}`,
+      subtitle: `${c.retailers?.name || ''} · 인센티브는 차대 한 대의 원가합계 × 요율을 만원 단위로 올려 산정합니다`,
+      summary: [
+        { label:'대상 차대', value: live.length },
+        { label:'전시장 (Sales)', value: Math.round(sumRow(sales.filter(v=>!allOut(v)))) },
+        { label:'서비스 (Service)', value: Math.round(sumRow(service.filter(v=>!allOut(v)))) },
+        { label:'정산 금액', value: Math.round(Number(c.approved_amount||0)), color: XS.OK },
+      ],
+      steps: [
+        '■ 산출 기준',
+        `대상: 청구계정 일반 · 원가장착(ACC) · 부품판매(개인) 중 부품그룹 Accessories · 차대번호가 있는 라인`,
+        `요율: Defender(L663) 15% · 그 외 7% — 모델은 IQM 차량 마스터 기준`,
+        `산정: 차대별 원가합계 × 요율 → 10,000원 단위 올림`,
+        `판매구분: 해당 분기 판매 차량은 전시장(Sales), 그 외는 서비스(Service)`,
+      ],
+      columns: [
+        { key:'vin',     label:'차대번호',     w:20 },
+        { key:'scope',   label:'구분',         w:9,  align:'center' },
+        { key:'branch',  label:'전시장/지점',  w:20 },
+        { key:'person',  label:'담당자',       w:12 },
+        { key:'kind',    label:'차종',         w:26 },
+        { key:'customer',label:'고객명',       w:12 },
+        { key:'sold',    label:'판매일',       w:12, align:'center' },
+        { key:'inv',     label:'인보이스완료일', w:14, align:'center' },
+        { key:'rate',    label:'요율',         w:8,  align:'center' },
+        { key:'cost',    label:'원가합계',     w:14, type:'num' },
+        { key:'amount',  label:'인센티브',     w:14, type:'num' },
+        { key:'why',     label:'제외 사유',    w:34 },
+      ],
+      rows: shown.map(v => ({
+        vin: v.vin, scope: v.scope === 'SALES' ? '전시장' : '서비스',
+        branch: asapBranchLabel(v.scope, v.branch), person: v.person || '',
+        kind: kind(v), customer: v.customer || '', sold: v.retail_date || '',
+        inv: v.first_inv === v.last_inv ? (v.last_inv || '') : `${v.first_inv} ~ ${v.last_inv}`,
+        rate: Math.round((Number(v.rate)||0) * 100) + '%',
+        cost: Math.round(v.cost_sum), amount: Math.round(v.amount),
+        why: v.out_why || '',
+        __red: allOut(v) ? ['amount','why'] : [],
+      })),
+      totals: { vin:`합계 ${live.length}대`,
+                cost: Math.round(shown.reduce((a,v)=>a+v.cost_sum,0)),
+                amount: Math.round(Number(c.approved_amount||0)) },
+      notes: [
+        '제외 사유가 적힌 차대는 정산에서 빠진 건입니다. 맞지 않다고 보시면 포털에서 이의신청해 주세요.',
+        '실제 판매자가 다른 경우에도 포털에서 차대별로 정정 신청하실 수 있습니다.',
+      ],
+    }), '차대별 정산');
+
+    XLSX.utils.book_append_sheet(wb, xsSheet({
+      title: `품목 내역 — ${period}`,
+      subtitle: '인센티브는 차대 단위로 산정되므로 품목별 금액은 참고용입니다',
+      columns: [
+        { key:'vin',    label:'차대번호',       w:20 },
+        { key:'inv',    label:'인보이스완료일', w:13, align:'center' },
+        { key:'ro',     label:'RO번호',         w:14 },
+        { key:'stl',    label:'정산번호',       w:14 },
+        { key:'part',   label:'품번',           w:16 },
+        { key:'name',   label:'품명',           w:34 },
+        { key:'qty',    label:'수량',           w:8,  type:'num' },
+        { key:'retail', label:'소매가합계',     w:14, type:'num' },
+        { key:'cost',   label:'원가합계',       w:14, type:'num' },
+        { key:'rate',   label:'요율',           w:8,  align:'center' },
+        { key:'inc',    label:'인센티브(참고)', w:14, type:'num' },
+        { key:'state',  label:'정산여부',       w:10, align:'center' },
+        { key:'why',    label:'제외 사유',      w:34 },
+      ],
+      rows: flat.map(x => { const r0 = x.raw || {};
+        const out = !!x.hard_excluded || x.decision === 'EXCLUDE';
+        return {
+          vin: x.vin, inv: x.inv_date || '', ro: r0['RO번호'] || r0.ro_no || '',
+          stl: r0['정산번호'] || r0.stl_no || '',
+          part: x.part_no || '', name: x.part_name || '',
+          qty: Number(r0['품목수량'] ?? r0.qty ?? 0) || 0,
+          retail: Math.round(Number(r0['품목소매가합계'] ?? r0.retail_sum ?? 0) || 0),
+          cost: Math.round(Number(x.cost_sum) || 0),
+          rate: Math.round((Number(x.rate)||0) * 100) + '%',
+          inc: Math.round((Number(x.cost_sum)||0) * (Number(x.rate)||0)),
+          state: out ? '제외' : '정산',
+          why: x.hard_excluded || (x.decision === 'EXCLUDE' ? (x.decision_reason || '제외') : ''),
+          __red: out ? ['state','why'] : [],
+        };
+      }),
+      totals: { vin:`합계 ${flat.length.toLocaleString('ko-KR')}건`,
+                cost: Math.round(flat.reduce((a,x)=>a+(Number(x.cost_sum)||0),0)) },
+      notes: ['품목별 인센티브는 차대 합계를 올림하기 전 값이라 차대별 금액과 일치하지 않습니다.'],
+    }), '품목 내역');
+
+    XLSX.writeFile(wb, `ASAP_Incentive_${String(period).replace(/\s/g,'')}_${c.retailers?.code||''}_정산내역.xlsx`);
+  };
+
+  /* 내부 공지용 PDF — 리테일러 정산담당자가 그대로 돌릴 수 있게.
+     (매니저 지시 2026-10-23: "정산담당자들이 리테일러 내부적으로
+      공지할수있게 최대한 자세히 PDF로 출력되게") */
+  const openPdf = async () => {
+    const map = await loadLines();
+    const period = round.basis_label || round.period_label;
+    const e = (v) => String(v == null ? '' : v).replace(/[<>&]/g, m => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[m]));
+    const w2 = (n) => Math.round(Number(n)||0).toLocaleString('ko-KR') + '원';
+    // 구분 → 지점 → 담당자 → 차대
+    const tree = new Map();
+    live.forEach(v => {
+      const sc = v.scope === 'SALES' ? '전시장 (Sales)' : '서비스 (Service)';
+      if(!tree.has(sc)) tree.set(sc, new Map());
+      const b = asapBranchLabel(v.scope, v.branch);
+      const bm = tree.get(sc);
+      if(!bm.has(b)) bm.set(b, new Map());
+      const p = v.person || '(미기재)';
+      if(!bm.get(b).has(p)) bm.get(b).set(p, []);
+      bm.get(b).get(p).push(v);
+    });
+    const outs = shown.filter(allOut);
+    const win = window.open('', '_blank', 'width=1040,height=860');
+    if(!win){ alert('팝업이 차단되었습니다. 이 사이트의 팝업을 허용해주세요.'); return; }
+    win.document.write(`<!doctype html><html lang="ko"><head><meta charset="utf-8">
+    <title>ASAP Accessory Incentive ${e(period)} 정산내역 — ${e(c.retailers?.name||'')}</title>
+    <style>
+      @page { size:A4; margin:11mm; }
+      body { font-family:"맑은 고딕","Malgun Gothic",sans-serif; color:#1a1a1a; margin:0; padding:20px 24px; }
+      h1 { font-size:17px; margin:4px 0 2px; }
+      .eyebrow { font-size:10px; letter-spacing:.09em; color:#6e7375; text-transform:uppercase; }
+      .sub { font-size:11px; color:#6e7375; margin-bottom:14px; }
+      .cards { display:flex; gap:8px; margin-bottom:14px; }
+      .c { flex:1; border:1px solid #d9dcde; border-radius:5px; padding:8px 10px; }
+      .c .k { font-size:9.5px; color:#6e7375; }
+      .c .v { font-size:14px; font-weight:700; margin-top:2px; }
+      .rule { font-size:10px; color:#6e7375; line-height:1.75; background:#f4f5f5;
+              border-radius:5px; padding:8px 11px; margin-bottom:14px; }
+      h2 { font-size:12.5px; margin:16px 0 6px; padding-bottom:3px; border-bottom:1.5px solid #3d4448; }
+      .grp { margin-bottom:10px; break-inside:avoid; }
+      .gh { display:flex; background:#3d4448; color:#fff; padding:5px 9px; font-size:11.5px; font-weight:600; }
+      .gh .r { margin-left:auto; }
+      .ph { display:flex; background:#eceeef; padding:4px 9px; font-size:11px; font-weight:600; }
+      .ph .r { margin-left:auto; }
+      table { border-collapse:collapse; width:100%; font-size:10.5px; }
+      th { background:#f4f5f5; font-weight:600; padding:4px 7px; text-align:left;
+           border-bottom:1px solid #d9dcde; }
+      td { border-bottom:1px solid #eceeef; padding:3px 7px; vertical-align:top; }
+      .n { text-align:right; font-variant-numeric:tabular-nums; }
+      .parts { color:#6e7375; font-size:9.5px; }
+      .tot { margin-top:12px; padding:8px 11px; background:#f4f5f5; font-weight:700; display:flex; font-size:12px; }
+      .tot .r { margin-left:auto; }
+      .foot { margin-top:14px; font-size:9.5px; color:#6e7375; line-height:1.7; }
+      .noprint { margin-bottom:12px; }
+      .btn { font:inherit; font-size:12px; padding:7px 14px; border:1px solid #3d4448;
+             background:#3d4448; color:#fff; border-radius:5px; cursor:pointer; }
+      @media print { .noprint { display:none; } body { padding:0; } }
+    </style></head><body>
+    <div class="noprint"><button class="btn" onclick="window.print()">인쇄 / PDF 저장</button></div>
+    <div class="eyebrow">JLR Korea · Parts &amp; Accessories</div>
+    <h1>ASAP Accessory Incentive · ${e(period)}</h1>
+    <div class="sub">${e(c.retailers?.name || '')}${c.retailers?.code ? ' (' + e(c.retailers.code) + ')' : ''}
+      · 작성 ${new Date().toLocaleDateString('ko-KR')}${
+      round.confirm_due_at ? ' · 확정 기한 ' + new Date(round.confirm_due_at).toLocaleString('ko-KR') : ''}</div>
+    <div class="cards">
+      <div class="c"><div class="k">대상 차대</div><div class="v">${live.length}대</div></div>
+      <div class="c"><div class="k">전시장 (Sales)</div><div class="v">${w2(sales.filter(v=>!allOut(v)).reduce((a,v)=>a+v.amount,0))}</div></div>
+      <div class="c"><div class="k">서비스 (Service)</div><div class="v">${w2(service.filter(v=>!allOut(v)).reduce((a,v)=>a+v.amount,0))}</div></div>
+      <div class="c"><div class="k">정산 금액</div><div class="v" style="color:#1c8a61;">${w2(c.approved_amount)}</div></div>
+    </div>
+    <div class="rule"><b>산출 기준</b><br>
+      대상 — 청구계정 일반 · 원가장착(ACC) · 부품판매(개인) 중 부품그룹 Accessories, 차대번호가 있는 라인<br>
+      요율 — Defender(L663) 15% / 그 외 7% (모델은 IQM 차량 마스터 기준)<br>
+      산정 — <b>차대 한 대의 원가합계 × 요율 → 10,000원 단위 올림</b><br>
+      판매구분 — 해당 분기 판매 차량은 전시장(Sales), 그 외는 서비스(Service)</div>
+    ${[...tree.entries()].map(([sc, bm]) => `
+      <h2>${e(sc)} — ${[...bm.values()].flatMap(p=>[...p.values()]).flat().length}대 ·
+        ${w2([...bm.values()].flatMap(p=>[...p.values()]).flat().reduce((a,v)=>a+v.amount,0))}</h2>
+      ${[...bm.entries()].sort((a,z)=>[...z[1].values()].flat().reduce((x,v)=>x+v.amount,0)
+                                     -[...a[1].values()].flat().reduce((x,v)=>x+v.amount,0)).map(([b, pm]) => `
+        <div class="grp">
+          <div class="gh"><span>${e(b)}</span><span class="r">${[...pm.values()].flat().length}대 ·
+            ${w2([...pm.values()].flat().reduce((a,v)=>a+v.amount,0))}</span></div>
+          ${[...pm.entries()].sort((a,z)=>z[1].reduce((x,v)=>x+v.amount,0)-a[1].reduce((x,v)=>x+v.amount,0))
+            .map(([p, vs]) => `
+            <div class="ph"><span>${e(p)}</span><span class="r">${vs.length}대 ·
+              ${w2(vs.reduce((a,v)=>a+v.amount,0))}</span></div>
+            <table><thead><tr><th style="width:150px;">차대번호</th><th>차종 / 장착 품목</th>
+              <th style="width:66px;">고객명</th><th style="width:70px;">판매일</th>
+              <th style="width:70px;">인보이스완료일</th>
+              <th style="width:44px;" class="n">요율</th>
+              <th style="width:86px;" class="n">원가합계</th>
+              <th style="width:86px;" class="n">인센티브</th></tr></thead><tbody>
+              ${vs.map(v => { const ls = (map.get(v.vin)||[])
+                    .filter(x => !x.hard_excluded && x.decision !== 'EXCLUDE' && !x.net_zero);
+                  const names = [...new Set(ls.map(x => x.part_name).filter(Boolean))];
+                  return `<tr>
+                <td style="font-variant-numeric:tabular-nums;">${e(v.vin)}</td>
+                <td>${e(kind(v))}${names.length
+                  ? `<div class="parts">${e(names.join(' · '))}</div>` : ''}</td>
+                <td>${e(v.customer || '—')}</td>
+                <td>${e(v.retail_date || '—')}</td>
+                <td>${e(v.first_inv === v.last_inv ? (v.last_inv||'—') : v.first_inv + ' ~ ' + v.last_inv)}</td>
+                <td class="n">${Math.round((Number(v.rate)||0)*100)}%</td>
+                <td class="n">${w2(v.cost_sum)}</td>
+                <td class="n"><b>${w2(v.amount)}</b></td></tr>`; }).join('')}
+            </tbody></table>`).join('')}
+        </div>`).join('')}`).join('')}
+    ${outs.length ? `<h2>정산에서 빠진 차대 — ${outs.length}대</h2>
+      <table><thead><tr><th style="width:150px;">차대번호</th><th>차종</th>
+        <th style="width:70px;">고객명</th><th style="width:72px;">판매일</th>
+        <th>빠진 사유</th></tr></thead><tbody>
+        ${outs.map(v => `<tr><td style="font-variant-numeric:tabular-nums;">${e(v.vin)}</td>
+          <td>${e(kind(v))}</td><td>${e(v.customer||'—')}</td><td>${e(v.retail_date||'—')}</td>
+          <td>${e(v.out_why||'')}</td></tr>`).join('')}
+      </tbody></table>` : ''}
+    <div class="tot"><span>합계 ${live.length}대</span>
+      <span class="r">${w2(c.approved_amount)}</span></div>
+    <div class="foot">
+      · 인센티브는 차대 한 대의 원가합계에 요율을 곱한 뒤 10,000원 단위로 올려 산정합니다.
+        품목별 금액을 합한 값과는 올림 때문에 차이가 날 수 있습니다.<br>
+      · 실제 판매자가 다르거나 빠진 건이 맞지 않다고 보시면 JLR Korea 정산 포털에서
+        차대별로 정정 · 이의신청하실 수 있습니다.<br>
+      · 본 문서는 JLR Korea 정산 포털에서 생성되었습니다.
+    </div></body></html>`);
+    win.document.close();
   };
 
   const rqBadge = (vin, k) => {
@@ -15273,8 +15488,11 @@ async function renderAsapRetailerCard(listEl, round, items){
             <option value="SALES"   ${(cur?.new_scope||v.scope)==='SALES'?'selected':''}>전시장</option>
             <option value="SERVICE" ${(cur?.new_scope||v.scope)==='SERVICE'?'selected':''}>서비스</option>
           </select>
-          <input id="rqBranch" placeholder="전시장/지점" value="${esc2(cur?.new_branch || '')}"
-                 style="padding:5px 7px; min-width:140px;">
+          <select id="rqBranch" style="padding:5px 7px; min-width:150px;">
+            <option value="">전시장/지점 선택</option>
+            ${brOf(cur?.new_scope || v.scope).map(b =>
+              `<option value="${esc2(b)}" ${b===(cur?.new_branch||'')?'selected':''}>${esc2(asapBranchLabel(cur?.new_scope||v.scope, b))}</option>`).join('')}
+          </select>
           <input id="rqPerson" placeholder="담당자 이름" value="${esc2(cur?.new_person || '')}"
                  style="padding:5px 7px; min-width:120px;">` : ''}
         <input id="rqReason" placeholder="${k==='SELLER'?'사유 (선택)':'이의신청 사유 — 꼭 적어주세요'}"
@@ -15287,10 +15505,16 @@ async function renderAsapRetailerCard(listEl, round, items){
 
   const draw = () => {
     const rows = tab === 'SALES' ? sales : service;
+    // 지점 → 담당자(판매자) → 차대 (매니저 지시 2026-10-23)
     const byBranch = new Map();
     rows.forEach(v => { const b = v.branch || '(미기재)';
-      if(!byBranch.has(b)) byBranch.set(b, []); byBranch.get(b).push(v); });
-    const branches = [...byBranch.entries()].sort((a, z) => sum(z[1]) - sum(a[1]));
+      if(!byBranch.has(b)) byBranch.set(b, new Map());
+      const p = v.person || '(미기재)';
+      const pm = byBranch.get(b);
+      if(!pm.has(p)) pm.set(p, []); pm.get(p).push(v); });
+    const branches = [...byBranch.entries()]
+      .map(([b, pm]) => [b, [...pm.entries()].sort((a, z) => sum(z[1]) - sum(a[1]))])
+      .sort((a, z) => sum(z[1].flatMap(p => p[1])) - sum(a[1].flatMap(p => p[1])));
     const canConfirm = round.status === 'PUBLISHED' && !c.confirmed_at && !openRq().length;
     const open = card.querySelector(`#${uid}-body`)?.style.display === 'block';
 
@@ -15323,6 +15547,7 @@ async function renderAsapRetailerCard(listEl, round, items){
         <div><div class="hint">정산 금액</div>
           <div style="font-weight:700; font-size:16px; color:var(--accent);">${won(c.approved_amount)}</div></div>
         <div style="margin-left:auto; display:flex; gap:8px;">
+          <button class="btn btn-sm btn-ghost" id="${uid}-pdf">내부 공지용 PDF</button>
           <button class="btn btn-sm btn-ghost" id="${uid}-xls">엑셀 다운로드</button>
           ${canConfirm ? `<button class="btn btn-sm" id="${uid}-ok">정산 확정</button>` : ''}
         </div>
@@ -15345,37 +15570,58 @@ async function renderAsapRetailerCard(listEl, round, items){
             실제 판매자가 다르면 차대 옆 [실제 판매자 수정] 으로 알려주세요</span>
         </div>
 
-        ${branches.length ? branches.map(([b, vs]) => `
+        ${branches.length ? branches.map(([b, people]) => `
           <div style="border:1px solid var(--surface3); border-radius:6px; margin-top:8px; overflow:hidden;">
             <div style="display:flex; gap:10px; align-items:center; padding:7px 10px;
                  background:var(--surface2); font-size:12.5px; font-weight:600;">
               <span>${esc2(asapBranchLabel(tab, b))}</span>
-              <span class="hint">${vs.length}대</span>
-              <span style="margin-left:auto;">${won(sum(vs))}</span></div>
+              <span class="hint">${people.length}명 · ${people.flatMap(p=>p[1]).length}대</span>
+              <span style="margin-left:auto;">${won(sum(people.flatMap(p=>p[1])))}</span></div>
             <table class="as-sub"><thead><tr>
-              <th>차대번호</th><th>차종</th><th>고객명</th><th>판매일</th><th>담당자</th>
+              <th>차대번호</th><th>차종</th><th>고객명</th><th>판매일</th>
+              <th style="text-align:center;">인보이스완료일</th>
+              <th style="text-align:right;">원가합계</th>
+              <th style="text-align:center;">요율</th>
               <th style="text-align:right;">인센티브</th><th style="width:230px;"></th>
             </tr></thead><tbody>
-              ${vs.map(v => { const out = allOut(v); return `<tr${out?' style="opacity:.7;"':''}>
-                <td style="font-variant-numeric:tabular-nums; white-space:nowrap;">${esc2(v.vin)}</td>
-                <td>${esc2(kind(v))}</td>
-                <td>${esc2(v.customer || '—')}</td>
-                <td style="white-space:nowrap;">${esc2(v.retail_date || '—')}</td>
-                <td>${esc2(v.person || '(미기재)')}${v.seller_fixed
-                  ? '<span class="badge badge-ap" style="margin-left:4px;">정정</span>' : ''}</td>
-                <td style="text-align:right; white-space:nowrap;">
-                  ${out ? '<span class="badge badge-off">제외</span>' : `<b>${won(v.amount)}</b>`}</td>
-                <td style="text-align:right; white-space:nowrap;">
-                  ${reqs.has(v.vin + '|SELLER') ? rqBadge(v.vin, 'SELLER')
-                    : `<button class="btn btn-sm btn-ghost" data-seller="${esc2(v.vin)}">실제 판매자 수정</button>`}
-                  ${v.out_lines > 0
-                    ? (reqs.has(v.vin + '|APPEAL') ? rqBadge(v.vin, 'APPEAL')
-                       : `<button class="btn btn-sm btn-ghost" data-appeal="${esc2(v.vin)}">이의신청</button>`)
-                    : ''}</td>
-              </tr>
-              ${v.out_why ? `<tr${out?' style="opacity:.7;"':''}><td colspan="7" class="hint"
-                 style="padding-top:0; border-top:none;">↳ ${out ? '' : '일부 제외 — '}${esc2(v.out_why)}</td></tr>` : ''}
-              ${formRow(v, 'SELLER', 7)}${formRow(v, 'APPEAL', 7)}`; }).join('')}
+              ${people.map(([p, vs]) => `
+                <tr><td colspan="9" style="background:var(--surface2); font-size:12px; font-weight:600;
+                    padding:5px 11px;">${esc2(p)}
+                    <span class="hint" style="font-weight:400;"> · ${vs.length}대</span>
+                    <span style="float:right;">${won(sum(vs))}</span></td></tr>
+                ${vs.map(v => { const out = allOut(v); const op = openVin === v.vin;
+                  const inv = v.first_inv === v.last_inv ? v.last_inv
+                            : `${v.first_inv} ~ ${v.last_inv}`;
+                  return `<tr${out?' style="opacity:.7; cursor:pointer;"':' style="cursor:pointer;"'} data-vin="${esc2(v.vin)}">
+                  <td style="font-variant-numeric:tabular-nums; white-space:nowrap;">${op?'▾':'▸'} ${esc2(v.vin)}</td>
+                  <td>${esc2(kind(v))}</td>
+                  <td>${esc2(v.customer || '—')}</td>
+                  <td style="white-space:nowrap;">${esc2(v.retail_date || '—')}</td>
+                  <td style="text-align:center; white-space:nowrap;">${esc2(inv || '—')}</td>
+                  <td style="text-align:right; white-space:nowrap;">${won(v.cost_sum)}</td>
+                  <td style="text-align:center;">${Math.round((Number(v.rate)||0)*100)}%</td>
+                  <td style="text-align:right; white-space:nowrap;">
+                    ${out ? '<span class="badge badge-off">제외</span>' : `<b>${won(v.amount)}</b>`}</td>
+                  <td style="text-align:right; white-space:nowrap;">
+                    ${reqs.has(v.vin + '|SELLER') ? rqBadge(v.vin, 'SELLER')
+                      : `<button class="btn btn-sm btn-ghost" data-seller="${esc2(v.vin)}">실제 판매자 수정</button>`}
+                    ${v.out_lines > 0
+                      ? (reqs.has(v.vin + '|APPEAL') ? rqBadge(v.vin, 'APPEAL')
+                         : `<button class="btn btn-sm btn-ghost" data-appeal="${esc2(v.vin)}">이의신청</button>`)
+                      : ''}</td>
+                </tr>
+                ${v.out_why ? `<tr${out?' style="opacity:.7;"':''}><td colspan="9" class="hint"
+                   style="padding-top:0; border-top:none;">↳ ${out ? '' : '일부 제외 — '}${esc2(v.out_why)}</td></tr>` : ''}
+                ${op ? `<tr><td colspan="9" style="background:var(--surface2); padding:6px 11px;">
+                   <div class="hint" style="margin-bottom:3px;">장착 품목 — 인센티브는 이 차대 원가합계 기준으로 한 번에 계산됩니다</div>
+                   ${(lineCache?.get(v.vin) || []).length
+                     ? `<div style="font-size:12px; line-height:1.9;">${
+                         (lineCache.get(v.vin) || []).map(x => {
+                           const xo = !!x.hard_excluded || x.decision === 'EXCLUDE';
+                           return `<span style="display:inline-block; margin-right:14px;${xo?' opacity:.5; text-decoration:line-through;':''}">
+                             ${esc2(x.part_no || '')} ${esc2(x.part_name || '')}</span>`; }).join('')}</div>`
+                     : '<div class="hint">품목을 불러오는 중...</div>'}</td></tr>` : ''}
+                ${formRow(v, 'SELLER', 9)}${formRow(v, 'APPEAL', 9)}`; }).join('')}`).join('')}
             </tbody></table></div>`).join('')
           : '<div class="hint" style="margin-top:8px;">해당 내역이 없습니다.</div>'}
 
@@ -15394,12 +15640,27 @@ async function renderAsapRetailerCard(listEl, round, items){
       b.style.display = isOpen ? 'none' : 'block';
       cr.textContent = isOpen ? '＋' : '－';
     };
-    card.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { tab = b.dataset.tab; form = null; draw(); });
+    card.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { tab = b.dataset.tab; form = null; openVin = null; draw(); });
+    card.querySelectorAll('tr[data-vin]').forEach(tr => tr.onclick = async (ev) => {
+      if(ev.target.closest('button') || ev.target.closest('select') || ev.target.closest('input')) return;
+      const v = tr.dataset.vin;
+      openVin = openVin === v ? null : v;
+      if(openVin){ await loadLines(); }
+      draw();
+    });
     card.querySelectorAll('[data-seller]').forEach(b => b.onclick = () => {
       form = { vin: b.dataset.seller, kind:'SELLER' }; draw(); });
+    const sc = $('#rqScope');
+    if(sc) sc.onchange = () => {
+      const br = $('#rqBranch');
+      const list = brOf(sc.value);
+      br.innerHTML = '<option value="">전시장/지점 선택</option>'
+        + list.map(b => `<option value="${esc2(b)}">${esc2(asapBranchLabel(sc.value, b))}</option>`).join('');
+    };
     card.querySelectorAll('[data-appeal]').forEach(b => b.onclick = () => {
       form = { vin: b.dataset.appeal, kind:'APPEAL' }; draw(); });
     $(`#${uid}-xls`).onclick = () => downloadXlsx();
+    $(`#${uid}-pdf`).onclick = () => openPdf();
 
     card.querySelectorAll('[data-rq]').forEach(b => b.onclick = async () => {
       const act = b.dataset.rq;
@@ -15417,6 +15678,7 @@ async function renderAsapRetailerCard(listEl, round, items){
         p.new_scope  = $('#rqScope').value;
         p.new_branch = ($('#rqBranch').value || '').trim() || null;
         p.new_person = ($('#rqPerson').value || '').trim() || null;
+        if(!p.new_branch){ say('실제 전시장/지점을 골라주세요.', true); return; }
         if(!p.new_person){ say('실제 담당자 이름을 적어주세요.', true); return; }
       }else if(!reason){ say('이의신청 사유를 적어주세요.', true); return; }
       b.disabled = true;
