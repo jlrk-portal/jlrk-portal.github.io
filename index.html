@@ -1092,7 +1092,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 12:49';
+const BUILD = '10-23 12:55';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -7164,7 +7164,7 @@ async function loadRounds(){
 });
 
 document.getElementById('newRoundBtn').addEventListener('click', () => {
-  editingRoundId = null;
+  editingRoundId = null; editingRoundType = null;
   document.querySelector('#roundPanel .panel-title').textContent = '새 회차 개설';
   document.getElementById('saveRoundBtn').textContent = '회차 만들기 (DRAFT)';
   const sel = document.getElementById('r_type_id');
@@ -7251,14 +7251,17 @@ document.getElementById('r_period_label').addEventListener('input', (e) => {
 document.getElementById('r_type_id').addEventListener('change', syncRoundYm);
 
 document.getElementById('saveRoundBtn').addEventListener('click', async () => {
-  const type_id = document.getElementById('r_type_id').value;
+  // 수정일 때는 유형 select 를 잠가 두므로 회차가 들고 있던 유형을 쓴다
+  //  (잠긴 select 에 기대면 '정산 유형과 기간 라벨은 필수입니다' 로 막힌다 — 2026-10-23)
+  const type_id = editingRoundId ? (editingRoundType?.id || '')
+                                 : document.getElementById('r_type_id').value;
   const period_label = document.getElementById('r_period_label').value.trim();
   const fiscal_year = document.getElementById('r_fiscal_year').value.trim() || null;
   const fiscal_quarter = document.getElementById('r_fiscal_quarter').value || null;
   const claim_due_at = document.getElementById('r_claim_due_at').value;
   if(!type_id || !period_label){ alert('정산 유형과 기간 라벨은 필수입니다.'); return; }
   // 월단위 유형은 정산 월을 받는다 ('2026-09' → '202609')
-  const tSel = activeTypes.find(x => x.id === type_id);
+  const tSel = (editingRoundId ? editingRoundType : null) || activeTypes.find(x => x.id === type_id);
   const ymRaw = document.getElementById('r_period_ym')?.value || '';
   const period_ym = tSel?.period === 'MONTHLY' ? (ymRaw.replace('-', '') || null) : null;
   if(tSel?.period === 'MONTHLY' && !period_ym){
@@ -8627,8 +8630,10 @@ function renderBasisRow(round, type){
    정산월이 틀린 회차(SP 2026-09)는 기준월만으로는 못 고쳐서, 기간 라벨과
    정산월까지 여기서 손본다. (2026-10-23 지적) */
 let editingRoundId = null;
+let editingRoundType = null;   // 잠근 select 대신 이걸 쓴다
 function openRoundEdit(round, type){
   editingRoundId = round.id;
+  editingRoundType = type || activeTypes.find(t => t.id === round.type_id) || null;
   const sel = document.getElementById('r_type_id');
   sel.innerHTML = activeTypes.map(t =>
     `<option value="${t.id}"${t.id === round.type_id ? ' selected' : ''}>${t.code} — ${t.name}</option>`).join('');
