@@ -1098,7 +1098,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 15:20';
+const BUILD = '10-23 15:48';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -8996,6 +8996,274 @@ async function asapRetailerResolver(){
   };
 }
 
+/* 한 사람 인센티브가 지나치게 큰 경우 '검토 필요' 로 짚어준다.
+   중앙값의 N배 '그리고' 최소금액 이상 — 작은 금액이 배수만 커서 걸리는 걸 막는다. */
+async function asapReviewFlags(rows){
+  const { data } = await sb.from('asap_config').select('v').eq('k','review_threshold').maybeSingle();
+  const cfg = data?.v || { multiple_of_median: 3, min_amount: 2000000 };
+  const amts = rows.map(r => r.amount).filter(a => a > 0).sort((a,b) => a-b);
+  if(!amts.length) return { flag: () => false, cfg, median: 0 };
+  const median = amts[Math.floor(amts.length/2)];
+  const bar = Math.max(median * (cfg.multiple_of_median || 3), cfg.min_amount || 0);
+  return { flag: (r) => r.amount >= bar, cfg, median, bar };
+}
+
+/* ================================================================
+   ASAP 검증 — 검토하는 사람의 화면
+   (2026-10-23) 차대를 넣으면 자동으로 빼지 않는다. 사유를 달아 보여주고
+   빼는 건 사람이 라인 단위로 정한다. 뺀 것에는 사유가 남는다.
+   ================================================================ */
+
+/* 전시장 코드(HSU·KCCI…)를 사람이 읽는 이름으로. Sales Report 에는 코드만
+   들어 있어서 이름을 따로 둔다 — asap_config.showroom_names 에 넣으면 그걸 쓴다.
+   없으면 '리테일러명 · 코드' 로 적어도 어디인지는 알게 한다. (2026-10-23) */
+let _asapSrNames = null, _asapRtByCode = null;
+async function asapLoadNames(){
+  if(_asapSrNames) return;
+  const [{ data: cfg }, { data: rts }] = await Promise.all([
+    sb.from('asap_config').select('v').eq('k','showroom_names').maybeSingle(),
+    sb.from('retailers').select('code,name'),
+  ]);
+  _asapSrNames = cfg?.v || {};
+  _asapRtByCode = new Map((rts||[]).map(r => [r.code, r.name]));
+}
+function asapBranchLabel(scope, branch){
+  if(scope !== 'SALES') return branch;
+  const nm = _asapSrNames?.[branch];
+  if(nm) return `${nm} (${branch})`;
+  const u = String(branch||'').toUpperCase();
+  const hit = [...(_asapRtByCode?.keys() || [])].sort((a,b)=>b.length-a.length)
+                .find(c => u.startsWith(c.toUpperCase()));
+  return hit ? `${_asapRtByCode.get(hit)} · ${branch}` : branch;
+}
+
+const ASAP_SUP = {
+  SHOWROOM: { label:'전시차 지원', cols:['차대번호','지원분기','비고'],
+              sample:[['SALCA2BN7MA685259','FY27 Q2','2026 전시차'],
+                      ['SALZA2BX0LH054035','FY27 Q1','']],
+              hint:'지원분기 앞뒤 6개월에 걸리는 액세서리에 「검토 필요」가 붙습니다.' },
+  PROMO:    { label:'프로모션 지원', cols:['차대번호','지원일자','지원구분','비고'],
+              sample:[['SALGA2BJ1LA404848','2026-08-14','런칭 프로모션',''],
+                      ['SALLAAAG6CA641456','2026-09-02','고객 보상','']],
+              hint:'그 차대의 액세서리에 「검토 필요」가 붙습니다. 품목은 라인에서 고르세요.' },
+};
+
+async function renderAsapSupportCard(round, host){
+  const card = document.createElement('div');
+  card.className = 'info-card';
+  card.innerHTML = `<div class="section-label" style="margin-top:0;">지원 이력 — 전시차 · 프로모션</div>
+    <div class="hint" style="margin-bottom:10px;">
+      여기 올린 차대는 <b>자동으로 빠지지 않습니다.</b> 해당 라인에 「검토 필요」가 붙고,
+      아래 <b>라인 검토</b>에서 보시고 빼실 수 있습니다.
+      DSS 기본장착(L460 · 차대 6번째 자리 B)은 올리실 것 없이 자동으로 표시됩니다.
+    </div>
+    <div id="asSupBody"></div>`;
+  host.appendChild(card);
+  const body = card.querySelector('#asSupBody');
+
+  const draw = async () => {
+    const { data } = await sb.from('asap_support_vins').select('kind, vin');
+    const cnt = {}; (data||[]).forEach(r => cnt[r.kind] = (cnt[r.kind]||0) + 1);
+    body.innerHTML = Object.entries(ASAP_SUP).map(([k, d]) => `
+      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+           padding:9px 10px; border:1px solid var(--surface3); border-radius:6px; margin-bottom:8px;">
+        <b style="min-width:110px;">${d.label}</b>
+        <span class="hint">${(cnt[k]||0).toLocaleString('ko-KR')}대 등록</span>
+        <span class="hint" style="flex:1; min-width:220px;">${d.hint}</span>
+        <button class="btn btn-sm btn-ghost as-sup-tpl" data-k="${k}">샘플 양식 받기</button>
+        <label class="btn btn-sm btn-ghost" style="cursor:pointer; margin:0;">
+          엑셀 올리기<input type="file" accept=".xlsx,.xls" data-sup="${k}" style="display:none;"></label>
+        ${cnt[k] ? `<button class="btn btn-sm btn-danger as-sup-clear" data-k="${k}">전체 삭제</button>` : ''}
+      </div>`).join('') + '<div class="hint" id="asSupMsg"></div>';
+
+    body.querySelectorAll('.as-sup-tpl').forEach(b => b.onclick = () => {
+      const d = ASAP_SUP[b.dataset.k];
+      xlsxHouse({
+        title: `ASAP ${d.label} 등록 양식`,
+        subtitle: '첫 줄은 그대로 두시고 아래에 채워 올려주세요. 열 순서를 바꾸지 마세요.',
+        columns: d.cols.map((c,i) => ({ key:'c'+i, label:c, w: i===0 ? 22 : 14 })),
+        rows: d.sample.map(r => Object.fromEntries(r.map((v,i) => ['c'+i, v]))),
+        notes: [d.hint, '샘플 두 줄은 지우고 쓰셔도 됩니다.'],
+        filename: `ASAP_${b.dataset.k==='SHOWROOM'?'전시차':'프로모션'}_등록양식.xlsx`,
+      });
+    });
+
+    body.querySelectorAll('input[data-sup]').forEach(inp => inp.onchange = async () => {
+      const f = inp.files[0]; if(!f) return;
+      const k = inp.dataset.sup, msg = body.querySelector('#asSupMsg');
+      msg.textContent = `${f.name} 읽는 중...`;
+      try{
+        const wb = xsFixBook(XLSX.read(await f.arrayBuffer(), { type:'array' }));
+        const aoa = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header:1, raw:true, defval:null });
+        let hi = aoa.findIndex(r => (r||[]).some(c => /차대번호/.test(String(c||''))));
+        if(hi < 0) throw new Error("'차대번호' 열을 찾지 못했습니다. 샘플 양식을 받아 쓰세요.");
+        const head = (aoa[hi]||[]).map(c => String(c||'').replace(/\s/g,''));
+        const at = (names) => head.findIndex(h => names.some(n => h === n));
+        const iV = at(['차대번호']), iQ = at(['지원분기']),
+              iD = at(['지원일자']), iT = at(['지원구분']), iN = at(['비고']);
+        const { data: { user } } = await sb.auth.getUser();
+        const rows = [], bad = [];
+        for(let r = hi + 1; r < aoa.length; r++){
+          const vin = String(aoa[r]?.[iV] ?? '').trim().toUpperCase();
+          if(!vin) continue;
+          if(vin.length < 11){ bad.push(vin); continue; }
+          const o = { kind:k, vin, created_by:user?.id || null,
+                      note: iN >= 0 ? (String(aoa[r][iN] ?? '').trim() || null) : null };
+          if(k === 'SHOWROOM'){
+            o.period_label = iQ >= 0 ? (String(aoa[r][iQ] ?? '').trim() || null) : null;
+            if(!o.period_label){ bad.push(vin + '(분기없음)'); continue; }
+          } else {
+            o.support_date = iD >= 0 ? xlDate(aoa[r][iD]) : null;
+            o.support_type = iT >= 0 ? (String(aoa[r][iT] ?? '').trim() || null) : null;
+          }
+          rows.push(o);
+        }
+        if(!rows.length) throw new Error('읽어낸 차대가 없습니다.');
+        const { error } = await sb.from('asap_support_vins').upsert(rows, {
+          onConflict:'kind,vin,period_label,support_date', ignoreDuplicates:true });
+        if(error) throw error;
+        await logAudit('ASAP_SUPPORT','ROUND', round.id, { label:`${ASAP_SUP[k].label} ${rows.length}대` });
+        msg.innerHTML = `<b>${rows.length.toLocaleString('ko-KR')}대 등록했습니다.</b>`
+          + (bad.length ? ` <span style="color:var(--accent-ar);">못 읽은 ${bad.length}줄: ${bad.slice(0,5).join(', ')}</span>` : '')
+          + ' — [계산하기] 를 다시 누르면 반영됩니다.';
+        inp.value = '';
+        await draw();
+      }catch(e){ msg.innerHTML = `<span style="color:var(--danger);">${e.message || e}</span>`; }
+    });
+
+    body.querySelectorAll('.as-sup-clear').forEach(b => b.onclick = async () => {
+      if(!confirm(`${ASAP_SUP[b.dataset.k].label} 등록분을 전부 지웁니다. 계속할까요?`)) return;
+      await sb.from('asap_support_vins').delete().eq('kind', b.dataset.k);
+      await draw();
+    });
+  };
+  await draw();
+}
+
+/* 라인 검토 — 이 화면이 본체다. 2,000줄을 걸러 보고, 골라 빼고, 사유를 남긴다. */
+async function renderAsapLineReview(round, from, to, host, onChanged){
+  const box = document.createElement('div');
+  box.className = 'info-card';
+  box.innerHTML = `<div class="section-label" style="margin-top:0;">라인 검토</div>
+    <div class="hint">불러오는 중...</div>`;
+  host.appendChild(box);
+
+  await asapLoadNames();
+  const { data, error } = await sb.rpc('asap_lines_json', { p_from: from, p_to: to, p_round: round.id });
+  if(error){ box.innerHTML = `<div class="hint" style="color:var(--danger);">라인을 불러오지 못했습니다: ${error.message}</div>`; return; }
+  const all = (data || []).map(x => ({ ...x,
+    cost_sum:Number(x.cost_sum), rate:Number(x.rate),
+    incentive: Math.round(Number(x.cost_sum) * Number(x.rate)),
+    flags: x.flags || [] }));
+
+  let filter = 'FLAG', page = 1, term = '';
+  const PAGE = 200;
+  const state = (r) => r.hard_excluded ? 'HARD' : (r.decision === 'EXCLUDE' ? 'OUT'
+                     : (r.flags.length ? 'FLAG' : 'OK'));
+  const LABEL = { HARD:'규칙 제외', OUT:'정산 제외', FLAG:'검토 필요', OK:'정상' };
+  const BADGE = { HARD:'badge-off', OUT:'badge-danger', FLAG:'badge-warn', OK:'badge-ap' };
+
+  const draw = () => {
+    const counts = { ALL: all.length, HARD:0, OUT:0, FLAG:0, OK:0 };
+    all.forEach(r => counts[state(r)]++);
+    const kept = all.filter(r => !r.hard_excluded && r.decision !== 'EXCLUDE');
+    const keptAmt = kept.reduce((a,r) => a + r.incentive, 0);
+    const t = term.trim().toUpperCase();
+    const list = all.filter(r => (filter === 'ALL' || state(r) === filter)
+      && (!t || [r.vin, r.part_no, r.part_name, r.person, r.branch]
+            .some(v => String(v||'').toUpperCase().includes(t))));
+    const shown = list.slice(0, PAGE * page);
+
+    box.innerHTML = `
+      <div class="section-label" style="margin-top:0;">라인 검토</div>
+      <div class="hint" style="margin-bottom:8px;">
+        규칙상 빠지는 것(시승차·커티시카·특수차)은 <b>규칙 제외</b>로 이미 빠져 있습니다.
+        <b>검토 필요</b>는 빠지지 않은 상태입니다 — 보시고 빼실 것만 고르세요.
+      </div>
+      <div class="action-row" style="margin-top:0; flex-wrap:wrap;">
+        ${['ALL','FLAG','OUT','HARD','OK'].map(k => `<button class="btn btn-sm ${filter===k?'':'btn-ghost'}"
+          data-f="${k}">${k==='ALL'?'전체':LABEL[k]} ${(k==='ALL'?counts.ALL:counts[k]).toLocaleString('ko-KR')}</button>`).join('')}
+        <input id="asQ" placeholder="차대·품번·품명·담당자·지점 검색" value="${esc2(term)}"
+               style="max-width:260px; padding:6px 8px; margin-left:auto;">
+      </div>
+      <div class="hint" style="margin:6px 0 10px;">
+        집계에 들어가는 라인 <b>${kept.length.toLocaleString('ko-KR')}건</b> ·
+        인센티브(라인 합, 올림 전) <b>${fmtWon(keptAmt)}</b>
+      </div>
+      <div style="overflow-x:auto;"><table style="min-width:1180px;"><thead><tr>
+        <th style="width:28px;"><input type="checkbox" id="asAll"></th>
+        <th>상태</th><th>구분</th><th>지점/전시장</th><th>담당자</th><th>차대번호</th>
+        <th style="text-align:center;">인보이스완료일</th><th>품번</th><th>품명</th>
+        <th style="text-align:center;">모델</th><th style="text-align:right;">요율</th>
+        <th style="text-align:right;">원가합계</th><th style="text-align:right;">인센티브</th>
+        <th>검토 사유 / 제외 사유</th>
+      </tr></thead><tbody>
+        ${shown.map(r => { const st = state(r); return `<tr data-id="${r.line_id}">
+          <td>${st === 'HARD' ? '' : `<input type="checkbox" class="as-ck" data-id="${r.line_id}">`}</td>
+          <td><span class="badge ${BADGE[st]}">${LABEL[st]}</span></td>
+          <td>${r.scope === 'SALES' ? '전시장' : '서비스'}</td>
+          <td>${esc2(asapBranchLabel(r.scope, r.branch))}</td>
+          <td>${esc2(r.person || '(미기재)')}</td>
+          <td style="font-variant-numeric:tabular-nums;">${esc2(r.vin)}</td>
+          <td style="text-align:center;">${esc2(r.inv_date)}</td>
+          <td>${esc2(r.part_no)}</td><td>${esc2(r.part_name)}</td>
+          <td style="text-align:center;">${esc2(r.model_code || '—')}</td>
+          <td style="text-align:right;">${(r.rate*100).toFixed(0)}%</td>
+          <td style="text-align:right;">${fmtWon(r.cost_sum)}</td>
+          <td style="text-align:right;">${fmtWon(r.incentive)}</td>
+          <td class="hint">${[r.hard_excluded, ...(r.flags||[]),
+              r.decision === 'EXCLUDE' ? ('제외 — ' + (r.decision_reason || '사유 없음')) : null]
+              .filter(Boolean).map(esc2).join(' · ')}</td></tr>`; }).join('')}
+      </tbody></table></div>
+      ${list.length > shown.length ? `<div class="action-row"><button class="btn btn-sm btn-ghost" id="asMore">
+        더 보기 (${shown.length.toLocaleString('ko-KR')} / ${list.length.toLocaleString('ko-KR')})</button></div>` : ''}
+      <div class="action-row">
+        <button class="btn btn-sm btn-danger" id="asExclude">선택한 줄 정산 제외</button>
+        <button class="btn btn-sm btn-ghost" id="asRestore">선택한 줄 제외 해제</button>
+        <span class="hint" style="align-self:center;" id="asSel">선택 0건</span>
+      </div>`;
+
+    box.querySelectorAll('[data-f]').forEach(b => b.onclick = () => { filter = b.dataset.f; page = 1; draw(); });
+    const q = box.querySelector('#asQ');
+    q.oninput = () => { term = q.value; page = 1; const p = q.selectionStart; draw();
+      const n = box.querySelector('#asQ'); n.focus(); n.setSelectionRange(p, p); };
+    const more = box.querySelector('#asMore'); if(more) more.onclick = () => { page++; draw(); };
+    const sel = () => [...box.querySelectorAll('.as-ck:checked')].map(c => +c.dataset.id);
+    const upd = () => { box.querySelector('#asSel').textContent = `선택 ${sel().length}건`; };
+    box.querySelectorAll('.as-ck').forEach(c => c.onchange = upd);
+    const allCk = box.querySelector('#asAll');
+    if(allCk) allCk.onchange = () => { box.querySelectorAll('.as-ck').forEach(c => c.checked = allCk.checked); upd(); };
+
+    box.querySelector('#asExclude').onclick = async () => {
+      const ids = sel(); if(!ids.length){ alert('뺄 줄을 고르세요.'); return; }
+      const reason = prompt(`${ids.length}건을 정산에서 뺍니다.\n사유를 적어주세요 (엑셀과 이력에 남습니다).`,
+        '전시차 지원분');
+      if(reason === null) return;
+      const { data: { user } } = await sb.auth.getUser();
+      const { error } = await sb.from('asap_line_decisions').upsert(
+        ids.map(id => ({ round_id: round.id, line_id: id, decision:'EXCLUDE',
+                         reason: reason || null, decided_by: user?.id || null,
+                         decided_at: new Date().toISOString() })),
+        { onConflict:'round_id,line_id' });
+      if(error){ alert('실패: ' + error.message); return; }
+      await logAudit('ASAP_EXCLUDE','ROUND', round.id, { label:`${ids.length}건 · ${reason||''}` });
+      ids.forEach(id => { const r = all.find(x => x.line_id === id);
+        if(r){ r.decision = 'EXCLUDE'; r.decision_reason = reason || null; } });
+      draw(); onChanged && onChanged();
+    };
+    box.querySelector('#asRestore').onclick = async () => {
+      const ids = sel(); if(!ids.length){ alert('되돌릴 줄을 고르세요.'); return; }
+      const { error } = await sb.from('asap_line_decisions').delete()
+        .eq('round_id', round.id).in('line_id', ids);
+      if(error){ alert('실패: ' + error.message); return; }
+      ids.forEach(id => { const r = all.find(x => x.line_id === id);
+        if(r){ r.decision = null; r.decision_reason = null; } });
+      draw(); onChanged && onChanged();
+    };
+  };
+  draw();
+}
+
 async function renderAsapRoundDetail(round, type){
   document.getElementById('claimsTable').style.display = 'none';
   document.getElementById('rd_title').textContent = `${type.name} · ${round.period_label}`;
@@ -9024,6 +9292,9 @@ async function renderAsapRoundDetail(round, type){
     host.appendChild(panel);
     eoBindConfirm(round, type, claims || [], panel);
   }
+
+  // ── 지원 이력 (전시차 · 프로모션) — 엑셀로 올린다
+  await renderAsapSupportCard(round, host);
 
   // ── 계산 카드
   const q = asapQuarterRange(round.basis_label || round.period_label) || { from:'', to:'' };
@@ -9061,12 +9332,14 @@ async function renderAsapRoundDetail(round, type){
     btn.disabled = true; btn.textContent = '계산 중...';
     out.innerHTML = '<div class="hint">Turn Over 를 세는 중입니다 — 20초쯤 걸립니다.</div>';
     try{
-      const { data, error } = await sb.rpc('asap_summary', { p_from: from, p_to: to });
+      const { data, error } = await sb.rpc('asap_summary',
+        { p_from: from, p_to: to, p_round: round.id });
       if(error) throw new Error(error.message);
       const rows = (data||[]).map(x => ({ ...x,
         lines:Number(x.lines), vins:Number(x.vins),
         cost_sum:Number(x.cost_sum), amount:Number(x.amount) }));
       const resolve = await asapRetailerResolver();
+      await asapLoadNames();
       const byRt = new Map(); const unmatched = new Map();
       rows.forEach(r => {
         const rt = resolve(r.scope, r.branch);
@@ -9077,6 +9350,8 @@ async function renderAsapRoundDetail(round, type){
         g[r.scope === 'SALES' ? 'sales' : 'service'] += r.amount;
         g.amount += r.amount; g.lines += r.lines; g.people++;
       });
+      const rv = await asapReviewFlags(rows);
+      const flagged = rows.filter(rv.flag).sort((a,b)=>b.amount-a.amount);
       const T = { amount: rows.reduce((a,r)=>a+r.amount,0), lines: rows.reduce((a,r)=>a+r.lines,0),
                   people: rows.length,
                   sales: rows.filter(r=>r.scope==='SALES').reduce((a,r)=>a+r.amount,0),
@@ -9085,6 +9360,15 @@ async function renderAsapRoundDetail(round, type){
       const rtRows = [...byRt.values()].sort((a,b)=>a.code.localeCompare(b.code));
       const un = [...unmatched.entries()];
       out.innerHTML = `
+        ${flagged.length ? `<div class="info-card" style="border-color:#e0b050; background:#fff8ec; margin-bottom:10px;">
+          <b>검토 필요 ${flagged.length}명</b>
+          <div class="hint" style="margin-top:4px;">
+            한 사람 인센티브가 중앙값(${fmtWon(rv.median)})의 ${rv.cfg.multiple_of_median}배
+            이상이면서 ${fmtWon(rv.cfg.min_amount)} 이상인 경우입니다 — 기준 ${fmtWon(rv.bar)}.
+            틀렸다는 뜻은 아니고 한 번 보시라는 표시입니다.<br>
+            ${flagged.slice(0,10).map(f=>`${esc2(f.branch)} <b>${esc2(f.person||'(미기재)')}</b>
+              ${f.lines}건 ${fmtWon(f.amount)}`).join(' · ')}
+            ${flagged.length>10 ? ` 외 ${flagged.length-10}명` : ''}</div></div>` : ''}
         ${un.length ? `<div class="info-card" style="border-color:#e0b050; background:#fff8ec; margin-bottom:10px;">
           <b>리테일러를 못 찾은 지점 ${un.length}곳 · ${fmtWon(un.reduce((a,x)=>a+x[1],0))}</b>
           <div class="hint" style="margin-top:4px;">${un.map(x=>`${esc2(x[0])} ${fmtWon(x[1])}`).join(' · ')}
@@ -9113,40 +9397,88 @@ async function renderAsapRoundDetail(round, type){
           <td style="text-align:right;">${fmtWon(T.sales)}</td>
           <td style="text-align:right;">${fmtWon(T.service)}</td>
           <td style="text-align:right;">${fmtWon(T.amount)}</td></tr></tfoot></table></div>
-        <div class="action-row">
-          <button class="btn btn-sm btn-ghost" id="asDetail">지점·판매자별 펼쳐보기</button>
-          <button class="btn btn-sm" id="asPublish" style="margin-left:auto;">${round.status === 'DRAFT'
-            ? '리테일러에 정산내역 공지' : '다시 계산해서 정정 공지'}</button>
-        </div>
         <div id="asDetailBox"></div>`;
+      // 공지는 맨 위에 — 다른 정산건과 같은 자리 (매니저 지시 2026-10-23)
+      const top = document.getElementById('rd_actions');
+      top.innerHTML = `<button class="btn" id="asPublish">${round.status === 'DRAFT'
+          ? '리테일러에 정산내역 공지' : '다시 계산해서 정정 공지'}</button>
+        <button class="btn btn-ghost" id="asDetail">지점·판매자별 펼쳐보기</button>
+        <span class="hint" style="align-self:center;">
+          ${rtRows.length}개사 · ${fmtWon(T.amount)} 을 공지합니다</span>`;
 
-      out.querySelector('#asDetail').onclick = () => {
+      const drawDetail = (scope) => {
         const box = out.querySelector('#asDetailBox');
-        if(box.innerHTML){ box.innerHTML = ''; return; }
+        const mine = rows.filter(r => r.scope === scope);
         const byBranch = new Map();
-        rows.forEach(r => {
-          const k = r.scope + '|' + r.branch;
-          if(!byBranch.has(k)) byBranch.set(k, []);
-          byBranch.get(k).push(r);
-        });
-        box.innerHTML = [...byBranch.entries()].map(([k, list]) => {
-          const [sc, br] = k.split('|');
-          return `<div style="border:1px solid var(--surface3); border-radius:6px; margin-top:8px;">
-            <div style="display:flex; gap:10px; padding:7px 10px; background:var(--surface2);
-                 font-size:12.5px; font-weight:600;">
-              <span class="badge ${sc==='SALES'?'badge-ap':'badge-off'}">${sc==='SALES'?'Sales':'Service'}</span>
-              <span>${esc2(br)}</span>
-              <span style="margin-left:auto;">${list.reduce((a,x)=>a+x.lines,0).toLocaleString('ko-KR')}건 ·
-                ${fmtWon(list.reduce((a,x)=>a+x.amount,0))}</span></div>
-            <table><tbody>${list.map(x => `<tr><td>${esc2(x.person||'(미기재)')}</td>
-              <td style="text-align:right;">${x.lines.toLocaleString('ko-KR')}건</td>
-              <td style="text-align:right;">${fmtWon(x.cost_sum)}</td>
-              <td style="text-align:right;"><b>${fmtWon(x.amount)}</b></td></tr>`).join('')}
-            </tbody></table></div>`;
-        }).join('');
+        mine.forEach(r => { const k = r.branch || '(미기재)';
+          if(!byBranch.has(k)) byBranch.set(k, []); byBranch.get(k).push(r); });
+        const tabBtn = (sc, label, n) => `<button class="btn btn-sm ${sc===scope?'':'btn-ghost'}"
+          data-as-tab="${sc}">${label} ${n}명</button>`;
+        const nS = rows.filter(r=>r.scope==='SALES').length, nV = rows.filter(r=>r.scope==='SERVICE').length;
+        box.innerHTML = `
+          <div class="action-row" style="margin-top:10px;">
+            ${tabBtn('SALES','전시장 (Sales)',nS)}${tabBtn('SERVICE','서비스 (Service)',nV)}
+            <span class="hint" style="align-self:center; margin-left:auto;">
+              ${scope==='SALES'?'그 분기에 판 차 — 전시장·영업사원 실적':'그 외 — AS지점·담당SA 실적'}</span>
+          </div>
+          ${[...byBranch.entries()].sort((a,b)=>a[0].localeCompare(b[0])).map(([br, list]) => {
+            const L = list.slice().sort((a,b)=>b.amount-a.amount);
+            const sum = (f) => L.reduce((a,x)=>a+f(x),0);
+            return `<div style="border:1px solid var(--surface3); border-radius:6px; margin-top:8px; overflow:hidden;">
+              <div style="display:flex; gap:10px; align-items:center; padding:7px 10px;
+                   background:var(--surface2); font-size:12.5px; font-weight:600;">
+                <span>${esc2(asapBranchLabel(scope, br))}</span>
+                <span class="hint">${L.length}명</span>
+                <span style="margin-left:auto;">${sum(x=>x.lines).toLocaleString('ko-KR')}건 ·
+                  ${fmtWon(sum(x=>x.amount))}</span></div>
+              <div style="overflow-x:auto;"><table style="min-width:720px;"><thead><tr>
+                <th style="width:30%;">담당자</th>
+                <th style="text-align:right;">Defender 건</th><th style="text-align:right;">Defender 원가</th>
+                <th style="text-align:right;">그 외 건</th><th style="text-align:right;">그 외 원가</th>
+                <th style="text-align:right;">합계 건</th><th style="text-align:right;">원가합계</th>
+                <th style="text-align:right;">인센티브</th>
+              </tr></thead><tbody>
+                ${L.map(x => `<tr>
+                  <td>${esc2(x.person||'(미기재)')}
+                    ${rv.flag(x) ? '<span class="badge badge-warn" style="margin-left:6px;">검토 필요</span>' : ''}</td>
+                  <td style="text-align:right;">${Number(x.lines_df||0).toLocaleString('ko-KR')}</td>
+                  <td style="text-align:right;">${fmtWon(x.cost_df)}</td>
+                  <td style="text-align:right;">${Number(x.lines_etc||0).toLocaleString('ko-KR')}</td>
+                  <td style="text-align:right;">${fmtWon(x.cost_etc)}</td>
+                  <td style="text-align:right;">${x.lines.toLocaleString('ko-KR')}</td>
+                  <td style="text-align:right;">${fmtWon(x.cost_sum)}</td>
+                  <td style="text-align:right;"><b>${fmtWon(x.amount)}</b></td></tr>`).join('')}
+              </tbody><tfoot><tr>
+                <td>소계</td>
+                <td style="text-align:right;">${sum(x=>Number(x.lines_df||0)).toLocaleString('ko-KR')}</td>
+                <td style="text-align:right;">${fmtWon(sum(x=>Number(x.cost_df||0)))}</td>
+                <td style="text-align:right;">${sum(x=>Number(x.lines_etc||0)).toLocaleString('ko-KR')}</td>
+                <td style="text-align:right;">${fmtWon(sum(x=>Number(x.cost_etc||0)))}</td>
+                <td style="text-align:right;">${sum(x=>x.lines).toLocaleString('ko-KR')}</td>
+                <td style="text-align:right;">${fmtWon(sum(x=>x.cost_sum))}</td>
+                <td style="text-align:right;">${fmtWon(sum(x=>x.amount))}</td>
+              </tr></tfoot></table></div></div>`;
+          }).join('')}`;
+        box.querySelectorAll('[data-as-tab]').forEach(b =>
+          b.onclick = () => drawDetail(b.dataset.asTab));
       };
 
-      out.querySelector('#asPublish').onclick = () => asapPublish(round, type, last);
+      document.getElementById('asDetail').onclick = () => {
+        const box = out.querySelector('#asDetailBox');
+        if(box.innerHTML){ box.innerHTML = ''; return; }
+        drawDetail('SALES');
+      };
+      document.getElementById('asPublish').onclick = () => asapPublish(round, type, last);
+
+      // 라인 검토 — 이 화면의 본체. 빼고 나면 위 숫자를 다시 센다.
+      const old = host.querySelector('#asReviewHost');
+      if(old) old.remove();
+      const rh = document.createElement('div'); rh.id = 'asReviewHost';
+      host.appendChild(rh);
+      await renderAsapLineReview(round, from, to, rh, () => {
+        const b = document.getElementById('asCalc');
+        if(b){ b.textContent = '다시 계산하기'; b.classList.remove('btn-ghost'); }
+      });
     }catch(e){
       out.innerHTML = `<div class="hint" style="color:var(--danger);">계산 실패: ${e.message || e}</div>`;
     }finally{ btn.disabled = false; btn.textContent = '계산하기'; }
@@ -13714,6 +14046,46 @@ async function noticeRawSheets(round, type, claims){
       { key:'incentive', label:'인센티브', w:12, type:'num' },
     ], rows: bk });
     return out;
+  }
+
+  // ① -b ASAP 인센티브 — 그 분기 Turn Over 라인을 그대로 (DB 함수로 센다)
+  if(isAsapIncentive(type)){
+    const sm = round.source_summary || {};
+    const from = sm.from, to = sm.to;
+    if(from && to){
+      const { data, error } = await sb.rpc('asap_lines',
+        { p_from: from, p_to: to, p_round: round.id });
+      if(error) console.warn('[ASAP 원본]', error.message);
+      const L = data || [];
+      if(L.length) out.push({ sheet:'원본 (대상 라인)', columns:[
+        { key:'scope', label:'구분', w:9, align:'center' },
+        { key:'branch', label:'지점/전시장', w:18 }, { key:'person', label:'담당자', w:12 },
+        { key:'vin', label:'차대번호', w:20 },
+        { key:'inv_date', label:'인보이스완료일', w:13, align:'center' },
+        { key:'part_no', label:'품번', w:16 }, { key:'part_name', label:'품명', w:28 },
+        { key:'part_group', label:'부품그룹', w:13 },
+        { key:'claim_acct', label:'청구계정', w:16 },
+        { key:'model_code', label:'모델', w:9, align:'center' },
+        { key:'rate', label:'요율', w:8, type:'num' },
+        { key:'cost_sum', label:'품목원가합계', w:14, type:'num' },
+        { key:'incentive', label:'인센티브(라인)', w:14, type:'num' },
+        { key:'excluded', label:'제외 사유', w:18 },
+      ], rows: L.map(x => ({ ...x,
+        rate: Number(x.rate), cost_sum: Number(x.cost_sum),
+        incentive: Math.round(Number(x.cost_sum) * Number(x.rate)),
+        excluded: x.excluded || '' })) });
+      // 인원별도 같이 (결재·공지에 바로 쓰게)
+      const sum = await sb.rpc('asap_summary', { p_from: from, p_to: to, p_round: round.id });
+      if(!sum.error && (sum.data||[]).length) out.push({ sheet:'인원별 금액', columns:[
+        { key:'scope', label:'구분', w:9, align:'center' },
+        { key:'branch', label:'지점/전시장', w:18 }, { key:'person', label:'담당자', w:12 },
+        { key:'lines', label:'라인', w:9, type:'num' }, { key:'vins', label:'차량', w:9, type:'num' },
+        { key:'cost_sum', label:'원가합계', w:15, type:'num' },
+        { key:'amount', label:'인센티브', w:14, type:'num' },
+      ], rows: sum.data.map(x => ({ ...x, lines:Number(x.lines), vins:Number(x.vins),
+        cost_sum:Number(x.cost_sum), amount:Number(x.amount) })) });
+      return out;
+    }
   }
 
   // ② 캠페인 (리콜 업셀링 · 시즈널 · Welcome Back) — campaign_lines / campaign_ro
