@@ -1093,7 +1093,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 14:11';
+const BUILD = '10-23 14:19';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -2408,9 +2408,22 @@ function eo3vFindHeader(rows, required){
   for(let i=0; i<Math.min(rows.length, 15); i++){
     const map = {};
     rows[i].forEach((h, idx) => { const t = String(h ?? '').trim(); if(t && map[t] === undefined) map[t] = idx; });
-    if(required.every(c => map[c] !== undefined)) return { headerRow: i, map };
+    // 열 이름을 순서대로 들고 있는다 — 리테일러가 받는 엑셀이 원본과 같은
+    // 열·같은 순서여야 한다 (매니저 지시 2026-10-23)
+    if(required.every(c => map[c] !== undefined)){
+      const cols = rows[i].map((h, idx) => ({ name: String(h ?? '').trim(), idx }))
+                          .filter(x => x.name);
+      return { headerRow: i, map, cols };
+    }
   }
   return null;
+}
+
+/* 원본 행을 열 하나도 빼지 않고 {헤더: 값} 으로. 순서는 원본 그대로. */
+function eoRawRow(hdr, row){
+  const o = {};
+  (hdr.cols || []).forEach(c => { o[c.name] = _eoCell(row, c.idx); });
+  return o;
 }
 function eo3vNum(v){ return Number(String(v ?? '').replace(/,/g,'')) || 0; }
 /* 원본 셀을 사람이 읽는 문자열로. 날짜는 'YYYY-MM-DD HH:MM' 까지만 남긴다. */
@@ -2497,6 +2510,7 @@ async function parseEngineOilCoupon(buf, type, roundId){
     a.vme      += total * (1 - P.CUSTOMER_RATE) - P.CASTROL_PER;
     nTarget++; targetHashes.push({ hash, code, keys:[vin, String(row[iRef] ?? ''), cpn], amount: total });
     lines.push({
+      raw: eoRawRow(hdr, row),
       kind:'COUPON', workshop_code: code, site_name: site,
       coupon_no: cpn, ref_no: String(row[iRef] ?? '').trim(),
       claim_status: String(row[iStatus] ?? '').trim(),
@@ -2585,6 +2599,7 @@ async function parseEngineOilSales(buf, type, roundId){
     if(!sg){ sg = { code, site, sid, name: snm, sale:0, refund:0 }; bySeller.set(sk, sg); }
     if(t === '판매') sg.sale++; else sg.refund++;
     bookLines.push({
+      raw: eoRawRow(hdr, row),
       kind:'BOOK', workshop_code: code, site_name: site,
       book_id: cb, book_type: t, vin,
       car_no: _eoCell(row, hdr.map['차량번호']), customer: _eoCell(row, hdr.map['고객명']),
@@ -2656,6 +2671,7 @@ async function parseEngineOilSalesPayment(buf, type, roundId){
     const bucket = t === '판매' ? g.sale : (t === '환불' ? g.full : g.part);
     bucket.n++; bucket.amt += price;
     lines.push({
+      raw: eoRawRow(hdr, row),
       kind:'BOOK', workshop_code: code, site_name: site,
       book_id: cb, book_type: t, vin,
       product:   iProd !== undefined ? _eoCell(row, iProd) : null,
@@ -13400,7 +13416,25 @@ async function noticeRawSheets(round, type, claims){
   if(/Engine Oil/i.test(code) || /엔진오일/.test(type?.name || '')){
     const L = await sbAll(() => sb.from('engineoil_lines').select('*')
       .eq('round_id', round.id).order('retailer_code').order('workshop_code').order('used_at'), '원본');
+    /* 원본 열을 하나도 빼지 않고 그대로 낸다. raw 에 올린 그대로 담겨 있다.
+       (매니저 지시 2026-10-23 — 제가 쓸 열만 골라 담고 있었다) */
+    const rawSheet = (rows, sheet) => {
+      const names = [];
+      rows.forEach(x => Object.keys(x.raw || {}).forEach(k => { if(!names.includes(k)) names.push(k); }));
+      if(!names.length) return null;
+      return { sheet, columns: [
+          { key:'_rt', label:'리테일러', w:10 },
+          ...names.map(n => ({ key:n, label:n, w: Math.min(Math.max(n.length*2+6, 10), 30) })),
+        ],
+        rows: rows.map(x => ({ _rt: x.retailer_code || '', ...(x.raw || {}) })) };
+    };
     const cp = L.filter(x => x.kind === 'COUPON'), bk = L.filter(x => x.kind === 'BOOK');
+    const cpRaw = rawSheet(cp, '원본 쿠폰클레임'), bkRaw = rawSheet(bk, '원본 쿠폰북');
+    if(cpRaw || bkRaw){
+      if(cpRaw) out.push(cpRaw);
+      if(bkRaw) out.push(bkRaw);
+      return out;      // 원본이 있으면 그것만 낸다 — 골라 담은 표는 안 쓴다
+    }
     if(cp.length) out.push({ sheet:'원본 쿠폰클레임', columns:[
       { key:'retailer_code', label:'리테일러', w:10 }, { key:'site_name', label:'지점', w:16 },
       { key:'coupon_no', label:'쿠폰번호', w:16 }, { key:'ref_no', label:'참조번호', w:16 },
