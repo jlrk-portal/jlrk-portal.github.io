@@ -1093,7 +1093,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 13:53';
+const BUILD = '10-23 14:04';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -12332,7 +12332,13 @@ async function loadTurnoverFile(file, ym){
          <div style="height:6px; width:${pct}%; background:var(--accent); border-radius:3px;"></div></div>`);
   };
   for(let i = hi + 1; i < aoa.length; i++){
-    const r = aoa[i]; if(!r || r[col.ro_no] === null || r[col.ro_no] === undefined) continue;
+    /* RO번호만 보고 건너뛰면 부품 카운터 판매분이 통째로 빠진다 —
+       부품판매(개인) 은 정산번호(PC…)만 있고 RO번호가 없다.
+       실측 2026-10-23: 7월 액세서리 809건 중 88건이 이렇게 사라졌다.
+       정산번호도 RO번호도 없는 줄(합계·빈 줄)만 건너뛴다. */
+    const r = aoa[i]; if(!r) continue;
+    const blank = (v) => v === null || v === undefined || String(v).trim() === '';
+    if(blank(r[col.ro_no]) && blank(r[col.stl_no])) continue;
     const o = { ym };
     for(const [key] of TO_MAP){
       if(col[key] === undefined){ continue; }
