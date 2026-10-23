@@ -1128,7 +1128,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 18:22';
+const BUILD = '10-23 18:41';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -9406,6 +9406,8 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
   const TAB_LABEL = { ...LABEL, ALL:'전체', SHOW:'└ 전시차', PROMO:'└ 프로모션 대상 차량',
                       DSS:'└ DSS 의심', KEEP:'승인 (정산 포함)', OK:'정상 (무검토)' };
   const uniq = (a) => [...new Set(a)];
+  // '시승차 (Demonstrator · DM) — 이 차대는 시승차입니다' → '시승차 (Demonstrator · DM)'
+  const shortWhy = (w) => String(w || '').split(' \u2014 ')[0];
   const one  = (a) => { const u = uniq(a.filter(v => v !== null && v !== undefined && v !== '')); return u.length === 1 ? u[0] : null; };
 
   // 그 차대에 맞는 기본 제외 사유를 미리 골라둔다
@@ -9485,7 +9487,9 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
   const card = (g) => {
     const r = g[0], vin = r.vin;
     const sts  = uniq(g.map(state));
-    const why  = uniq(g.flatMap(x => [x.hard_excluded, ...(x.flags||[])].filter(Boolean)));
+    // 규칙 제외 문구는 짧게 (전체는 줄마다 title 로). 검토 사유는 분기가
+    // ' — ' 뒤에 붙어 있어서 자르면 안 된다.
+    const why  = uniq(g.flatMap(x => [shortWhy(x.hard_excluded), ...(x.flags||[])].filter(Boolean)));
     const cost = g.reduce((a,x) => a + x.cost_sum, 0);
     const amt  = g.reduce((a,x) => a + x.incentive, 0);
     // 아직 결정 안 한 줄만 일괄 대상. 이미 승인한 줄은 [전부 제외] 로 다시 빠지지 않는다.
@@ -9551,7 +9555,7 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
           <td style="text-align:right; white-space:nowrap;">${fmtWon(x.cost_sum)}</td>
           <td style="text-align:right; white-space:nowrap;">${fmtWon(x.incentive)}</td>
           <td style="text-align:right; white-space:nowrap;">
-            ${st === 'HARD' ? '<span class="hint">규칙 제외</span>'
+            ${st === 'HARD' ? `<span class="hint" title="${esc2(x.hard_excluded||'')}">${esc2(shortWhy(x.hard_excluded))}</span>`
               : x.decision ? `<span class="hint" title="${esc2(x.decision_reason||'')}">${esc2(
                     st === 'KEEP' ? (x.decision_reason || '승인') : (x.decision_reason || '제외'))}</span>
                   <button class="btn btn-sm btn-ghost" data-act="undo" data-id="${x.line_id}">되돌리기</button>`
