@@ -1092,7 +1092,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 13:26';
+const BUILD = '10-23 13:34';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -2647,8 +2647,12 @@ async function parseEngineOilSalesPayment(buf, type, roundId){
     const price = Number(String(row[iPrice]).replace(/,/g,'')) || 0;
     const brand = vin.charAt(2).toUpperCase() === 'L' ? 'lr' : 'jg';
     let g = byWs.get(code);
-    if(!g){ g = { jg:0, lr:0, n:0 }; byWs.set(code, g); }
+    // 결재용 요약표가 판매 / 전액환불 / 부분환불 로 갈려 있다 (2026-10-23)
+    if(!g){ g = { jg:0, lr:0, n:0,
+                  sale:{n:0,amt:0}, full:{n:0,amt:0}, part:{n:0,amt:0} }; byWs.set(code, g); }
     g[brand] += price; g.n++;
+    const bucket = t === '판매' ? g.sale : (t === '환불' ? g.full : g.part);
+    bucket.n++; bucket.amt += price;
     lines.push({
       kind:'BOOK', workshop_code: code, site_name: site,
       book_id: cb, book_type: t, vin,
@@ -2941,7 +2945,9 @@ function eo3vBuildBreakdown(coupon, sales, allWs, type, sp){
           incentive:{ sale:0, refund:0, count:0, amount:0 } };
         rt.workshops.push(wsRow);
       }
-      wsRow.sp = { jg: g.jg, lr: g.lr, n: g.n };
+      wsRow.sp = { jg: g.jg, lr: g.lr, n: g.n,
+                   sale: g.sale || {n:0,amt:0}, full: g.full || {n:0,amt:0},
+                   part: g.part || {n:0,amt:0} };
       wsRow.customer_code = w.customer_code || wsRow.customer_code;
       rt.sp_jg += g.jg; rt.sp_lr += g.lr;
     });
@@ -3019,6 +3025,7 @@ function eoConfirmPanel(round, type, claims, confirmed, total){
     foot = `<div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;
          padding:10px 12px; border-top:1px solid var(--surface3);">
       <button class="btn btn-sm btn-ghost" id="eoReopen">원본 다시 올리기 (DRAFT로)</button>
+      <button class="btn btn-sm btn-ghost" id="eoTplSwap">바우처 양식 교체</button>
       <button class="btn btn-sm btn-ghost" id="eoMaster" style="margin-left:auto;">마스터 파일 내려받기</button>
       <button class="btn btn-sm" id="eoVoucher">${round.status === 'VOUCHERED'
         ? '바우처 다시 생성' : '바우처 생성'}${vCount>1 ? ` (${vCount}개 파일)` : ''}</button>
@@ -3090,6 +3097,37 @@ function eoBindConfirm(round, type, claims, host){
 
   const mb = host.querySelector('#eoMaster');
   if(mb) mb.onclick = () => downloadMasterXlsx(mb);
+
+  /* 바우처 양식(템플릿) 교체 — 양식이 바뀌면 여기서 올린다.
+     설명·시트 이름·요약표는 생성할 때 이번 회차 값으로 덮으므로,
+     직전 회차 바우처를 그대로 양식으로 올려도 된다. (2026-10-23) */
+  const ts = host.querySelector('#eoTplSwap');
+  if(ts) ts.onclick = () => {
+    let box = host.querySelector('#eoTplBox2');
+    if(box){ box.remove(); return; }
+    box = document.createElement('div');
+    box.id = 'eoTplBox2'; box.className = 'info-card'; box.style.marginTop = '10px';
+    const LABEL = { saveback:'사용반환금', support:'Retailer Support',
+                    incentive:'Sales Incentive', salespayment:'판매대금 (AR)' };
+    box.innerHTML = `<div class="section-label" style="margin-top:0;">바우처 양식 교체</div>
+      <div class="hint" style="margin-bottom:8px;">올린 양식은 이후 회차에도 계속 쓰입니다.
+        설명·탭 이름·요약표는 생성할 때 그 회차 값으로 덮어쓰니, 직전 회차 바우처를 그대로 올리셔도 됩니다.</div>
+      ${Object.keys(EO3V_TPL).map(k => `<div class="field" style="max-width:560px;">
+         <label>${LABEL[k] || k}</label><input type="file" accept=".xlsx" data-tpl="${k}"></div>`).join('')}
+      <div class="hint" id="eoTplMsg" style="margin-top:6px;"></div>`;
+    host.appendChild(box);
+    box.querySelectorAll('input[type=file]').forEach(inp => inp.onchange = async () => {
+      const f = inp.files[0]; if(!f) return;
+      const msg = box.querySelector('#eoTplMsg');
+      msg.textContent = `${f.name} 올리는 중...`;
+      const { error } = await sb.storage.from('settlements')
+        .upload(EO3V_TPL[inp.dataset.tpl], f, { upsert:true });
+      if(error){ msg.innerHTML = `<span style="color:var(--danger);">업로드 실패: ${error.message}</span>`; return; }
+      inp.disabled = true;
+      msg.innerHTML = `<b>${LABEL[inp.dataset.tpl]}</b> 양식을 바꿨습니다. 이제 [바우처 생성]을 누르시면 새 양식으로 나옵니다.`;
+      await logAudit('VOUCHER_TPL','ROUND', round.id, { label: inp.dataset.tpl + ' ← ' + f.name });
+    });
+  };
 
   const re = host.querySelector('#eoReopen');
   if(re) re.onclick = async () => {
@@ -5356,13 +5394,60 @@ async function generateEngineOilSpVoucher(round, type, s){
     const issueDate = round.invoice_issue_date
       ? (() => { const [y,m,d] = round.invoice_issue_date.split('-').map(Number); return new Date(Date.UTC(y,m-1,d)); })()
       : (() => { const n = new Date(); return new Date(Date.UTC(n.getFullYear(), n.getMonth(), n.getDate())); })();
+    /* 설명(Text) — 기준 기간을 쓰고 JG / LR 로 가른다.
+       템플릿에는 'FY27 Q2 July ..._JG' 가 박혀 있었다 (지난 회차 그대로).
+       표지 39행은 입력시트 M열(JG) 합, 40행은 N열(LR) 합을 가져온다. */
+    const basis = (round.basis_label || round.period_label || '').trim();
+    const desc  = vLine.description || 'Engine Oil Package_Sales payment';
     const coverCells = {
       'E21': { value: dateToExcelSerial(issueDate) },
-      'N39': { value: `${round.period_label} ${vLine.description || 'Engine Oil Package_Sales payment'}`.trim(), isString: true }
+      'N39': { value: `${basis} ${desc}_JG`.trim(), isString: true },
+      'N40': { value: `${basis} ${desc}_LR`.trim(), isString: true },
     };
+    // 입력시트의 설명도 같이 (P7 하나만 고치면 아래 행은 =$P$7 로 따라온다)
+    inputCells['P7'] = { value: `${basis} ${desc}`.trim(), isString: true };
+
+    /* 결재용 요약표 — 세 번째 시트. 지난 회차 기간이 탭 이름에 남아 있고,
+       값은 외부 통합문서를 VLOOKUP 해서 열 때마다 깨진다. 숫자로 채운다. */
+    const sumSheetName = readWb.SheetNames.find(n => n !== inputSheetName && n !== coverSheetName);
+    const sheetFills = {};
+    let sumNote = '';
+    if(sumSheetName){
+      const sw = readWb.Sheets[sumSheetName];
+      // 행 찾기 — O열 Customer code(KR…MIS) 우선, 없으면 D열 Workshop 라벨
+      const byCust = new Map(), byLabel = new Map();
+      for(let r = 5; r <= 60; r++){
+        const o = sw['O'+r], d = sw['D'+r];
+        if(o && o.v) byCust.set(String(o.v).trim(), r);
+        if(d && d.v) byLabel.set(String(d.v).trim(), r);
+      }
+      // 먼저 0 으로 비운다 — 안 그러면 지난 회차 값이 남는다
+      const cells = {};
+      byLabel.forEach((r, lbl) => {
+        if(lbl === 'Workshop' || lbl === 'Total') return;
+        ['E','F','G','H','I','J','K'].forEach(c => { cells[c+r] = 0; });
+      });
+      let hit = 0, miss = [];
+      (s.retailers||[]).forEach(rt => (rt.workshops||[]).forEach(w => {
+        if(!w.sp) return;
+        const r = byCust.get(String(w.customer_code||'').trim()) || byLabel.get(String(w.code||'').trim());
+        if(!r){ miss.push(w.code); return; }
+        const sp = w.sp, R = n => Math.round(n || 0);
+        cells['E'+r] = sp.sale?.n || 0;  cells['F'+r] = R(sp.sale?.amt);
+        cells['G'+r] = sp.full?.n || 0;  cells['H'+r] = R(sp.full?.amt);
+        cells['I'+r] = sp.part?.n || 0;  cells['J'+r] = R(sp.part?.amt);
+        cells['K'+r] = R((sp.sale?.amt||0) + (sp.full?.amt||0) + (sp.part?.amt||0));
+        hit++;
+      }));
+      sheetFills[sumSheetName] = cells;
+      sumNote = ` · 요약표 ${hit}개 지점`
+        + (miss.length ? ` <span style="color:var(--accent-ar);">(미배치 ${miss.join(', ')})</span>` : '');
+    }
 
     setP('바우처 파일을 만드는 중...');
-    const buffer = await buildVoucherFromTemplate(tplBuffer, { inputCells, coverCells, images: [], inputSheetName, coverSheetName });
+    const buffer = await buildVoucherFromTemplate(tplBuffer, {
+      inputCells, coverCells, images: [], inputSheetName, coverSheetName, sheetFills,
+      renameSheet: sumSheetName ? { from: sumSheetName, to: basis.slice(0,31) } : null });
     const vp = eoVoucherPeriod(round);
     const perAr = sanitizeFilename(vp ? (vp.ym || vp.file) : round.period_label);
     const fname = `AR Voucher_${perAr}_Engine Oil Package_Sales payment.xlsx`;
@@ -5375,7 +5460,7 @@ async function generateEngineOilSpVoucher(round, type, s){
     await sb.from('vouchers').insert({ round_id: round.id, retailer_id: null, generated_by: user?.id || null });
     if(round.status !== 'VOUCHERED') await sb.from('rounds').update({ status:'VOUCHERED' }).eq('id', round.id);
     await logAudit('AR_VOUCHER_GENERATE','ROUND',round.id,{label:`${type.name} · ${round.period_label}`});
-    setP(`완료 — ${fname} 다운로드됨.<br>배치: ${placed.join(' · ')}`
+    setP(`완료 — ${fname} 다운로드됨.<br>설명 기준 <b>${basis}</b>${sumNote}<br>배치: ${placed.join(' · ')}`
       + (unmatched.length ? `<br><span style="color:var(--accent-ar);">미배치: ${unmatched.join(', ')}</span>` : '')
       + '<br>표지 PDF는 엑셀에서 [파일 > 다른 이름으로 저장 > PDF]로 저장하세요.');
   }catch(err){
@@ -9688,7 +9773,7 @@ function setCellInSheetXml(xml, ref, value, isString){
   return { xml: xml.slice(0, m.index) + replacement + xml.slice(m.index + m[0].length), ok:true };
 }
 
-async function buildVoucherFromTemplate(tplBuffer, { inputCells, coverCells, images, inputSheetName, coverSheetName }){
+async function buildVoucherFromTemplate(tplBuffer, { inputCells, coverCells, images, inputSheetName, coverSheetName, sheetFills, renameSheet }){
   const zip = await JSZip.loadAsync(tplBuffer);
 
   // --- 시트 이름 → 파일 경로 매핑 (workbook.xml + rels) ---
@@ -9724,6 +9809,29 @@ async function buildVoucherFromTemplate(tplBuffer, { inputCells, coverCells, ima
       xml = r.xml;
     }
     zip.file(inputPath, xml);
+  }
+
+  // --- 1-b) 그 밖의 시트 채우기 (결재용 요약표 등) ---
+  if(sheetFills){
+    for(const [sname, cells] of Object.entries(sheetFills)){
+      const p = pathOf(sname);
+      if(!p || !zip.file(p)) continue;
+      let xml = await zip.file(p).async('string');
+      for(const [ref, val] of Object.entries(cells)) xml = setCellInSheetXml(xml, ref, val, false).xml;
+      zip.file(p, xml);
+    }
+  }
+
+  // --- 1-c) 시트 이름 바꾸기 (탭에 지난 회차 기간이 남아 있다) ---
+  if(renameSheet && renameSheet.from && renameSheet.to && renameSheet.from !== renameSheet.to){
+    const e = sheetEntries.find(x => x.name === renameSheet.from)
+           || sheetEntries.find(x => x.name.trim() === String(renameSheet.from).trim());
+    if(e){
+      const esc = v => String(v).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+                               .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+      wbXml = wbXml.replace(e.tag, e.tag.replace(`name="${e.name}"`, `name="${esc(renameSheet.to)}"`));
+      zip.file('xl/workbook.xml', wbXml);
+    }
   }
 
   // --- 2) 표지(AP without PO) 날짜/설명 ---
