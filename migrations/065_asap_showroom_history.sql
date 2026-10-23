@@ -69,24 +69,6 @@ create or replace view asap_showroom_vehicles as
    group by vin;
 
 
--- ── 엔진: 전시차 판정에 이 이력도 함께 본다 ─────────────────────
---  기존 asap_support_vins(손으로 올린 것) 과 합집합으로 본다.
-create or replace function asap_showroom_window(p_from date, p_to date, p_months int)
-returns table (vin text)
-language sql stable as $$
-  select distinct s.vin
-    from asap_support_vins s, lateral asap_fy_range(s.period_label) r
-   where s.kind = 'SHOWROOM' and r.d_from is not null
-     and (r.d_from - make_interval(months => p_months))::date <= p_to
-     and (r.d_to   + make_interval(months => p_months))::date >= p_from
-  union
-  select distinct h.vin
-    from asap_showroom_support h, lateral asap_fy_range(h.fy_label) r
-   where r.d_from is not null
-     and (r.d_from - make_interval(months => p_months))::date <= p_to
-     and (r.d_to   + make_interval(months => p_months))::date >= p_from
-$$;
-
 -- 확인
 select 'asap_showroom_support' as 항목,
        case when to_regclass('public.asap_showroom_support') is not null then 'ok' else '없음' end as 상태

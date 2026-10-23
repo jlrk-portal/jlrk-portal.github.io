@@ -1098,7 +1098,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 16:06';
+const BUILD = '10-23 16:20';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -9275,67 +9275,103 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
     incentive: Math.round(Number(x.cost_sum) * Number(x.rate)),
     flags: x.flags || [] }));
 
-  let filter = 'FLAG', page = 1, term = '';
+  let filter = 'FLAG', page = 1, term = '', group = false;
   const PAGE = 200;
   const state = (r) => r.hard_excluded ? 'HARD' : (r.decision === 'EXCLUDE' ? 'OUT'
                      : (r.flags.length ? 'FLAG' : 'OK'));
   const LABEL = { HARD:'규칙 제외', OUT:'정산 제외', FLAG:'검토 필요', OK:'정상' };
   const BADGE = { HARD:'badge-off', OUT:'badge-danger', FLAG:'badge-warn', OK:'badge-ap' };
+  // 검토 사유별로 따로 본다 — 한 분기에 1,000줄 넘게 걸리니 한꺼번에는 검토가 안 된다
+  const RSN = { SHOW:'전시차', PROMO:'프로모션', DSS:'DSS' };
+  const has = (r, k) => (r.flags||[]).some(x => x.startsWith(RSN[k]));
+  const match = (r, k) => k === 'ALL' ? true
+                        : RSN[k]      ? (state(r) !== 'HARD' && has(r, k))
+                        :               state(r) === k;
+  const TABS = ['ALL','FLAG','SHOW','PROMO','DSS','OUT','HARD','OK'];
+  const TAB_LABEL = { ...LABEL, ALL:'전체', SHOW:'└ 전시차', PROMO:'└ 프로모션', DSS:'└ DSS 의심' };
+  const REASON_HINT = { SHOW:'전시차 지원분', PROMO:'프로모션 지원분', DSS:'DSS 기본장착' };
 
   const draw = () => {
-    const counts = { ALL: all.length, HARD:0, OUT:0, FLAG:0, OK:0 };
-    all.forEach(r => counts[state(r)]++);
+    const counts = {}; TABS.forEach(k => counts[k] = all.filter(r => match(r, k)).length);
     const kept = all.filter(r => !r.hard_excluded && r.decision !== 'EXCLUDE');
     const keptAmt = kept.reduce((a,r) => a + r.incentive, 0);
     const t = term.trim().toUpperCase();
-    const list = all.filter(r => (filter === 'ALL' || state(r) === filter)
+    const list = all.filter(r => match(r, filter)
       && (!t || [r.vin, r.part_no, r.part_name, r.person, r.branch]
             .some(v => String(v||'').toUpperCase().includes(t))));
-    const shown = list.slice(0, PAGE * page);
+    const listAmt = list.reduce((a,r) => a + r.incentive, 0);
+
+    // 차대로 묶어 보기 — 전시차·프로모션은 한 대에 액세서리가 여러 줄이라 차대 단위로 판단한다
+    const rows = (() => {
+      if(!group) return list.map(r => [r]);
+      const m = new Map();
+      list.forEach(r => { if(!m.has(r.vin)) m.set(r.vin, []); m.get(r.vin).push(r); });
+      return [...m.values()];
+    })();
+    const shown = rows.slice(0, PAGE * page);
+    const uniq = (a) => [...new Set(a)];
+
+    const rowHtml = (g) => {
+      const r = g[0], one = g.length === 1;
+      const ids  = g.filter(x => state(x) !== 'HARD').map(x => x.line_id);
+      const cost = g.reduce((a,x) => a + x.cost_sum, 0);
+      const amt  = g.reduce((a,x) => a + x.incentive, 0);
+      const names = uniq(g.map(x => x.part_name).filter(Boolean));
+      const why  = uniq(g.flatMap(x => [x.hard_excluded, ...(x.flags||[]),
+            x.decision === 'EXCLUDE' ? ('제외 — ' + (x.decision_reason || '사유 없음')) : null]
+            .filter(Boolean)));
+      return `<tr data-id="${r.line_id}">
+        <td>${ids.length ? `<input type="checkbox" class="as-ck" data-ids="${ids.join(',')}">` : ''}</td>
+        <td>${uniq(g.map(state)).map(s2 => `<span class="badge ${BADGE[s2]}">${LABEL[s2]}</span>`).join(' ')}</td>
+        <td>${uniq(g.map(x => x.scope === 'SALES' ? '전시장' : '서비스')).join(' / ')}</td>
+        <td>${uniq(g.map(x => asapBranchLabel(x.scope, x.branch))).map(esc2).join(', ')}</td>
+        <td>${uniq(g.map(x => x.person || '(미기재)')).map(esc2).join(', ')}</td>
+        <td style="font-variant-numeric:tabular-nums;">${esc2(r.vin)}</td>
+        <td style="text-align:center;">${one ? esc2(r.inv_date) : g.length.toLocaleString('ko-KR') + '건'}</td>
+        <td>${one ? esc2(r.part_no) : ''}</td>
+        <td>${one ? esc2(r.part_name)
+                  : esc2(names.slice(0,3).join(', ')) + (names.length > 3 ? ' 외 ' + (names.length-3) : '')}</td>
+        <td style="text-align:center;">${esc2(r.model_code || '—')}</td>
+        <td style="text-align:right;">${one ? (r.rate*100).toFixed(0) + '%' : ''}</td>
+        <td style="text-align:right;">${fmtWon(cost)}</td>
+        <td style="text-align:right;">${fmtWon(amt)}</td>
+        <td class="hint">${why.map(esc2).join(' · ')}</td></tr>`;
+    };
 
     box.innerHTML = `
       <div class="section-label" style="margin-top:0;">라인 검토</div>
       <div class="hint" style="margin-bottom:8px;">
         규칙상 빠지는 것(시승차·커티시카·특수차)은 <b>규칙 제외</b>로 이미 빠져 있습니다.
         <b>검토 필요</b>는 빠지지 않은 상태입니다 — 보시고 빼실 것만 고르세요.
+        사유별 버튼으로 나눠 보시고, 전시차·프로모션은 <b>차대로 묶어 보기</b>로 한 대씩 판단하시면 됩니다.
       </div>
       <div class="action-row" style="margin-top:0; flex-wrap:wrap;">
-        ${['ALL','FLAG','OUT','HARD','OK'].map(k => `<button class="btn btn-sm ${filter===k?'':'btn-ghost'}"
-          data-f="${k}">${k==='ALL'?'전체':LABEL[k]} ${(k==='ALL'?counts.ALL:counts[k]).toLocaleString('ko-KR')}</button>`).join('')}
+        ${TABS.map(k => `<button class="btn btn-sm ${filter===k?'':'btn-ghost'}"
+          data-f="${k}">${TAB_LABEL[k]} ${counts[k].toLocaleString('ko-KR')}</button>`).join('')}
+        <label class="hint" style="display:flex; align-items:center; gap:5px; margin-left:auto;">
+          <input type="checkbox" id="asGroup" ${group?'checked':''}> 차대로 묶어 보기</label>
         <input id="asQ" placeholder="차대·품번·품명·담당자·지점 검색" value="${esc2(term)}"
-               style="max-width:260px; padding:6px 8px; margin-left:auto;">
+               style="max-width:260px; padding:6px 8px;">
       </div>
       <div class="hint" style="margin:6px 0 10px;">
         집계에 들어가는 라인 <b>${kept.length.toLocaleString('ko-KR')}건</b> ·
         인센티브(라인 합, 올림 전) <b>${fmtWon(keptAmt)}</b>
+        &nbsp;|&nbsp; 지금 보기 <b>${list.length.toLocaleString('ko-KR')}건</b>${
+          group ? ` · 차대 <b>${rows.length.toLocaleString('ko-KR')}대</b>` : ''} ·
+        <b>${fmtWon(listAmt)}</b>
       </div>
       <div style="overflow-x:auto;"><table style="min-width:1180px;"><thead><tr>
         <th style="width:28px;"><input type="checkbox" id="asAll"></th>
         <th>상태</th><th>구분</th><th>지점/전시장</th><th>담당자</th><th>차대번호</th>
-        <th style="text-align:center;">인보이스완료일</th><th>품번</th><th>품명</th>
+        <th style="text-align:center;">${group ? '건수' : '인보이스완료일'}</th><th>품번</th><th>품명</th>
         <th style="text-align:center;">모델</th><th style="text-align:right;">요율</th>
         <th style="text-align:right;">원가합계</th><th style="text-align:right;">인센티브</th>
         <th>검토 사유 / 제외 사유</th>
       </tr></thead><tbody>
-        ${shown.map(r => { const st = state(r); return `<tr data-id="${r.line_id}">
-          <td>${st === 'HARD' ? '' : `<input type="checkbox" class="as-ck" data-id="${r.line_id}">`}</td>
-          <td><span class="badge ${BADGE[st]}">${LABEL[st]}</span></td>
-          <td>${r.scope === 'SALES' ? '전시장' : '서비스'}</td>
-          <td>${esc2(asapBranchLabel(r.scope, r.branch))}</td>
-          <td>${esc2(r.person || '(미기재)')}</td>
-          <td style="font-variant-numeric:tabular-nums;">${esc2(r.vin)}</td>
-          <td style="text-align:center;">${esc2(r.inv_date)}</td>
-          <td>${esc2(r.part_no)}</td><td>${esc2(r.part_name)}</td>
-          <td style="text-align:center;">${esc2(r.model_code || '—')}</td>
-          <td style="text-align:right;">${(r.rate*100).toFixed(0)}%</td>
-          <td style="text-align:right;">${fmtWon(r.cost_sum)}</td>
-          <td style="text-align:right;">${fmtWon(r.incentive)}</td>
-          <td class="hint">${[r.hard_excluded, ...(r.flags||[]),
-              r.decision === 'EXCLUDE' ? ('제외 — ' + (r.decision_reason || '사유 없음')) : null]
-              .filter(Boolean).map(esc2).join(' · ')}</td></tr>`; }).join('')}
+        ${shown.map(rowHtml).join('')}
       </tbody></table></div>
-      ${list.length > shown.length ? `<div class="action-row"><button class="btn btn-sm btn-ghost" id="asMore">
-        더 보기 (${shown.length.toLocaleString('ko-KR')} / ${list.length.toLocaleString('ko-KR')})</button></div>` : ''}
+      ${rows.length > shown.length ? `<div class="action-row"><button class="btn btn-sm btn-ghost" id="asMore">
+        더 보기 (${shown.length.toLocaleString('ko-KR')} / ${rows.length.toLocaleString('ko-KR')}${group?'대':''})</button></div>` : ''}
       <div class="action-row">
         <button class="btn btn-sm btn-danger" id="asExclude">선택한 줄 정산 제외</button>
         <button class="btn btn-sm btn-ghost" id="asRestore">선택한 줄 제외 해제</button>
@@ -9343,12 +9379,16 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
       </div>`;
 
     box.querySelectorAll('[data-f]').forEach(b => b.onclick = () => { filter = b.dataset.f; page = 1; draw(); });
+    const gk = box.querySelector('#asGroup');
+    gk.onchange = () => { group = gk.checked; page = 1; draw(); };
     const q = box.querySelector('#asQ');
     q.oninput = () => { term = q.value; page = 1; const p = q.selectionStart; draw();
       const n = box.querySelector('#asQ'); n.focus(); n.setSelectionRange(p, p); };
     const more = box.querySelector('#asMore'); if(more) more.onclick = () => { page++; draw(); };
-    const sel = () => [...box.querySelectorAll('.as-ck:checked')].map(c => +c.dataset.id);
-    const upd = () => { box.querySelector('#asSel').textContent = `선택 ${sel().length}건`; };
+    const sel = () => [...box.querySelectorAll('.as-ck:checked')]
+      .flatMap(c => c.dataset.ids.split(',').map(Number));
+    const upd = () => { const n = sel().length, m = box.querySelectorAll('.as-ck:checked').length;
+      box.querySelector('#asSel').textContent = group ? `선택 ${m}대 · ${n}건` : `선택 ${n}건`; };
     box.querySelectorAll('.as-ck').forEach(c => c.onchange = upd);
     const allCk = box.querySelector('#asAll');
     if(allCk) allCk.onchange = () => { box.querySelectorAll('.as-ck').forEach(c => c.checked = allCk.checked); upd(); };
@@ -9356,7 +9396,7 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
     box.querySelector('#asExclude').onclick = async () => {
       const ids = sel(); if(!ids.length){ alert('뺄 줄을 고르세요.'); return; }
       const reason = prompt(`${ids.length}건을 정산에서 뺍니다.\n사유를 적어주세요 (엑셀과 이력에 남습니다).`,
-        '전시차 지원분');
+        REASON_HINT[filter] || '');
       if(reason === null) return;
       const { data: { user } } = await sb.auth.getUser();
       const { error } = await sb.from('asap_line_decisions').upsert(
