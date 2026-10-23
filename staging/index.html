@@ -11667,7 +11667,9 @@ function ymFromSrName(name){
    그 달이 반만 들어간 채로 남아 더 나쁘다. (2026-10-23) */
 /* 겹치면 건너뛸 때 집을 열. 045 의 유니크 조합 그대로다 (058). */
 const DEDUP_COLS = {
-  turnover_lines:     'stl_no,stl_line,part_no,claim_acct,inv_no,item_type',
+  // ⚠ 인보이스완료일·원가합계·수량까지 넣어야 한다. 그게 빠지면 취소/정정 쌍
+  //    (금액 부호만 다른 두 줄)이 같은 줄로 보여 한쪽이 지워진다. (061)
+  turnover_lines:     'stl_no,stl_line,part_no,claim_acct,inv_no,item_type,inv_date,cost_sum,qty',
   sales_report_lines: 'ym,vin,retail_date',
 };
 
