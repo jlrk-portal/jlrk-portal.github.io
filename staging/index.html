@@ -1128,7 +1128,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 22:56';
+const BUILD = '10-23 23:07';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -11408,7 +11408,8 @@ async function renderArchiveSection(round, type, claims){
   card.innerHTML = `
     <div class="section-label" style="margin-top:0;">아카이브 (서버 용량 정리)</div>
     <div class="hint">
-      이 회차의 파일 <b>${files.length}건</b>을 폴더 구조 zip으로 내려받은 뒤, 서버에서 정리할 수 있습니다.<br>
+      이 회차의 파일 <b>${files.length}건</b> + <b>정산요약</b> + <b>원본 라인 상세</b>를
+      폴더 구조 zip으로 내려받은 뒤, 서버에서 정리할 수 있습니다.<br>
       정리 후에도 <b>최종 청구금액·리테일러별 금액·활동 이력은 DB에 그대로 남습니다.</b>
     </div>
     <div class="action-row">
@@ -11517,6 +11518,20 @@ async function downloadRoundArchive(round, type, claims, invoices, disputes, fil
     if(logRows.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(logRows), '활동이력');
 
     root.file(`${rootName}_정산요약.xlsx`, XLSX.write(wb, { bookType:'xlsx', type:'array' }));
+
+    /* DB 에 있는 라인 상세도 같이 담는다. 서버를 정리하면 이 행들이 사라지므로
+       zip 이 유일한 근거가 된다. (매니저 지시 2026-10-23 — 무료 플랜 용량 정리) */
+    try{
+      set('원본 라인을 모으는 중...');
+      const raw = await noticeRawSheets(round, type, claims);
+      if(raw.length){
+        const rb = XLSX.utils.book_new();
+        raw.forEach(sh => XLSX.utils.book_append_sheet(rb,
+          xsSheet({ title: `${type?.name||''} · ${round.period_label} — ${sh.sheet}`,
+                    columns: sh.columns, rows: sh.rows }), sh.sheet.slice(0,31)));
+        root.file(`${rootName}_원본라인.xlsx`, XLSX.write(rb, { bookType:'xlsx', type:'array' }));
+      }
+    }catch(e){ console.warn('원본 라인 시트 생성 실패', e); }
 
     // 3) 목록 텍스트
     root.file('_파일목록.txt',
