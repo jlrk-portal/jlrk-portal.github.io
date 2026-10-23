@@ -433,6 +433,7 @@
       <div class="info-card">
         <div style="display:flex; align-items:flex-start; gap:12px; flex-wrap:wrap;">
           <div class="page-title" id="rd_title" style="flex:1; min-width:240px;">—</div>
+          <button class="btn btn-sm btn-ghost" id="rd_master_btn">마스터 파일 내려받기</button>
           <button class="btn btn-sm btn-ghost" id="rd_notice_btn">공지용 요약</button>
         </div>
         <div class="info-grid">
@@ -2976,7 +2977,8 @@ function eoConfirmPanel(round, type, claims, confirmed, total){
     foot = `<div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;
          padding:10px 12px; border-top:1px solid var(--surface3);">
       <button class="btn btn-sm btn-ghost" id="eoReopen">원본 다시 올리기 (DRAFT로)</button>
-      <button class="btn btn-sm" id="eoVoucher" style="margin-left:auto;">${round.status === 'VOUCHERED'
+      <button class="btn btn-sm btn-ghost" id="eoMaster" style="margin-left:auto;">마스터 파일 내려받기</button>
+      <button class="btn btn-sm" id="eoVoucher">${round.status === 'VOUCHERED'
         ? '바우처 다시 생성' : '바우처 생성'}${vCount>1 ? ` (${vCount}개 파일)` : ''}</button>
     </div>`;
   }
@@ -3043,6 +3045,9 @@ function eoBindConfirm(round, type, claims, host){
 
   const vb = host.querySelector('#eoVoucher');
   if(vb) vb.onclick = () => generateEngineOilVouchers(round, type);
+
+  const mb = host.querySelector('#eoMaster');
+  if(mb) mb.onclick = () => downloadMasterXlsx(mb);
 
   const re = host.querySelector('#eoReopen');
   if(re) re.onclick = async () => {
@@ -5090,9 +5095,9 @@ async function generateEngineOilVouchers(round, type){
     const R = (n) => Math.round(n);
     // 바우처 기준월 = 정산월 − 1 (2026-10 정산 = 9월 사용분 → 202609)
     const vper = eoVoucherPeriod(round);
-    // 파일명도 기준월로 간다. 월 회차가 아니면(분기 등) 기간 라벨을 그대로 쓴다.
-    const per = vper ? `${vper.ym.slice(0,4)}-${vper.ym.slice(4)}`
-                     : sanitizeFilename(round.period_label);
+    // 파일명도 기준월로. 바우처는 'YYYYMM' 표기다 (매니저 예시 2026-10-23:
+    // 'Engine Oil Package_사용반환금_202609'). 월 회차가 아니면 기간 라벨.
+    const per = vper ? vper.ym : sanitizeFilename(round.period_label);
 
     // 프리셋에 해당하는 바우처를 개별 파일로 순차 다운로드
     const files = [];
@@ -5222,7 +5227,7 @@ async function generateEngineOilSpVoucher(round, type, s){
     setP('바우처 파일을 만드는 중...');
     const buffer = await buildVoucherFromTemplate(tplBuffer, { inputCells, coverCells, images: [], inputSheetName, coverSheetName });
     const vp = eoVoucherPeriod(round);
-    const perAr = vp ? `${vp.ym.slice(0,4)}-${vp.ym.slice(4)}` : sanitizeFilename(round.period_label);
+    const perAr = vp ? vp.ym : sanitizeFilename(round.period_label);
     const fname = `AR Voucher_${perAr}_Engine Oil Package_Sales payment.xlsx`;
     const blob = new Blob([buffer], { type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     const url = URL.createObjectURL(blob);
@@ -12836,7 +12841,7 @@ async function noticePersons(round){
 async function noticeExportXlsx(round, type, claims, rows, T){
   // 파일명에 못 쓰는 글자는 '-' 로 바꾼다. 지워버리면 '사용반환금Retailer' 처럼 붙는다.
   const safe = v => String(v ?? '').replace(/[\\/:*?"<>|]/g, '-').replace(/\s+/g, ' ').trim();
-  const name = `${safe(type?.name || '정산')}_${safe(round.period_label)}`;
+  const name = `${safe(type?.name || '정산')}_${safe(roundFileLabel(round, type))}`;
   const wb = XLSX.utils.book_new();
   const isAR = type?.direction === 'AR';
   const hasLines = T.lines > 0;
@@ -12891,7 +12896,8 @@ async function noticeExportXlsx(round, type, claims, rows, T){
       columns: sh.columns, rows: sh.rows,
     }), sh.sheet.slice(0, 31));
   }
-  XLSX.writeFile(wb, name + '_통합본.xlsx');
+  // 매니저 예시(2026-10-23): 'Engine Oil Package_사용반환금-Retailer Support_2026-09_rawdata'
+  XLSX.writeFile(wb, name + '_rawdata.xlsx');
 }
 
 /* 인원별 금액 PDF — 공지 메일에 붙이는 용도 */
@@ -12954,17 +12960,25 @@ function noticePersonsPdf(round, type, persons){
   w.document.close();
 }
 
-async function openNoticeSummary(){
-  if(!currentRoundId) return;
-  const { data: round } = await sb.from('rounds')
-    .select('*, settlement_types(*)').eq('id', currentRoundId).single();
-  if(!round){ alert('회차를 불러오지 못했습니다.'); return; }
-  const type = round.settlement_types || {};
-  const { data: claims } = await sb.from('claims')
-    .select('*, retailers(code,name), workshops(code,name)')
-    .eq('round_id', currentRoundId).order('created_at');
+/* 파일에 쓸 기간 표기. 엔진오일은 '정산월 − 1' 이 내용의 월이다
+   (2026-10 정산 = 9월 사용분). 매니저 기준(2026-10-23).
+   그 외 유형은 회차 기간을 그대로 쓴다. */
+function roundFileLabel(round, type){
+  const isEo = /Engine Oil/i.test(String(type?.code || '')) || /엔진오일/.test(type?.name || '');
+  if(!isEo) return round.period_label;
+  const v = eoVoucherPeriod(round);
+  return v ? `${v.ym.slice(0,4)}-${v.ym.slice(4)}` : round.period_label;
+}
 
-  /* 리테일러 단위로 묶는다. 지점단위 유형이면 지점 수를 같이 센다. */
+/* 회차 집계 — 공지용 요약과 마스터 파일이 같은 숫자를 쓰도록 한 곳에서 낸다 */
+async function noticeData(roundId){
+  const { data: round } = await sb.from('rounds')
+    .select('*, settlement_types(*)').eq('id', roundId).single();
+  if(!round) throw new Error('회차를 불러오지 못했습니다.');
+  const type = round.settlement_types || {};
+  const claims = await sbAll(() => sb.from('claims')
+    .select('*, retailers(code,name), workshops(code,name)')
+    .eq('round_id', roundId).order('created_at'), '청구');
   const byRt = new Map();
   (claims||[]).forEach(c => {
     const k = c.retailer_id || c.id;
@@ -12975,15 +12989,11 @@ async function openNoticeSummary(){
     const g = byRt.get(k);
     g.n++;
     if(c.workshops?.code) g.ws.add(c.workshops.code);
-    // 확정금액이 있으면 그것을, 없으면 청구금액을 쓴다
     g.amount += Number(c.approved_amount ?? c.claimed_amount ?? 0);
     if(c.confirmed_at) g.confirmed++;
     if(['SUBMITTED','APPROVED'].includes(c.status)) g.submitted++;
-    // 유형별로 '건수' 의 의미가 다르다 — detail 에 담긴 실제 건수를 쓴다
     const d = c.detail || {};
     g.lines += Number(d.lines ?? d.user_count ?? d.count ?? 0)
-            // ⚠ 키는 count 다. 쿠폰 건수가 있으면 그걸, 없으면 인센티브 건수를 쓴다
-            //    (둘을 더하면 3종 유형에서 같은 차를 두 번 센다)
             || (d.workshops ? (d.workshops||[]).reduce((a, w) => {
                  const cp = (w.jg?.count ?? w.jg?.n ?? 0) + (w.lr?.count ?? w.lr?.n ?? 0);
                  return a + (cp || (w.incentive?.count ?? 0));
@@ -12996,6 +13006,31 @@ async function openNoticeSummary(){
     confirmed: rows.reduce((a,r) => a + r.confirmed, 0),
     lines: rows.reduce((a,r) => a + r.lines, 0),
   };
+  return { round, type, claims, rows, T };
+}
+
+/* 마스터 파일 — 공지용 요약을 열지 않고 바로 받는다 */
+async function downloadMasterXlsx(btn){
+  if(!currentRoundId) return;
+  const t0 = btn ? btn.textContent : null;
+  if(btn){ btn.disabled = true; btn.textContent = '만드는 중...'; }
+  try{
+    const { round, type, claims, rows, T } = await noticeData(currentRoundId);
+    if(!rows.length){ alert('아직 청구 내역이 없습니다.'); return; }
+    await noticeExportXlsx(round, type, claims, rows, T);
+  }catch(e){ alert('마스터 파일 생성 실패: ' + (e.message || e)); }
+  finally{ if(btn){ btn.disabled = false; btn.textContent = t0; } }
+}
+document.getElementById('rd_master_btn')
+  ?.addEventListener('click', (e) => downloadMasterXlsx(e.currentTarget));
+
+async function openNoticeSummary(){
+  if(!currentRoundId) return;
+  let D; try { D = await noticeData(currentRoundId); }
+  catch(e){ alert(e.message); return; }
+  const { round, type, claims } = D;
+
+  const { rows, T } = D;
   const hasLines = T.lines > 0;
   const isAR = type.direction === 'AR';
 
