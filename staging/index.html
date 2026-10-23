@@ -1128,7 +1128,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 18:54';
+const BUILD = '10-23 19:07';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -3031,7 +3031,10 @@ function eo3vBuildBreakdown(coupon, sales, allWs, type, sp){
 /* 리테일러 확정 현황 — P&D(pndConfirmPanel) 와 같은 한 덩어리 박스.
    머리 띠 · 표 · 금액 요약 · 아래 띠 순서를 그대로 쓴다. */
 function eoConfirmPanel(round, type, claims, confirmed, total){
-  const eo = eoPreset(type);
+  // ASAP 처럼 엔진오일이 아닌 회차도 이 확인 패널을 쓴다. 그때 eoPreset 은
+  // null 이라 eo.comps 에서 터졌다 — 공지 직후 화면을 다시 그릴 때 났다.
+  // (매니저 보고 2026-10-23: "공지 실패: Cannot read properties of null")
+  const eo = eoPreset(type) || { comps: [] };
   const s = round.source_summary || {};
   const due = round.confirm_due_at ? new Date(round.confirm_due_at) : null;
   const over = due && due < new Date();
@@ -9947,6 +9950,7 @@ async function asapPublish(round, type, last){
   if(!confirm(`${rtRows.length}개사 · ${fmtWon(last.T.amount)} 을 리테일러에 공지합니다.\n`
     + `기간 ${last.from} ~ ${last.to}\n\n계속할까요?`)) return;
   try{
+    const first = round.status === 'DRAFT';   // 처음 공지인지 (아래 문구가 갈린다)
     const changed = [];
     for(const r of rtRows){
       const { data: ex } = await sb.from('claims').select('id, approved_amount, confirmed_at')
@@ -9976,9 +9980,13 @@ async function asapPublish(round, type, last){
     await logAudit('ASAP_PUBLISH','ROUND', round.id,
       { label: `${type.name} · ${round.period_label}`, amount: last.T.amount });
     alert(`공지했습니다 — ${rtRows.length}개사 · ${fmtWon(last.T.amount)}\n`
-      + (changed.length ? `금액이 바뀐 ${changed.length}개사에만 다시 통지됩니다.` : '금액 변동 없음.'));
-    await renderRoundDetail();
-  }catch(e){ alert('공지 실패: ' + (e.message || e)); }
+      + (first ? `처음 공지라 ${rtRows.length}개사 모두에게 나갑니다.`
+               : changed.length ? `금액이 바뀐 ${changed.length}개사에만 다시 통지됩니다.`
+                                : '금액 변동이 없어 다시 통지되지 않습니다.'));
+  }catch(e){ alert('공지 실패: ' + (e.message || e)); return; }
+  // 화면을 다시 그리다 난 오류를 '공지 실패' 로 보고하면 안 된다 — 공지는 끝났다
+  try{ await renderRoundDetail(); }
+  catch(e){ alert('공지는 됐습니다. 화면을 다시 그리는 중 오류: ' + (e.message || e)); }
 }
 
 async function renderRoundDetail(){
