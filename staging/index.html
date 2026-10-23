@@ -58,6 +58,12 @@
   .btn-danger:hover{ background:var(--danger); color:#fff; border-color:var(--danger); }
   .btn-danger:disabled{ background:transparent; color:var(--text-dim);
                         border-color:var(--surface3); font-weight:400; }
+  /* 승인 — 정산에 넣는다는 뜻이라 초록 (매니저 지시 2026-10-23) */
+  .btn-ok{ background:rgba(28,138,97,.08); color:var(--accent);
+           border:1px solid rgba(28,138,97,.55); font-weight:600; }
+  .btn-ok:hover{ background:var(--accent); color:#fff; border-color:var(--accent); }
+  .btn-ok:disabled{ background:transparent; color:var(--text-dim);
+                    border-color:var(--surface3); font-weight:400; }
   .btn-sm{ padding:6px 12px; font-size:12.5px; }
   #loginError{ color:var(--danger); font-size:12.5px; margin-top:12px; min-height:16px; }
 
@@ -1122,7 +1128,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 17:22';
+const BUILD = '10-23 17:45';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -9348,18 +9354,28 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
   let filter = 'FLAG', page = 1, term = '';
   const folded = new Set();
   const PAGE = 15;
+  /* 카드가 튀지 않게 — 탭·검색이 그대로면 차대 순서를 고정한다.
+     한 줄을 빼면 그 차대 합계가 줄어 순서가 바뀌고, 보고 있던 자리에
+     다른 차가 올라오던 문제. (매니저 지적 2026-10-23)
+     한 번 뜬 차대는 결정 후 조건에서 빠져도 그대로 둔다 — 방금 처리한
+     카드가 눈앞에서 사라지면 확인을 못 한다. */
+  let viewKey = null, vinOrder = [], sticky = new Set();
 
-  const state = (r) => r.hard_excluded ? 'HARD' : (r.decision === 'EXCLUDE' ? 'OUT'
-                     : (r.flags.length ? 'FLAG' : 'OK'));
-  const LABEL = { HARD:'규칙 제외', OUT:'정산 제외', FLAG:'검토 필요', OK:'정상' };
-  const BADGE = { HARD:'badge-off', OUT:'badge-danger', FLAG:'badge-warn', OK:'badge-ap' };
+  const state = (r) => r.hard_excluded      ? 'HARD'
+                     : r.decision === 'EXCLUDE' ? 'OUT'
+                     : r.decision === 'KEEP'    ? 'KEEP'
+                     : r.flags.length           ? 'FLAG' : 'OK';
+  const LABEL = { HARD:'규칙 제외', OUT:'정산 제외', KEEP:'승인', FLAG:'검토 필요', OK:'정상' };
+  const BADGE = { HARD:'badge-off', OUT:'badge-danger', KEEP:'badge-ap', FLAG:'badge-warn', OK:'badge-ap' };
   const RSN   = { SHOW:'전시차', PROMO:'프로모션', DSS:'DSS' };
   const has   = (r, k) => (r.flags||[]).some(x => x.startsWith(RSN[k]));
+  // 사유 탭은 '아직 결정 안 한 것' 만 — 보고 처리하면 목록에서 빠져야 한다
   const match = (r, k) => k === 'ALL' ? true
-                        : RSN[k]      ? (state(r) !== 'HARD' && has(r, k))
+                        : RSN[k]      ? (state(r) === 'FLAG' && has(r, k))
                         :               state(r) === k;
-  const TABS = ['ALL','FLAG','SHOW','PROMO','DSS','OUT','HARD','OK'];
-  const TAB_LABEL = { ...LABEL, ALL:'전체', SHOW:'└ 전시차', PROMO:'└ 프로모션 대상 차량', DSS:'└ DSS 의심' };
+  const TABS = ['ALL','FLAG','SHOW','PROMO','DSS','OUT','KEEP','HARD','OK'];
+  const TAB_LABEL = { ...LABEL, ALL:'전체', SHOW:'└ 전시차', PROMO:'└ 프로모션 대상 차량',
+                      DSS:'└ DSS 의심', KEEP:'승인 (정산 포함)', OK:'정상 (무검토)' };
   const uniq = (a) => [...new Set(a)];
   const one  = (a) => { const u = uniq(a.filter(v => v !== null && v !== undefined && v !== '')); return u.length === 1 ? u[0] : null; };
 
@@ -9375,16 +9391,17 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
       || REASONS[0];
   };
 
-  const persist = async (ids, reason) => {
+  const persist = async (ids, reason, decision) => {
     const { data: { user } } = await sb.auth.getUser();
     const { error } = await sb.from('asap_line_decisions').upsert(
-      ids.map(id => ({ round_id: round.id, line_id: id, decision:'EXCLUDE', reason,
+      ids.map(id => ({ round_id: round.id, line_id: id, decision, reason,
                        decided_by: user?.id || null, decided_at: new Date().toISOString() })),
       { onConflict:'round_id,line_id' });
     if(error) return error.message;
-    await logAudit('ASAP_EXCLUDE','ROUND', round.id, { label:`${ids.length}건 · ${reason}` });
+    await logAudit(decision === 'KEEP' ? 'ASAP_KEEP' : 'ASAP_EXCLUDE', 'ROUND', round.id,
+      { label:`${ids.length}건 · ${reason || ''}` });
     ids.forEach(id => { const r = all.find(x => x.line_id === id);
-      if(r){ r.decision = 'EXCLUDE'; r.decision_reason = reason; } });
+      if(r){ r.decision = decision; r.decision_reason = reason || null; } });
     return null;
   };
   const unpersist = async (ids) => {
@@ -9442,8 +9459,9 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
     const why  = uniq(g.flatMap(x => [x.hard_excluded, ...(x.flags||[])].filter(Boolean)));
     const cost = g.reduce((a,x) => a + x.cost_sum, 0);
     const amt  = g.reduce((a,x) => a + x.incentive, 0);
-    const ids  = g.filter(x => state(x) !== 'HARD').map(x => x.line_id);
-    const outIds = g.filter(x => x.decision === 'EXCLUDE').map(x => x.line_id);
+    // 아직 결정 안 한 줄만 일괄 대상. 이미 승인한 줄은 [전부 제외] 로 다시 빠지지 않는다.
+    const openIds = g.filter(x => state(x) !== 'HARD' && !x.decision).map(x => x.line_id);
+    const decided = g.filter(x => x.decision).map(x => x.line_id);
     const fold = folded.has(vin);
     // 모든 줄이 같은 값이면 머리에 한 번만 쓴다 (중복 기입 금지)
     const cDate = one(g.map(x => x.inv_date)), cRate = one(g.map(x => x.rate));
@@ -9476,8 +9494,9 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
         <select class="as-rsn" style="padding:5px 7px; max-width:230px;">
           ${REASONS.map(x => `<option value="${esc2(x)}" ${x===defaultReason(g)?'selected':''}>${esc2(x)}</option>`).join('')}
         </select>
-        ${ids.length ? `<button class="btn btn-sm btn-danger" data-act="ex-all">이 차대 전부 제외</button>` : ''}
-        ${outIds.length ? `<button class="btn btn-sm btn-ghost" data-act="keep-all">전부 되돌리기</button>` : ''}
+        ${openIds.length ? `<button class="btn btn-sm btn-ok" data-act="ok-all">이 차대 전부 승인</button>` : ''}
+        ${openIds.length ? `<button class="btn btn-sm btn-danger" data-act="ex-all">이 차대 전부 제외</button>` : ''}
+        ${decided.length ? `<button class="btn btn-sm btn-ghost" data-act="undo-all">결정 되돌리기 ${decided.length}</button>` : ''}
         <button class="btn btn-sm btn-ghost" data-act="fold">${fold ? '펼치기' : '접기'}</button>
       </div>
       ${fold ? '' : `
@@ -9491,7 +9510,7 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
         <th>품번</th><th>품명</th>
         ${cRate != null ? '' : '<th style="text-align:right;">요율</th>'}
         <th style="text-align:right;">원가</th><th style="text-align:right;">인센티브</th>
-        <th style="width:150px;"></th></tr></thead><tbody>
+        <th style="width:190px;"></th></tr></thead><tbody>
         ${lines.map(x => { const st = state(x); const same = priorParts.has(String(x.part_no||'').trim());
           return `<tr data-id="${x.line_id}" style="${x.net_zero?'opacity:.45;':''}">
           <td><span class="badge ${BADGE[st]}">${LABEL[st]}</span></td>
@@ -9504,9 +9523,11 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
           <td style="text-align:right; white-space:nowrap;">${fmtWon(x.incentive)}</td>
           <td style="text-align:right; white-space:nowrap;">
             ${st === 'HARD' ? '<span class="hint">규칙 제외</span>'
-              : st === 'OUT' ? `<span class="hint" title="${esc2(x.decision_reason||'')}">${esc2(x.decision_reason||'제외')}</span>
-                  <button class="btn btn-sm btn-ghost" data-act="keep" data-id="${x.line_id}">되돌리기</button>`
-              : `<button class="btn btn-sm btn-danger" data-act="ex" data-id="${x.line_id}">제외</button>`}
+              : x.decision ? `<span class="hint" title="${esc2(x.decision_reason||'')}">${esc2(
+                    st === 'KEEP' ? (x.decision_reason || '승인') : (x.decision_reason || '제외'))}</span>
+                  <button class="btn btn-sm btn-ghost" data-act="undo" data-id="${x.line_id}">되돌리기</button>`
+              : `<button class="btn btn-sm btn-ok" data-act="ok" data-id="${x.line_id}">승인</button>
+                 <button class="btn btn-sm btn-danger" data-act="ex" data-id="${x.line_id}">제외</button>`}
           </td></tr>`; }).join('')}
       </tbody></table>`}
     </div>`;
@@ -9517,13 +9538,25 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
     const kept    = all.filter(r => !r.hard_excluded && r.decision !== 'EXCLUDE');
     const keptAmt = kept.reduce((a,r) => a + r.incentive, 0);
     const t = term.trim().toUpperCase();
-    const list = all.filter(r => match(r, filter)
+    const hit = (r) => match(r, filter)
       && (!t || [r.vin, r.part_no, r.part_name, r.person, r.branch]
-            .some(v => String(v||'').toUpperCase().includes(t))));
-    const m = new Map();
-    list.forEach(r => { if(!m.has(r.vin)) m.set(r.vin, []); m.get(r.vin).push(r); });
-    const groups = [...m.values()].sort((x,y) =>
-      y.reduce((a,r)=>a+r.incentive,0) - x.reduce((a,r)=>a+r.incentive,0));
+            .some(v => String(v||'').toUpperCase().includes(t)));
+    const list = all.filter(hit);
+
+    const key = filter + '\u0000' + t;
+    if(key !== viewKey){ viewKey = key; sticky = new Set(); vinOrder = []; }
+    list.forEach(r => sticky.add(r.vin));
+
+    // 카드는 '그 차대의 모든 줄' 을 보여준다 — 한 대를 통째로 봐야 판단이 된다
+    const byVin = new Map();
+    all.forEach(r => { if(!sticky.has(r.vin)) return;
+      if(!byVin.has(r.vin)) byVin.set(r.vin, []); byVin.get(r.vin).push(r); });
+    // 순서는 처음 뜬 그대로 유지하고, 새로 들어온 차대만 뒤에 붙인다
+    const fresh = [...byVin.keys()].filter(v => !vinOrder.includes(v))
+      .sort((x,y) => byVin.get(y).reduce((a,r)=>a+r.incentive,0)
+                   - byVin.get(x).reduce((a,r)=>a+r.incentive,0));
+    vinOrder = vinOrder.filter(v => byVin.has(v)).concat(fresh);
+    const groups = vinOrder.map(v => byVin.get(v));
     const shown = groups.slice(0, PAGE * page);
 
     box.innerHTML = `
@@ -9531,7 +9564,10 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
       <div class="hint" style="margin-bottom:8px;">
         차대 한 대가 카드 한 장입니다. <b>왜 검토 대상인지</b>가 맨 위, 그 다음 차량·담당자,
         그 아래에 <b>전에 받은 지원 내역</b>, 마지막이 이번 분기 청구 품목입니다.
-        품목마다 바로 [제외] 하실 수 있고, 같은 품번을 전에도 청구했으면 「전에도 청구」가 붙습니다.
+        품목마다 바로 <b>[승인]</b>(정산에 넣음) / <b>[제외]</b> 를 누르시면 되고,
+        같은 품번을 전에도 청구했으면 「전에도 청구」가 붙습니다.
+        한 대에서 몇 줄만 살리실 때는 그 줄을 먼저 [승인] 하시고 [이 차대 전부 제외] 를 누르세요 —
+        <b>승인한 줄은 건드리지 않습니다.</b>
         규칙상 빠지는 것(시승차·커티시카·특수차, 전 차종 기본장착)은 이미 빠져 있습니다.
       </div>
       <div class="action-row" style="margin-top:0; flex-wrap:wrap;">
@@ -9557,7 +9593,8 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
     const say = (msg, bad) => { const el = $('#asMsg');
       el.textContent = msg; el.style.color = bad ? 'var(--danger)' : 'var(--muted)'; };
 
-    box.querySelectorAll('[data-f]').forEach(b2 => b2.onclick = () => { filter = b2.dataset.f; page = 1; draw(); });
+    box.querySelectorAll('[data-f]').forEach(b2 => b2.onclick = () => {
+      filter = b2.dataset.f; page = 1; draw(); box.scrollIntoView({ block:'start' }); });
     const q = $('#asQ');
     q.oninput = () => { term = q.value; page = 1; const pos = q.selectionStart; draw();
       const n = $('#asQ'); n.focus(); n.setSelectionRange(pos, pos); };
@@ -9571,21 +9608,34 @@ async function renderAsapLineReview(round, from, to, host, onChanged){
       const rsn = () => (c.querySelector('.as-rsn') || {}).value || REASONS[0];
       c.querySelectorAll('[data-act]').forEach(btn => btn.onclick = async () => {
         const act = btn.dataset.act;
-        if(act === 'fold'){ folded.has(vin) ? folded.delete(vin) : folded.add(vin); draw(); return; }
+        const y = window.scrollY;                 // 처리 후 보던 자리로 돌아온다
+        const back = () => window.scrollTo(0, y);
+        if(act === 'fold'){ folded.has(vin) ? folded.delete(vin) : folded.add(vin); draw(); back(); return; }
         btn.disabled = true;
-        let err = null, n = 0, reason = rsn();
-        if(act === 'ex'){      n = 1; err = await persist([+btn.dataset.id], reason); }
-        else if(act === 'keep'){ n = 1; err = await unpersist([+btn.dataset.id]); }
-        else if(act === 'ex-all'){
-          const ids = g.filter(x => state(x) !== 'HARD' && x.decision !== 'EXCLUDE').map(x => x.line_id);
-          n = ids.length; err = ids.length ? await persist(ids, reason) : null;
-        } else if(act === 'keep-all'){
-          const ids = g.filter(x => x.decision === 'EXCLUDE').map(x => x.line_id);
-          n = ids.length; err = ids.length ? await unpersist(ids) : null;
+        const open = g.filter(x => state(x) !== 'HARD' && !x.decision).map(x => x.line_id);
+        let err = null, n = 0, msg = '', reason = rsn();
+        if(act === 'ex'){
+          n = 1; err = await persist([+btn.dataset.id], reason, 'EXCLUDE');
+          msg = `1건을 뺐습니다 — ${reason}`;
+        } else if(act === 'ok'){
+          n = 1; err = await persist([+btn.dataset.id], null, 'KEEP');
+          msg = '1건을 승인했습니다 — 정산에 그대로 들어갑니다.';
+        } else if(act === 'undo'){
+          n = 1; err = await unpersist([+btn.dataset.id]); msg = '1건을 되돌렸습니다.';
+        } else if(act === 'ex-all'){
+          n = open.length; err = n ? await persist(open, reason, 'EXCLUDE') : null;
+          msg = `${n}건을 뺐습니다 — ${reason}` + (g.some(x => x.decision === 'KEEP')
+            ? ' (이미 승인한 줄은 그대로 뒀습니다)' : '');
+        } else if(act === 'ok-all'){
+          n = open.length; err = n ? await persist(open, null, 'KEEP') : null;
+          msg = `${n}건을 승인했습니다 — 이 차대는 정상으로 넘어갑니다.`;
+        } else if(act === 'undo-all'){
+          const ids = g.filter(x => x.decision).map(x => x.line_id);
+          n = ids.length; err = n ? await unpersist(ids) : null;
+          msg = `${n}건을 되돌렸습니다.`;
         }
         if(err){ btn.disabled = false; say('실패: ' + err, true); return; }
-        draw();
-        say(act.startsWith('ex') ? `${n}건을 뺐습니다 — ${reason}` : `${n}건을 되돌렸습니다.`);
+        draw(); back(); say(msg);
         onChanged && onChanged();
       });
     });
