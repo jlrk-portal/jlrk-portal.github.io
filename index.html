@@ -437,6 +437,7 @@
       <div class="info-card">
         <div style="display:flex; align-items:flex-start; gap:12px; flex-wrap:wrap;">
           <div class="page-title" id="rd_title" style="flex:1; min-width:240px;">—</div>
+          <button class="btn btn-sm btn-ghost" id="rd_edit_btn">회차 수정</button>
           <button class="btn btn-sm btn-ghost" id="rd_master_btn">마스터 파일 내려받기</button>
           <button class="btn btn-sm btn-ghost" id="rd_notice_btn">공지용 요약</button>
         </div>
@@ -444,10 +445,9 @@
           <div class="info-item"><div class="k">상태</div><div class="v" id="rd_status">—</div></div>
           <div class="info-item"><div class="k">방향 / 청구단위</div><div class="v" id="rd_meta">—</div></div>
           <div class="info-item"><div class="k">청구 마감</div><div class="v" id="rd_due">—</div></div>
+          <div class="info-item"><div class="k">기준 기간</div><div class="v" id="rd_basis_v">—</div></div>
           <div class="info-item"><div class="k">제출 현황</div><div class="v" id="rd_progress">—</div></div>
         </div>
-        <div id="rd_basis" style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;
-             margin-top:12px; padding-top:12px; border-top:1px solid var(--surface3);"></div>
         <div class="action-row" id="rd_actions"></div>
       </div>
 
@@ -1092,7 +1092,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 12:29';
+const BUILD = '10-23 12:49';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -7164,7 +7164,11 @@ async function loadRounds(){
 });
 
 document.getElementById('newRoundBtn').addEventListener('click', () => {
+  editingRoundId = null;
+  document.querySelector('#roundPanel .panel-title').textContent = '새 회차 개설';
+  document.getElementById('saveRoundBtn').textContent = '회차 만들기 (DRAFT)';
   const sel = document.getElementById('r_type_id');
+  sel.disabled = false;
   sel.innerHTML = activeTypes.map(t => `<option value="${t.id}">${t.code} — ${t.name}</option>`).join('');
   document.getElementById('r_period_label').value = '';
   document.getElementById('r_fiscal_year').value = '';
@@ -7272,12 +7276,24 @@ document.getElementById('saveRoundBtn').addEventListener('click', async () => {
   const bm = basis_label.match(/(20\d{2})[-.]?(0[1-9]|1[0-2])(?!\d)/);
   const basis_ym = bm ? bm[1] + bm[2] : null;
 
-  const { error } = await sb.from('rounds').insert({
-    type_id, period_label,
+  const payload = {
+    period_label, fiscal_year, fiscal_quarter, period_ym, basis_label, basis_ym,
     claim_due_at: claim_due_at ? new Date(claim_due_at).toISOString() : null,
-    fiscal_year, fiscal_quarter, period_ym, basis_label, basis_ym,
-    status: 'DRAFT'
-  });
+  };
+  if(editingRoundId){
+    const { data, error } = await sb.from('rounds')
+      .update(payload).eq('id', editingRoundId).select('id');
+    if(error || !data?.length){
+      alert(error ? '저장 실패: ' + error.message : '저장되지 않았습니다 (0건).'); return; }
+    await logAudit('ROUND_EDIT','ROUND',editingRoundId,
+      { label: `${period_label} · 기준 ${basis_label}` });
+    const id = editingRoundId;
+    closePanel('roundPanel');
+    if(currentRoundId === id) await renderRoundDetail();
+    await loadRounds();
+    return;
+  }
+  const { error } = await sb.from('rounds').insert({ ...payload, type_id, status: 'DRAFT' });
   if(error){ alert('생성 실패: ' + error.message); return; }
   closePanel('roundPanel');
   await loadRounds();
@@ -8595,36 +8611,43 @@ async function renderPndRetailerCard(listEl, round, items){
    바우처 설명·파일명이 이 값을 따르므로 틀리면 바로 눈에 띄어야 한다.
    (2026-10-23 — 라벨 하나에 진행월·대상월이 섞여 바우처가 틀어졌다) */
 function renderBasisRow(round, type){
-  const host = document.getElementById('rd_basis');
-  if(!host) return;
-  const cur = round.basis_label || '';
+  const el = document.getElementById('rd_basis_v');
+  if(!el) return;
   const esc = v => String(v ?? '').replace(/[<>"]/g, '');
   // 월정산인데 정산월과 기준월이 같으면 둘 중 하나가 틀렸을 가능성이 높다
   const warn = type?.period === 'MONTHLY' && round.period_ym && round.basis_ym === round.period_ym;
-  host.innerHTML = `
-    <span class="hint" style="min-width:0;">기준 기간 <span title="정산의 대상이 되는 기간입니다. 바우처 설명·파일명이 이 값을 따릅니다.">ⓘ</span></span>
-    <input id="rd_basis_in" value="${esc(cur)}" placeholder="예: 2026-09 · FY27 Q2 · FY27 Q1, Q2"
-           style="max-width:260px; padding:6px 8px;">
-    <button class="btn btn-sm btn-ghost" id="rd_basis_save">저장</button>
-    <span class="hint">정산월 <b>${esc(round.period_label)}</b>${round.period_ym
-      ? ` (${round.period_ym.slice(0,4)}-${round.period_ym.slice(4)})` : ''}</span>
-    ${warn ? '<span class="badge badge-warn">정산월과 같습니다 — 확인해주세요</span>' : ''}`;
-  const btn = host.querySelector('#rd_basis_save');
-  btn.onclick = async () => {
-    const v = host.querySelector('#rd_basis_in').value.trim();
-    if(!v){ alert('기준 기간을 입력해주세요.'); return; }
-    const m = v.match(/(20\d{2})[-.]?(0[1-9]|1[0-2])(?!\d)/);
-    btn.disabled = true;
-    const { data, error } = await sb.from('rounds')
-      .update({ basis_label: v, basis_ym: m ? m[1] + m[2] : null })
-      .eq('id', round.id).select('id');
-    if(error || !data?.length){
-      alert(error ? '저장 실패: ' + error.message : '저장되지 않았습니다 (0건).');
-      btn.disabled = false; return;
-    }
-    await logAudit('ROUND_BASIS','ROUND',round.id,{ label: v });
-    await renderRoundDetail();
-  };
+  el.innerHTML = esc(round.basis_label || '미설정')
+    + (warn ? ' <span class="badge badge-warn" title="정산의 대상 기간과 진행 월이 같게 적혀 있습니다. [회차 수정] 에서 확인해주세요.">확인 필요</span>' : '');
+  // 수정 버튼은 현재 회차를 들고 열린다
+  const b = document.getElementById('rd_edit_btn');
+  if(b) b.onclick = () => openRoundEdit(round, type);
+}
+
+/* 회차 수정 — 새 회차 개설에 쓰던 패널을 그대로 쓴다.
+   정산월이 틀린 회차(SP 2026-09)는 기준월만으로는 못 고쳐서, 기간 라벨과
+   정산월까지 여기서 손본다. (2026-10-23 지적) */
+let editingRoundId = null;
+function openRoundEdit(round, type){
+  editingRoundId = round.id;
+  const sel = document.getElementById('r_type_id');
+  sel.innerHTML = activeTypes.map(t =>
+    `<option value="${t.id}"${t.id === round.type_id ? ' selected' : ''}>${t.code} — ${t.name}</option>`).join('');
+  sel.disabled = true;                     // 유형을 바꾸면 산출 로직이 통째로 달라진다
+  document.getElementById('r_period_label').value   = round.period_label || '';
+  document.getElementById('r_fiscal_year').value    = round.fiscal_year || '';
+  document.getElementById('r_fiscal_quarter').value = round.fiscal_quarter || '';
+  document.getElementById('r_period_ym').value      = round.period_ym
+    ? `${round.period_ym.slice(0,4)}-${round.period_ym.slice(4)}` : '';
+  document.getElementById('r_claim_due_at').value   = round.claim_due_at
+    ? new Date(new Date(round.claim_due_at).getTime() - new Date().getTimezoneOffset()*60000)
+        .toISOString().slice(0,16) : '';
+  const bEl = document.getElementById('r_basis_label');
+  bEl.value = round.basis_label || '';
+  bEl.dataset.touched = '1';               // 수정할 때는 자동 제안이 덮지 않게
+  document.querySelector('#roundPanel .panel-title').textContent = '회차 수정';
+  document.getElementById('saveRoundBtn').textContent = '저장';
+  updateRoundPanelForType();
+  openPanel('roundPanel');
 }
 
 async function renderRoundDetail(){
