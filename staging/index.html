@@ -1092,7 +1092,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 12:59';
+const BUILD = '10-23 13:11';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -2616,6 +2616,11 @@ async function parseEngineOilSalesPayment(buf, type, roundId){
   const targetHashes = [];
   const seen = new Set();
   let nDup = 0, nAlready = 0;
+  // 리테일러가 받는 엑셀에 '자기 것만' 원본 행이 들어가야 한다. 판매대금은
+  // 이 줄을 버리고 집계만 남기고 있었다. (2026-10-23 지적)
+  const lines = [];
+  const iCust = hdr.map['고객명'], iProd = hdr.map['상품'] ?? hdr.map['상품명'],
+        iDate = hdr.map['판매일자'] ?? hdr.map['사용일자'] ?? hdr.map['일자'];
 
   for(let i=hdr.headerRow+1; i<rows.length; i++){
     const row = rows[i];
@@ -2640,9 +2645,17 @@ async function parseEngineOilSalesPayment(buf, type, roundId){
     let g = byWs.get(code);
     if(!g){ g = { jg:0, lr:0, n:0 }; byWs.set(code, g); }
     g[brand] += price; g.n++;
+    lines.push({
+      kind:'BOOK', workshop_code: code, site_name: site,
+      book_id: cb, book_type: t, vin,
+      product:   iProd !== undefined ? _eoCell(row, iProd) : null,
+      customer:  iCust !== undefined ? _eoCell(row, iCust) : null,
+      used_at:   iDate !== undefined ? _eoCell(row, iDate) : null,
+      total_amt: price,
+    });
     if(hash) targetHashes.push({ hash, code, keys:[vin, cb, t], amount: price });
   }
-  return { byWs, unmatched, targetHashes, nDup, nAlready, nTarget: targetHashes.length };
+  return { byWs, lines, unmatched, targetHashes, nDup, nAlready, nTarget: targetHashes.length };
 }
 
 // ── 원본 업로드 + 미리보기 (프리셋별) ──
@@ -3229,7 +3242,7 @@ async function publishEngineOilRound(round, type){
     }
 
     // 원본 행 — 리테일러 엑셀에 '자기 것만' 들어간다
-    const rawLines = [...(eo.coupon?.lines || []), ...(eo.sales?.lines || [])];
+    const rawLines = [...(eo.coupon?.lines || []), ...(eo.sales?.lines || []), ...(eo.sp?.lines || [])];
     if(rawLines.length){
       const wsByCode2 = new Map((allWs||[]).map(w => [w.code, w]));
       await sb.from('engineoil_lines').delete().eq('round_id', round.id);
@@ -7262,7 +7275,13 @@ document.getElementById('saveRoundBtn').addEventListener('click', async () => {
   if(!type_id || !period_label){ alert('정산 유형과 기간 라벨은 필수입니다.'); return; }
   // 월단위 유형은 정산 월을 받는다 ('2026-09' → '202609')
   const tSel = (editingRoundId ? editingRoundType : null) || activeTypes.find(x => x.id === type_id);
-  const ymRaw = document.getElementById('r_period_ym')?.value || '';
+  let ymRaw = document.getElementById('r_period_ym')?.value || '';
+  /* 기간 라벨이 '2026-10' 같은 월이면 정산 월을 거기에 맞춘다.
+     둘이 어긋나면 (라벨 2026-10 · 정산월 202609) 화면마다 다른 달이 보이고
+     '확인 필요' 가 안 없어진다. (2026-10-23 실측) */
+  if(tSel?.period === 'MONTHLY' && /^20\d{2}-(0[1-9]|1[0-2])$/.test(period_label)){
+    ymRaw = period_label;
+  }
   const period_ym = tSel?.period === 'MONTHLY' ? (ymRaw.replace('-', '') || null) : null;
   if(tSel?.period === 'MONTHLY' && !period_ym){
     alert('월단위 정산유형입니다. 정산 월을 선택해주세요.'); return;
