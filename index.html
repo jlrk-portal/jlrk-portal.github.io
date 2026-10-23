@@ -1133,7 +1133,7 @@
    두 벌이며, 검증에서 확인된 변경만 운영으로 복사한다.              */
 /* 빌드 시각 — 배포할 때 스크립트가 갈아끼운다. 캐시된 옛 화면으로
    적재하면 결과가 달라지므로 화면에 띄워 확인할 수 있게 한다. */
-const BUILD = '10-23 23:35';
+const BUILD = '10-24 00:16';
 document.addEventListener('DOMContentLoaded', () => {
   const el = document.getElementById('buildStamp');
   if(el) el.textContent = 'build ' + BUILD;
@@ -14885,7 +14885,7 @@ async function noticeRawSheets(round, type, claims){
     const sm = round.source_summary || {};
     const from = sm.from, to = sm.to;
     if(from && to){
-      const { data, error } = await sb.rpc('asap_lines',
+      const { data, error } = await sb.rpc('asap_lines_admin',
         { p_from: from, p_to: to, p_round: round.id });
       if(error) console.warn('[ASAP 원본]', error.message);
       const L = data || [];
@@ -14907,7 +14907,7 @@ async function noticeRawSheets(round, type, claims){
         incentive: Math.round(Number(x.cost_sum) * Number(x.rate)),
         excluded: x.excluded || '' })) });
       // 인원별도 같이 (결재·공지에 바로 쓰게)
-      const sum = await sb.rpc('asap_summary', { p_from: from, p_to: to, p_round: round.id });
+      const sum = await sb.rpc('asap_summary_admin', { p_from: from, p_to: to, p_round: round.id });
       if(!sum.error && (sum.data||[]).length) out.push({ sheet:'인원별 금액', columns:[
         { key:'scope', label:'구분', w:9, align:'center' },
         { key:'branch', label:'지점/전시장', w:18 }, { key:'person', label:'담당자', w:12 },
