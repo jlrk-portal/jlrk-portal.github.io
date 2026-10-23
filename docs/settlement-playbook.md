@@ -66,7 +66,7 @@ IQM 차량마스터        ADMIN_UP: 관리자 배포    리테일러 이의    
 | `ONE_CARE_INCENTIVE` | AP/분기/법인 | ADMIN_UPLOAD | `ADMIN_UPLOAD` | X | `renderAdminUploadSection` | `renderAdminUploadRetailerCard` |
 | `Pick up & Delivery` | AP/분기/**지점** | UPLOAD | `PND_REVIEW` | O | `renderPndRoundDetail` | `renderPndRetailerCard` |
 | `Recall Upselling` | AP/분기/지점 | UPLOAD | — | O | `renderCampaignRoundDetail` | `renderCampaignRetailerCards` |
-| `Summer Campaign` | AP/연/지점 | UPLOAD | — | X | 〃 | 〃 |
+| `Summer Campaign` | AP/연/지점 | UPLOAD | — | **X ⚠** | 〃 | 〃 |
 
 **화면 분기 지점 두 곳만 기억하면 된다.**
 
@@ -80,7 +80,87 @@ IQM 차량마스터        ADMIN_UP: 관리자 배포    리테일러 이의    
 
 ---
 
-## 4. 청구방식 (amount_mode) 4+1 가지
+## 4. 청구방식 — 큰 틀은 두 가지다
+
+> 매니저 정의(2026-10-23). **새 정산은 반드시 이 둘 중 하나로 시작한다.**
+> `amount_mode` 는 이 두 흐름을 코드로 표현한 것일 뿐이다.
+
+### 방식 1 — 시스템 산출형 (JLRK 가 계산해서 배포)
+
+```
+소스 인입 (JLRK)
+  → 시스템 안에서 검증 (JLRK)
+  → 리테일러에 배포 (JLRK)
+  → 리뷰 (리테일러)
+  → [필요 시] 이의제기 (리테일러)
+  → 수정반영 or 반송 (JLRK)
+  → 확정 (JLRK)
+  → 세금계산서 발행 요청 (JLRK)            ← 발행 항목일 때만
+  → 세금계산서 발행 후 PDF 업로드 (리테일러)  ← 〃
+  → 바우처 작성 (JLRK)
+```
+해당: ASAP Incentive · Engine Oil 3종 · One DMS · One Care
+코드상 `amount_mode = SYSTEM` (One Care·ASAP 은 과도기로 `ADMIN_UPLOAD`)
+
+### 방식 2 — 정산서 청구형 (리테일러가 적어서 청구)
+
+```
+정산서(양식) 업로드 (JLRK)
+  → 정산서에 기록해서 청구 (리테일러)
+  → 시스템 안에 있는 소스로 검증 (JLRK)      ★ 여기가 핵심
+  → 리뷰 (리테일러)
+  → [필요 시] 이의제기 (리테일러)
+  → 수정반영 or 반송 (JLRK)
+  → 확정 (JLRK)
+  → 세금계산서 발행 요청 (JLRK)
+  → 세금계산서 발행 후 PDF 업로드 (리테일러)
+  → 바우처 작성 (JLRK)
+```
+해당: Summer Campaign · Recall Upselling · Welcome Back · Seasonal Part Promotion ·
+P&D · ASAP 전시차 지원
+코드상 `amount_mode = UPLOAD`
+
+> ★ **방식 2 의 검증은 "리테일러가 적어온 값 vs 시스템이 가진 소스" 대조다.**
+> 양식을 받아 보관만 하는 것은 방식 2 가 아니다. 캠페인이 청구 라인을 Turn Over 마감과
+> 맞춰보는 것(`campaign_lines.checks`)이 제대로 된 모양이고, P&D 는 아직 엑셀에 적힌
+> O/X 를 읽기만 해서 여기에 못 미친다.
+
+### 두 방식이 공유하는 꼬리
+
+`리뷰 → 이의제기 → 수정반영/반송 → 확정 → 세금계산서 → 바우처` 는 **완전히 같다.**
+그래서 이 구간은 유형마다 새로 만들지 말고 공통 부품으로 뽑아야 한다 (8장 빚 2번).
+
+---
+
+## 4-B. 세금계산서 발행 여부 — 유형을 만들 때 가장 먼저 정한다
+
+> 매니저 기준: **인센티브·수수료 성격은 미발행, 지원금 성격은 발행.**
+
+| | 성격 | 세금계산서 | 해당 유형 |
+|---|---|---|---|
+| **미발행** | 인센티브 · 라이선스 · 패키지 수수료 | X | ASAP Incentive · Engine Oil RS/SI/SP · One DMS License · One Care Incentive |
+| **발행** | 지원금 (JLRK 가 비용을 분담) | O | Summer Campaign · Recall Upselling · Welcome Back · Seasonal Part Promotion · P&D · ASAP 전시차 지원 |
+
+- 설정 위치: `settlement_types.requires_invoice`
+- 이 값이 `true` 면 확정 뒤 **세금계산서 접수 단계(`INVOICED`)가 생기고**,
+  `invoices` 행이 만들어지며, 리테일러 화면에 PDF 업로드 칸이 열린다
+- `false` 면 확정 → 바로 바우처
+- **세금계산서는 언제나 법인(리테일러)×회차 1장.** `claim_unit` 이 지점 단위여도 마찬가지다
+
+### ⚠ 지금 값이 기준과 어긋난 것 (2026-10-23 운영 실측)
+
+```
+Summer Campaign        -> 미발행   ← 지원금인데 미발행. 형제 유형과 어긋난다
+Recall Upselling       -> 발행
+Welcome Back Campaign  -> 발행
+Seasonal Part Promotion-> 발행
+```
+같은 지원금 계열에서 Summer Campaign 만 미발행이다. 과거 회차를 실제로 어떻게 처리했는지
+확인한 뒤 고쳐야 한다 (이미 끝난 회차의 흐름이 바뀌므로 임의로 못 바꾼다).
+
+---
+
+## 4-C. amount_mode — 위 두 방식을 코드로 쓴 것
 
 ### ① `UPLOAD` — 리테일러가 엑셀을 올린다
 흐름: `DRAFT → OPEN(청구 접수) → CLOSED → CONFIRMED(확정 공지) → INVOICED → VOUCHERED`
@@ -186,23 +266,34 @@ asap_line_requests    리테일러 신청: 판매자 정정 / 이의신청
 
 ## 7. 새 정산을 만들 때 — 내가 따를 표준
 
-### 7-1. 청구방식 결정 트리
+### 7-1. 가장 먼저 정하는 두 가지
+
+**Q1. 세금계산서 발행 항목인가?** (4-B)
+- 인센티브·라이선스·수수료 성격 → **미발행** (`requires_invoice = false`)
+- 지원금 성격(JLRK 가 비용 분담) → **발행** (`requires_invoice = true`)
+- 이걸 먼저 정해야 회차 상태 흐름과 리테일러 화면 구성이 갈린다. 나중에 바꾸면
+  이미 진행된 회차의 단계가 어긋난다
+
+**Q2. 방식 1 인가 방식 2 인가?** (4장)
 
 ```
-Q1. 금액을 JLRK 가 가진 데이터만으로 계산할 수 있나?
-    ├ 예 → SYSTEM.  리테일러는 '확인만'.          ← 기본값. 가능하면 무조건 이쪽
-    └ 아니오
-        Q2. 리테일러만 아는 정보가 필요한가? (현장 사진·고객 사인·외부 비용)
-            ├ 예 → UPLOAD.  양식을 포털이 주고 파싱까지 책임진다
-            └ 아니오
-                Q3. 단순 수량 × 단가인가?
-                    ├ 예 → UNIT
-                    └ 아니오 → ADMIN_UPLOAD (임시). 다음 분기에 SYSTEM 으로 올릴 계획을 같이 세운다
+금액을 JLRK 가 가진 소스만으로 계산할 수 있나?
+ ├ 예    → 방식 1 (시스템 산출형, SYSTEM)     ← 기본값. 가능하면 무조건 이쪽
+ └ 아니오
+     리테일러만 아는 정보가 필요한가? (현장 사진·고객 사인·외부 비용·리테일러 단가)
+      ├ 예   → 방식 2 (정산서 청구형, UPLOAD)
+      │        + 반드시 "시스템 소스로 대조하는 검증"을 같이 설계한다
+      └ 아니오 → 단순 수량×단가? → UNIT
+                  아니면 ADMIN_UPLOAD (임시) + 다음 분기 방식 1 전환 계획을 같이 세움
 ```
 
-**SYSTEM 을 기본값으로 두는 이유** — ASAP 이 ADMIN_UPLOAD → SYSTEM 으로 옮겨오면서
+**방식 1 을 기본값으로 두는 이유** — ASAP 이 ADMIN_UPLOAD → SYSTEM 으로 옮겨오면서
 매니저 수작업이 사라졌고, 리테일러가 라인을 직접 보고 다툴 수 있게 됐다. 같은 전환을
 One Care 에도 적용할 수 있는지 먼저 본다.
+
+**방식 2 를 고를 때의 의무** — 양식을 받아 보관만 하면 안 된다. 리테일러가 적어온 값을
+무엇과 대조할지(Turn Over 마감·부품가격 마스터·IQM·대상 차대 목록)를 유형을 만들 때
+같이 정한다. 대조할 소스가 없으면 그 정산은 검증이 불가능하다는 뜻이다.
 
 ### 7-2. 검증방식 — 3층으로 나눠 만든다
 
@@ -260,6 +351,9 @@ One Care 에도 적용할 수 있는지 먼저 본다.
 ### 7-5. 새 정산 체크리스트
 
 ```
+□ ① 세금계산서 발행 여부 결정 (requires_invoice) — 인센티브/수수료 X, 지원금 O
+□ ② 방식 1(시스템 산출형) / 방식 2(정산서 청구형) 결정
+□ 방식 2 라면: 리테일러 입력값을 무엇과 대조할지 (Turn Over·부품가격·IQM·차대목록) 명시
 □ settlement_types 행 (code/name/direction/period/claim_unit/amount_mode/
                         source_config.preset/vat_code/budget_category/requires_invoice)
 □ 원천 테이블 + 적재 화면 (raw json 포함, 월/분기 재적재 가능)
