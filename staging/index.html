@@ -11649,6 +11649,12 @@ function ymFromSrName(name){
    RPC 가 아직 없는 환경에서는 예전처럼 한 번에 지운다. */
 /* 타임아웃이 나면 묶음을 반으로 줄여 다시 보낸다. 중간에 죽으면
    그 달이 반만 들어간 채로 남아 더 나쁘다. (2026-10-23) */
+/* 겹치면 건너뛸 때 집을 열. 045 의 유니크 조합 그대로다 (058). */
+const DEDUP_COLS = {
+  turnover_lines:     'stl_no,stl_line,part_no,claim_acct,inv_no,item_type',
+  sales_report_lines: 'ym,vin,retail_date',
+};
+
 async function insertRetry(table, rows, label){
   let size = rows.length;
   for(let at = 0; at < rows.length; ){
@@ -11656,13 +11662,14 @@ async function insertRetry(table, rows, label){
     // 같은 정산라인이 여러 달 파일에 겹쳐 들어온다 — 겹치면 건너뛴다.
     // (그냥 insert 하면 겹치는 줄 하나에 묶음 전체가 터진다)
     const { error } = await sb.from(table)
-      .upsert(slice, { onConflict: 'dedup_key', ignoreDuplicates: true });
+      .upsert(slice, { onConflict: DEDUP_COLS[table], ignoreDuplicates: true });
     if(!error){ at += slice.length; continue; }
     const msg = error.message || '';
     if(/timeout|57014|canceling statement/i.test(msg) && size > 125){
       size = Math.floor(size / 2); continue;
     }
-    if(/dedup_key/.test(msg) && /column|does not exist|42703|PGRST204/i.test(msg)){
+    // 유니크 인덱스가 아직 옛 식(式) 인덱스면 on conflict 가 붙지 않는다
+    if(/no unique|exclusion constraint|42P10|ON CONFLICT/i.test(msg)){
       throw new Error(`${label} 적재 실패 — 058 마이그레이션(겹치면 건너뛰기)을 먼저 돌려주세요.`);
     }
     throw new Error(`${label} 적재 실패: ${msg}`);
