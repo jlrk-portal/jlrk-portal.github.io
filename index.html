@@ -4997,6 +4997,14 @@ async function eo3vFillTemplate(tplBuf, { inputFills, coverDate, relabel }){
     zip.file(p, xml);
   }
 
+  /* 합계행이 수식이다. 캐시된 옛 값이 보이지 않게 열 때 다시 계산시킨다. */
+  if(!/fullCalcOnLoad/.test(wbXml)){
+    wbXml = /<calcPr[^>]*\/>/.test(wbXml)
+      ? wbXml.replace(/<calcPr([^>]*)\/>/, '<calcPr$1 fullCalcOnLoad="1"/>')
+      : wbXml.replace('</workbook>', '<calcPr fullCalcOnLoad="1"/></workbook>');
+    zip.file('xl/workbook.xml', wbXml);
+  }
+
   // 표지 Invoice Date (E21)
   const cp = pathOf('AP without PO');
   if(cp && zip.file(cp) && coverDate != null){
@@ -5038,6 +5046,54 @@ function eoVoucherPeriod(round){
   const fy = (mo >= 4 ? y + 1 : y) - 2000;            // 4월 시작
   const q  = Math.floor(((mo - 4 + 12) % 12) / 3) + 1; // 4~6=Q1
   return { ym: vym, label: `FY${fy} Q${q}` };
+}
+
+/* Claim 시트에서 업체코드가 있는 열과 각 코드의 행을 찾는다.
+   템플릿마다 한 칸씩 밀려 있어 고정 열을 쓸 수 없다. (2026-10-23) */
+function eo3vMapClaimRows(wb, sheetName = 'Claim'){
+  const ws = wb.Sheets[sheetName];
+  if(!ws || !ws['!ref']) return null;
+  const R = XLSX.utils.decode_range(ws['!ref']);
+  const hits = new Map();           // 열 → [{code, row}]
+  for(let c = R.s.c; c <= R.e.c; c++){
+    for(let r = R.s.r; r <= R.e.r; r++){
+      const cell = ws[XLSX.utils.encode_cell({ r, c })];
+      const v = cell ? String(cell.v ?? '').trim() : '';
+      if(/^KRJD\d+$/.test(v)){
+        if(!hits.has(c)) hits.set(c, []);
+        hits.get(c).push({ code: v, row: r });
+      }
+    }
+  }
+  if(!hits.size) return null;
+  // 코드가 가장 많이 들어 있는 열이 코드 열이다
+  const [col, list] = [...hits.entries()].sort((a,b) => b[1].length - a[1].length)[0];
+  const rows = {};
+  list.forEach(x => { rows[x.code] = x.row; });
+  return { col, rows };
+}
+
+/* Claim 시트에 채울 셀을 만든다. 실적 없는 지점은 0 으로 덮는다 —
+   템플릿이 직전 회차 바우처라 안 덮으면 옛 금액이 남는다. */
+function eo3vClaimCells(map, rmap){
+  const cells = {};
+  const put = (r, dc, v) => { cells[XLSX.utils.encode_cell({ r, c: map.col + dc })] = v; };
+  const R = n => Math.round(n || 0);
+  Object.entries(map.rows).forEach(([code, r]) => {
+    const v = rmap[code] || {};
+    const jg = { n: R(v.count?.jg), cu: R(v.customer?.jg), vm: R(v.vme?.jg), ca: R(v.castrol?.jg) };
+    const lr = { n: R(v.count?.lr), cu: R(v.customer?.lr), vm: R(v.vme?.lr), ca: R(v.castrol?.lr) };
+    put(r, 3, jg.n); put(r, 4, jg.cu); put(r, 5, jg.vm); put(r, 6, jg.ca);
+    put(r, 7, lr.n); put(r, 8, lr.cu); put(r, 9, lr.vm); put(r,10, lr.ca);
+    put(r,11, jg.cu + jg.vm + jg.ca + lr.cu + lr.vm + lr.ca);   // 최종 입금 금액
+    // 오른쪽 표 — 브랜드 합계. JLRK 부담 = VME + Castrol
+    put(r,15, jg.n  + lr.n);
+    put(r,16, jg.cu + lr.cu);
+    put(r,17, jg.vm + lr.vm);
+    put(r,18, jg.ca + lr.ca);
+    put(r,19, jg.vm + lr.vm + jg.ca + lr.ca);
+  });
+  return cells;
 }
 
 async function generateEngineOilVouchers(round, type){
@@ -5086,6 +5142,8 @@ async function generateEngineOilVouchers(round, type){
     s.retailers.forEach(rt => rt.workshops.forEach(w => {
       if(!w.vendor_code) return;
       rmap[w.vendor_code] = {
+        // Claim 요약시트에 브랜드별 건수가 들어간다 (키는 count, 옛 데이터는 n)
+        count:    { jg: w.jg?.count ?? w.jg?.n ?? 0, lr: w.lr?.count ?? w.lr?.n ?? 0 },
         customer: { jg: w.jg?.customer||0, lr: w.lr?.customer||0 },
         vme:      { jg: w.jg?.vme||0,      lr: w.lr?.vme||0 },
         castrol:  { jg: w.jg?.castrol||0,  lr: w.lr?.castrol||0 },
@@ -5106,8 +5164,13 @@ async function generateEngineOilVouchers(round, type){
       const rows = eo3vMapInputRows(wb, 'AP_input reqeust');
       const cells = eo3vBlankRows(rows);
       Object.entries(rmap).forEach(([vc, v]) => { const r = rows[vc]; if(!r) return; cells['M'+r] = R(v.customer.jg); cells['N'+r] = R(v.customer.lr); });
+      const cl = eo3vMapClaimRows(wb);
       files.push({ name:`Engine Oil Package_사용반환금_${per}.xlsx`,
-        blob: await eo3vFillTemplate(bufs.saveback, { inputFills: { 'AP_input reqeust': cells }, coverDate: date, relabel: vper }) });
+        blob: await eo3vFillTemplate(bufs.saveback, {
+          inputFills: { 'AP_input reqeust': cells,
+                        ...(cl ? { Claim: eo3vClaimCells(cl, rmap) } : {}) },
+          coverDate: date, relabel: vper }) });
+      if(!cl) console.warn('[Claim 시트를 찾지 못했습니다 — 사용반환금]');
     }
     if(eo.comps.includes('support')){
       const wb = xsFixBook(XLSX.read(new Uint8Array(bufs.support), { type:'array' }));
@@ -5118,16 +5181,25 @@ async function generateEngineOilVouchers(round, type){
         if(rV[vc]){ cV['M'+rV[vc]] = R(v.vme.jg); cV['N'+rV[vc]] = R(v.vme.lr); }
         if(rC[vc]){ cC['M'+rC[vc]] = R(v.castrol.jg); cC['N'+rC[vc]] = R(v.castrol.lr); }
       });
+      const clS = eo3vMapClaimRows(wb);
       files.push({ name:`Engine Oil Package_Retailer Support_${per}.xlsx`,
-        blob: await eo3vFillTemplate(bufs.support, { inputFills: { 'AP_input reqeust (VME)': cV, 'AP_input reqeust (Castrol)': cC }, coverDate: date, relabel: vper }) });
+        blob: await eo3vFillTemplate(bufs.support, {
+          inputFills: { 'AP_input reqeust (VME)': cV, 'AP_input reqeust (Castrol)': cC,
+                        ...(clS ? { Claim: eo3vClaimCells(clS, rmap) } : {}) },
+          coverDate: date, relabel: vper }) });
+      if(!clS) console.warn('[Claim 시트를 찾지 못했습니다 — Retailer Support]');
     }
     if(eo.comps.includes('incentive')){
       const wb = xsFixBook(XLSX.read(new Uint8Array(bufs.incentive), { type:'array' }));
       const rows = eo3vMapInputRows(wb, 'AP_input reqeust');
       const cells = eo3vBlankRows(rows);
       Object.entries(rmap).forEach(([vc, v]) => { const r = rows[vc]; if(!r || !v.incentive) return; cells['I'+r] = R(v.incentive); });
+      const clI = eo3vMapClaimRows(wb);
       files.push({ name:`Engine Oil Package_Sales Incentive_${per}.xlsx`,
-        blob: await eo3vFillTemplate(bufs.incentive, { inputFills: { 'AP_input reqeust': cells }, coverDate: date, relabel: vper }) });
+        blob: await eo3vFillTemplate(bufs.incentive, {
+          inputFills: { 'AP_input reqeust': cells,
+                        ...(clI ? { Claim: eo3vClaimCells(clI, rmap) } : {}) },
+          coverDate: date, relabel: vper }) });
     }
 
     for(const f of files){
